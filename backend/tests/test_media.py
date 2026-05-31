@@ -86,3 +86,19 @@ def test_stream_supports_range(client, tmp_path, monkeypatch):
 def test_missing_media_404(client):
     token = _register(client, "a@x.com")
     assert client.get("/media/999/download", headers=_auth(token)).status_code == 404
+
+
+def test_upload_too_large_413(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_MAX_UPLOAD_BYTES", "4")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    token = _register(client, "a@x.com")
+    r = client.post(
+        "/media/upload",
+        headers=_auth(token),
+        files={"file": ("clip.mp4", io.BytesIO(b"too-many-bytes"), "video/mp4")},
+    )
+    assert r.status_code == 413
+    get_settings.cache_clear()

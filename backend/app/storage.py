@@ -7,6 +7,10 @@ from .config import get_settings
 _CHUNK = 1024 * 1024
 
 
+class UploadTooLarge(Exception):
+    pass
+
+
 def _ext(filename: str) -> str:
     return Path(filename).suffix.lower().lstrip(".")
 
@@ -21,6 +25,7 @@ def save_upload(file_obj: BinaryIO, original_name: str) -> tuple[str, int, str]:
     stored_name = f"{uuid.uuid4().hex}.{fmt}" if fmt else uuid.uuid4().hex
     stored_path = upload_dir / stored_name
 
+    max_bytes = settings.max_upload_bytes
     size = 0
     with open(stored_path, "wb") as out:
         while True:
@@ -28,6 +33,10 @@ def save_upload(file_obj: BinaryIO, original_name: str) -> tuple[str, int, str]:
             if not chunk:
                 break
             size += len(chunk)
+            if size > max_bytes:
+                out.close()
+                stored_path.unlink(missing_ok=True)
+                raise UploadTooLarge()
             out.write(chunk)
 
     return str(stored_path), size, fmt

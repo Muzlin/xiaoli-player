@@ -7,6 +7,7 @@ from . import storage
 from .auth import get_current_user
 from .db import get_session
 from .models import MediaFile, User
+from .storage import UploadTooLarge
 
 router = APIRouter(prefix="/media", tags=["media"])
 
@@ -44,7 +45,10 @@ def upload(
     user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
-    stored_path, size, fmt = storage.save_upload(file.file, file.filename)
+    try:
+        stored_path, size, fmt = storage.save_upload(file.file, file.filename)
+    except UploadTooLarge:
+        raise HTTPException(status_code=413, detail="File too large")
     media = MediaFile(
         owner_id=user.id,
         original_name=file.filename,
