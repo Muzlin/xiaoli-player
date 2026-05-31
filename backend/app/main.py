@@ -23,7 +23,7 @@ async def lifespan(app: FastAPI):
     yield
 
 
-app = FastAPI(title="Media Platform", lifespan=lifespan)
+app = FastAPI(title="小李播放器", lifespan=lifespan)
 
 
 app.include_router(auth_router)

@@ -804,7 +804,7 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('登录')),
+      appBar: AppBar(title: const Text('小李播放器')),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -1359,7 +1359,7 @@ class _MediaAppState extends State<MediaApp> {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: '媒体平台',
+      title: '小李播放器',
       theme: ThemeData(useMaterial3: true),
       home: _user == null
           ? LoginScreen(api: _api, auth: _auth, onSignedIn: _onSignedIn)
