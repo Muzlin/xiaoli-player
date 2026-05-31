@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
@@ -56,9 +58,14 @@ def upload(
         size_bytes=size,
         container_format=fmt,
     )
-    session.add(media)
-    session.commit()
-    session.refresh(media)
+    try:
+        session.add(media)
+        session.commit()
+        session.refresh(media)
+    except Exception:
+        # Avoid leaving an orphaned file on disk if the DB write fails.
+        Path(stored_path).unlink(missing_ok=True)
+        raise
     return _to_response(media)
 
 

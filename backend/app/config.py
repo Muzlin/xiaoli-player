@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="APP_")
 
     secret_key: str = "dev-secret-change-me"
+    dev_mode: bool = True
     access_token_expire_minutes: int = 60 * 24
     upload_dir: str = "uploads"
     max_upload_bytes: int = 2 * 1024 * 1024 * 1024  # 2 GiB

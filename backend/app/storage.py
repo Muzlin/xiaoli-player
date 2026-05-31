@@ -27,6 +27,7 @@ def save_upload(file_obj: BinaryIO, original_name: str) -> tuple[str, int, str]:
 
     max_bytes = settings.max_upload_bytes
     size = 0
+    too_large = False
     with open(stored_path, "wb") as out:
         while True:
             chunk = file_obj.read(_CHUNK)
@@ -34,9 +35,13 @@ def save_upload(file_obj: BinaryIO, original_name: str) -> tuple[str, int, str]:
                 break
             size += len(chunk)
             if size > max_bytes:
-                out.close()
-                stored_path.unlink(missing_ok=True)
-                raise UploadTooLarge()
+                too_large = True
+                break
             out.write(chunk)
+
+    if too_large:
+        # The `with` block above has already closed the file.
+        stored_path.unlink(missing_ok=True)
+        raise UploadTooLarge()
 
     return str(stored_path), size, fmt

@@ -102,3 +102,36 @@ def test_upload_too_large_413(client, tmp_path, monkeypatch):
     )
     assert r.status_code == 413
     get_settings.cache_clear()
+
+
+def test_other_user_cannot_stream_403(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_UPLOAD_DIR", str(tmp_path))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    _register(client, "admin@x.com")  # first user = admin
+    user = _register(client, "u@x.com")
+    other = _register(client, "o@x.com")  # non-owner, non-admin
+    media_id = _upload(client, user).json()["id"]
+
+    assert client.get(f"/media/{media_id}/stream", headers=_auth(other)).status_code == 403
+    assert client.get(f"/media/{media_id}/stream", headers=_auth(user)).status_code == 200
+    get_settings.cache_clear()
+
+
+def test_expired_token_yields_401(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_UPLOAD_DIR", str(tmp_path))
+    monkeypatch.setenv("APP_ACCESS_TOKEN_EXPIRE_MINUTES", "-1")  # already expired
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    from app.security import create_access_token
+
+    # Mint a token that expired in the past via the negative-expiry setting.
+    expired = create_access_token("1")
+
+    r = client.get("/auth/me", headers={"Authorization": f"Bearer {expired}"})
+    assert r.status_code == 401
+    # Clear the cache AFTER the request so the expired setting does not leak
+    # into later tests (the request itself repopulates the lru_cache).
+    get_settings.cache_clear()

@@ -35,8 +35,10 @@ class UserResponse(BaseModel):
 
 def _assign_role(session: Session, email: str) -> str:
     settings = get_settings()
-    if settings.admin_email and email == settings.admin_email:
-        return "admin"
+    if settings.admin_email:
+        # When an admin email is configured, ONLY that email is admin.
+        return "admin" if email == settings.admin_email else "user"
+    # Otherwise, the first registered user becomes admin.
     first_user = session.exec(select(User)).first()
     return "admin" if first_user is None else "user"
 
@@ -69,7 +71,11 @@ def get_current_user(
     subject = decode_access_token(token)
     if subject is None:
         raise HTTPException(status_code=401, detail="Invalid token")
-    user = session.get(User, int(subject))
+    try:
+        user_id = int(subject)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    user = session.get(User, user_id)
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
     return user
