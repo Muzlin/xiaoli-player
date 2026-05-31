@@ -48,3 +48,41 @@ def test_user_lists_only_own_files(client, tmp_path, monkeypatch):
     admin_list = client.get("/media", headers=_auth(admin)).json()
     assert len(admin_list) == 2  # admin sees all
     get_settings.cache_clear()
+
+
+def test_other_user_cannot_download_403(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_UPLOAD_DIR", str(tmp_path))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    admin = _register(client, "admin@x.com")
+    user = _register(client, "u@x.com")
+    other = _register(client, "o@x.com")
+    media_id = _upload(client, user).json()["id"]
+
+    assert client.get(f"/media/{media_id}/download", headers=_auth(other)).status_code == 403
+    assert client.get(f"/media/{media_id}/download", headers=_auth(user)).status_code == 200
+    assert client.get(f"/media/{media_id}/download", headers=_auth(admin)).status_code == 200
+    get_settings.cache_clear()
+
+
+def test_stream_supports_range(client, tmp_path, monkeypatch):
+    monkeypatch.setenv("APP_UPLOAD_DIR", str(tmp_path))
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    token = _register(client, "a@x.com")
+    media_id = _upload(client, token).json()["id"]
+
+    r = client.get(
+        f"/media/{media_id}/stream",
+        headers={**_auth(token), "Range": "bytes=0-1"},
+    )
+    assert r.status_code == 206
+    assert r.headers["content-range"].startswith("bytes 0-1/")
+    get_settings.cache_clear()
+
+
+def test_missing_media_404(client):
+    token = _register(client, "a@x.com")
+    assert client.get("/media/999/download", headers=_auth(token)).status_code == 404
