@@ -54,4 +54,20 @@ void main() {
 
     expect(find.textContaining('登录失败'), findsOneWidget);
   });
+
+  testWidgets('register button calls /auth/register', (tester) async {
+    String? path;
+    final mock = MockClient((req) async {
+      path = req.url.path;
+      return http.Response(jsonEncode({'access_token': 'tok'}), 200);
+    });
+    final api = ApiClient(baseUrl: 'http://h', client: mock);
+    final auth = AuthStore(storage: FakeStorage());
+    await tester.pumpWidget(MaterialApp(
+      home: LoginScreen(api: api, auth: auth, onSignedIn: () {}),
+    ));
+    await tester.tap(find.byKey(const Key('register')));
+    await tester.pumpAndSettle();
+    expect(path, '/auth/register');
+  });
 }

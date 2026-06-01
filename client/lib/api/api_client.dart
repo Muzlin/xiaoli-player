@@ -77,6 +77,14 @@ class ApiClient {
     return MediaItem.fromJson(jsonDecode(r.body));
   }
 
+  /// 下载文件字节（带鉴权头），属主或管理员可用。
+  Future<List<int>> downloadBytes(int mediaId) async {
+    final r = await _http.get(_uri('/media/$mediaId/download'),
+        headers: authHeaders());
+    _ensureOk(r);
+    return r.bodyBytes;
+  }
+
   String streamUrl(int mediaId) => '$baseUrl/media/$mediaId/stream';
   String downloadUrl(int mediaId) => '$baseUrl/media/$mediaId/download';
 }

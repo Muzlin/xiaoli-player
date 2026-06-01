@@ -9,12 +9,16 @@ class LibraryScreen extends StatefulWidget {
   final ApiClient api;
   final UserInfo user;
   final void Function(MediaItem) onPlay;
+  final void Function(MediaItem)? onDownload;
+  final VoidCallback? onSessionExpired;
 
   const LibraryScreen({
     super.key,
     required this.api,
     required this.user,
     required this.onPlay,
+    this.onDownload,
+    this.onSessionExpired,
   });
 
   @override
@@ -34,7 +38,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Future<void> _openLocal() async {
     final result = await FilePicker.platform.pickFiles();
-    final path = result?.files.single.path;
+    if (result == null || result.files.isEmpty) return;
+    final path = result.files.first.path;
     if (path == null || !mounted) return;
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -65,7 +70,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
             return const Center(child: CircularProgressIndicator());
           }
           if (snapshot.hasError) {
-            return Center(child: Text('加载失败：${snapshot.error}'));
+            final error = snapshot.error;
+            // token 失效 → 引导回登录页。
+            if (error is ApiException &&
+                error.statusCode == 401 &&
+                widget.onSessionExpired != null) {
+              WidgetsBinding.instance
+                  .addPostFrameCallback((_) => widget.onSessionExpired!());
+            }
+            return Center(child: Text('加载失败：$error'));
           }
           final items = snapshot.data!;
           if (items.isEmpty) {
@@ -82,7 +95,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
                       ? IconButton(
                           icon: const Icon(Icons.download),
                           tooltip: '下载',
-                          onPressed: () {},
+                          onPressed: widget.onDownload == null
+                              ? null
+                              : () => widget.onDownload!(m),
                         )
                       : null,
                   onTap: () => widget.onPlay(m),
