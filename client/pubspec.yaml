@@ -39,9 +39,10 @@ dependencies:
   media_kit: ^1.1.10
   media_kit_video: ^1.2.4
   media_kit_libs_video: ^1.0.4
-  # 选文件、本地持久化
+  # 选文件、本地持久化、联网搜索
   file_picker: ^8.1.2
   shared_preferences: ^2.3.2
+  http: ^1.2.0
 
 dev_dependencies:
   flutter_test:
