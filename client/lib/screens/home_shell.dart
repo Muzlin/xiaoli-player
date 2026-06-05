@@ -1,22 +1,36 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../player/playback_source.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
 
-/// 一首本地曲目。
-class LocalTrack {
-  final String path;
+/// 一首曲目：本地文件或在线 URL。
+class Track {
   final String name;
-  final String ext;
-  LocalTrack(this.path)
-      : name = path.split(Platform.pathSeparator).last,
-        ext = path.contains('.') ? path.split('.').last.toUpperCase() : '';
+  final String? localPath;
+  final String? url;
+
+  Track.local(this.localPath)
+      : name = localPath!.split(Platform.pathSeparator).last,
+        url = null;
+
+  Track.online(this.name, this.url) : localPath = null;
+
+  bool get isLocal => localPath != null;
+
+  String get ext {
+    final src = localPath ?? url ?? '';
+    return src.contains('.') ? src.split('.').last.split('?').first.toUpperCase() : '';
+  }
+
+  PlaybackSource toSource() => isLocal
+      ? PlaybackSource.local(localPath!)
+      : PlaybackSource.stream(url!, const {}, title: name);
 }
 
-/// 桌面音乐播放器风格主界面：左侧导航 + 顶部搜索 + 本地媒体列表 + 底部播放条。
-/// 纯本地，无账号、无服务器。
+/// 桌面音乐播放器风格主界面：左侧导航 + 顶部搜索 + 列表（热门+本地）+ 底部播放条。
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -25,18 +39,59 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  final List<LocalTrack> _tracks = [];
-  LocalTrack? _current;
+  /// 内置热门歌曲（免费可在线播放的示例曲目）。
+  static final List<Track> _hotTracks = [
+    Track.online('钢琴轻音乐 · Demo',
+        'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3'),
+    Track.online('电子节拍 · Demo',
+        'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3'),
+    Track.online('吉他旋律 · Demo',
+        'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3'),
+    Track.online('流行节奏 · Demo',
+        'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3'),
+    Track.online('放松音乐 · Demo',
+        'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3'),
+  ];
+
+  final List<Track> _localTracks = [];
+  Track? _current;
   String _query = '';
   int _navIndex = 0;
 
   static const _sidebarColor = Color(0xFF2B2B33);
   static const _topbarColor = Color(0xFF35353F);
 
+  List<Track> get _allTracks => [..._hotTracks, ..._localTracks];
+
+  static const _prefsKey = 'local_tracks_v1';
+
   @override
   void initState() {
     super.initState();
+    _loadSaved();
     WidgetsBinding.instance.addPostFrameCallback((_) => _showDisclaimer());
+  }
+
+  /// 启动时加载已保存的本地音乐（文件仍存在的才加入）。
+  Future<void> _loadSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final paths = prefs.getStringList(_prefsKey) ?? [];
+    if (!mounted) return;
+    setState(() {
+      for (final p in paths) {
+        if (File(p).existsSync() &&
+            !_localTracks.any((t) => t.localPath == p)) {
+          _localTracks.add(Track.local(p));
+        }
+      }
+    });
+  }
+
+  /// 保存本地音乐路径列表。
+  Future<void> _saveLocal() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+        _prefsKey, _localTracks.map((t) => t.localPath!).toList());
   }
 
   Future<void> _showDisclaimer() async {
@@ -48,7 +103,8 @@ class _HomeShellState extends State<HomeShell> {
         content: const SingleChildScrollView(
           child: Text(
             '「小李播放器」是一款本地媒体播放器，仅供学习与个人使用。\n\n'
-            '请勿用于任何商业或侵权用途；使用本软件产生的一切后果由使用者自行承担。\n\n'
+            '内置「热门歌曲」为免费示例曲目；请勿用于任何商业或侵权用途，'
+            '使用本软件产生的一切后果由使用者自行承担。\n\n'
             '点击「同意」即表示你已阅读并接受以上条款。',
           ),
         ),
@@ -67,31 +123,33 @@ class _HomeShellState extends State<HomeShell> {
     if (r == null) return;
     setState(() {
       for (final f in r.files) {
-        if (f.path != null && !_tracks.any((t) => t.path == f.path)) {
-          _tracks.add(LocalTrack(f.path!));
+        if (f.path != null && !_localTracks.any((t) => t.localPath == f.path)) {
+          _localTracks.add(Track.local(f.path!));
         }
       }
     });
+    await _saveLocal();
   }
 
-  void _play(LocalTrack t) {
+  void _play(Track t) {
     setState(() => _current = t);
     Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) =>
-          PlayerScreen(source: PlaybackSource.local(t.path)),
+      builder: (_) => PlayerScreen(source: t.toSource()),
     ));
   }
 
   void _prev() {
-    if (_current == null || _tracks.isEmpty) return;
-    final i = _tracks.indexOf(_current!);
-    if (i > 0) _play(_tracks[i - 1]);
+    final list = _allTracks;
+    if (_current == null || list.isEmpty) return;
+    final i = list.indexWhere((t) => t.name == _current!.name);
+    if (i > 0) _play(list[i - 1]);
   }
 
   void _next() {
-    if (_current == null || _tracks.isEmpty) return;
-    final i = _tracks.indexOf(_current!);
-    if (i >= 0 && i < _tracks.length - 1) _play(_tracks[i + 1]);
+    final list = _allTracks;
+    if (_current == null || list.isEmpty) return;
+    final i = list.indexWhere((t) => t.name == _current!.name);
+    if (i >= 0 && i < list.length - 1) _play(list[i + 1]);
   }
 
   @override
@@ -161,7 +219,7 @@ class _HomeShellState extends State<HomeShell> {
       child: Row(
         children: [
           const Text(
-            '我的音乐',
+            '音乐',
             style: TextStyle(
               color: Colors.white,
               fontSize: 18,
@@ -176,7 +234,7 @@ class _HomeShellState extends State<HomeShell> {
                 onChanged: (v) => setState(() => _query = v),
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
-                  hintText: '搜索…',
+                  hintText: '搜索歌曲…',
                   hintStyle: const TextStyle(color: Colors.white38),
                   prefixIcon:
                       const Icon(Icons.search, color: Colors.white38, size: 20),
@@ -203,21 +261,18 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Widget _libraryView(ColorScheme cs) {
-    final items = _query.isEmpty
-        ? _tracks
-        : _tracks
-            .where(
-                (t) => t.name.toLowerCase().contains(_query.toLowerCase()))
-            .toList();
+    final q = _query.toLowerCase();
+    final items = q.isEmpty
+        ? _allTracks
+        : _allTracks.where((t) => t.name.toLowerCase().contains(q)).toList();
     if (items.isEmpty) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.library_music, size: 64, color: cs.primary.withOpacity(0.4)),
+            Icon(Icons.search_off, size: 64, color: cs.primary.withOpacity(0.4)),
             const SizedBox(height: 12),
-            const Text('还没有音乐，点右上角「添加文件」',
-                style: TextStyle(color: Colors.black54)),
+            const Text('没有匹配的歌曲', style: TextStyle(color: Colors.black54)),
           ],
         ),
       );
@@ -227,7 +282,7 @@ class _HomeShellState extends State<HomeShell> {
       separatorBuilder: (_, __) => const Divider(height: 1),
       itemBuilder: (context, i) {
         final t = items[i];
-        final selected = t.path == _current?.path;
+        final selected = t.name == _current?.name;
         return InkWell(
           onTap: () => _play(t),
           child: Container(
@@ -240,14 +295,21 @@ class _HomeShellState extends State<HomeShell> {
                   child: Text('${i + 1}',
                       style: const TextStyle(color: Colors.black45)),
                 ),
-                Icon(Icons.music_note, color: cs.primary, size: 20),
+                Icon(t.isLocal ? Icons.music_note : Icons.cloud_outlined,
+                    color: cs.primary, size: 20),
                 const SizedBox(width: 12),
                 Expanded(
                   child: Text(t.name,
                       maxLines: 1, overflow: TextOverflow.ellipsis),
                 ),
+                if (!t.isLocal)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 8),
+                    child: Text('热门',
+                        style: TextStyle(color: Colors.orange, fontSize: 12)),
+                  ),
                 SizedBox(
-                  width: 70,
+                  width: 64,
                   child: Text(t.ext,
                       style: const TextStyle(color: Colors.black45)),
                 ),
@@ -277,15 +339,15 @@ class _HomeShellState extends State<HomeShell> {
           title: Text('小李播放器 v1'),
           subtitle: Text('本地媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
+        const ListTile(
+          leading: Icon(Icons.local_fire_department),
+          title: Text('热门歌曲'),
+          subtitle: Text('内置免费在线示例曲目，打开即可播放'),
+        ),
         ListTile(
           leading: const Icon(Icons.description_outlined),
           title: const Text('免责声明'),
           onTap: _showDisclaimer,
-        ),
-        const ListTile(
-          leading: Icon(Icons.folder_open),
-          title: Text('添加音乐'),
-          subtitle: Text('在「我的音乐」右上角点「添加文件」选择本地媒体'),
         ),
       ],
     );
