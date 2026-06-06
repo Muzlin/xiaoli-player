@@ -17,7 +17,7 @@ class UpdateInfo {
 /// [manifestUrl] 现为占位地址；有了托管（如 GitHub Releases）后替换即可。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.1.3';
+  static const currentVersion = '2.1.4';
 
   /// 更新清单地址（占位）。
   static const manifestUrl = 'https://example.com/xiaoli-player/latest.json';

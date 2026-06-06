@@ -3,26 +3,34 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../player/playback_source.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../services/audius_service.dart';
+import '../player/playback_source.dart';
+import '../services/bilibili_service.dart';
 import '../services/update_service.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
 
-/// 一首曲目：本地文件、内置热门、或联网搜索到的在线歌曲。
+/// 一首曲目：本地文件、内置热门、或 B站联网搜索结果。
 class Track {
   final String name;
   final String? localPath;
   final String? url;
-  final String tag; // '' | '热门' | '在线'
+  final String? bvid; // B站视频，需异步取音频流
+  final String tag; // '' | '热门' | 'B站'
 
   Track.local(this.localPath)
       : name = localPath!.split(Platform.pathSeparator).last,
         url = null,
+        bvid = null,
         tag = '';
 
-  Track.online(this.name, this.url, {this.tag = ''}) : localPath = null;
+  Track.online(this.name, this.url, {this.tag = ''})
+      : localPath = null,
+        bvid = null;
+
+  Track.bili(this.name, this.bvid, {this.tag = '在线'})
+      : localPath = null,
+        url = null;
 
   bool get isLocal => localPath != null;
 
@@ -31,12 +39,13 @@ class Track {
     return src.contains('.') ? src.split('.').last.toUpperCase() : '';
   }
 
+  /// 仅本地/直链可用；B站曲目在播放前异步解析。
   PlaybackSource toSource() => isLocal
       ? PlaybackSource.local(localPath!)
       : PlaybackSource.stream(url!, const {}, title: name);
 }
 
-/// 桌面音乐播放器风格主界面：侧栏 + 顶部搜索（联网） + 列表 + 底部播放条。
+/// 桌面音乐播放器风格主界面：侧栏 + 顶部搜索（B站） + 列表 + 底部播放条。
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -45,7 +54,6 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
-  /// 内置热门歌曲（免费可在线播放的示例曲目）。
   static final List<Track> _hotTracks = [
     Track.online('钢琴轻音乐 · Demo',
         'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
@@ -56,9 +64,6 @@ class _HomeShellState extends State<HomeShell> {
     Track.online('吉他旋律 · Demo',
         'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
         tag: '热门'),
-    Track.online('流行节奏 · Demo',
-        'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3',
-        tag: '热门'),
     Track.online('放松音乐 · Demo',
         'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-8.mp3',
         tag: '热门'),
@@ -66,7 +71,7 @@ class _HomeShellState extends State<HomeShell> {
 
   final List<Track> _localTracks = [];
   final List<Track> _onlineTracks = [];
-  final AudiusService _audius = AudiusService();
+  final BilibiliService _bili = BilibiliService();
   final UpdateService _update = UpdateService();
   Track? _current;
   String _query = '';
@@ -92,13 +97,61 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  /// 启动时静默检查更新，有新版才弹窗。
+  @override
+  void dispose() {
+    _searchDebounce?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadSaved() async {
+    final prefs = await SharedPreferences.getInstance();
+    final paths = prefs.getStringList(_prefsKey) ?? [];
+    if (!mounted) return;
+    setState(() {
+      for (final p in paths) {
+        if (File(p).existsSync() &&
+            !_localTracks.any((t) => t.localPath == p)) {
+          _localTracks.add(Track.local(p));
+        }
+      }
+    });
+  }
+
+  Future<void> _saveLocal() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(
+        _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  Future<void> _showDisclaimer() async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('免责声明'),
+        content: const SingleChildScrollView(
+          child: Text(
+            '「小李播放器」是一款媒体播放器，仅供学习与个人使用。\n\n'
+            '联网搜索内容来自公开网络平台；版权归原作者/平台所有，'
+            '请勿用于任何商业或侵权用途，使用本软件产生的一切后果由使用者自行承担。\n\n'
+            '点击「同意」即表示你已阅读并接受以上条款。',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('同意'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _silentCheckUpdate() async {
     final info = await _update.check();
     if (info != null && mounted) _showUpdateDialog(info);
   }
 
-  /// 设置页手动检查更新（无更新会提示）。
   Future<void> _checkUpdateManually() async {
     showDialog<void>(
       context: context,
@@ -145,56 +198,6 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
-  @override
-  void dispose() {
-    _searchDebounce?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _loadSaved() async {
-    final prefs = await SharedPreferences.getInstance();
-    final paths = prefs.getStringList(_prefsKey) ?? [];
-    if (!mounted) return;
-    setState(() {
-      for (final p in paths) {
-        if (File(p).existsSync() &&
-            !_localTracks.any((t) => t.localPath == p)) {
-          _localTracks.add(Track.local(p));
-        }
-      }
-    });
-  }
-
-  Future<void> _saveLocal() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-        _prefsKey, _localTracks.map((t) => t.localPath!).toList());
-  }
-
-  Future<void> _showDisclaimer() async {
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        title: const Text('免责声明'),
-        content: const SingleChildScrollView(
-          child: Text(
-            '「小李播放器」是一款媒体播放器，仅供学习与个人使用。\n\n'
-            '在线搜索内容来自第三方免费音乐平台（李土豆）；请勿用于任何商业或'
-            '侵权用途，使用本软件产生的一切后果由使用者自行承担。\n\n'
-            '点击「同意」即表示你已阅读并接受以上条款。',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('同意'),
-          ),
-        ],
-      ),
-    );
-  }
-
   Future<void> _addFiles() async {
     final r = await FilePicker.platform.pickFiles(allowMultiple: true);
     if (r == null) return;
@@ -221,25 +224,47 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _searchOnline(String q) async {
     setState(() => _searchingOnline = true);
-    final results = await _audius.search(q);
+    final results = await _bili.search(q);
     if (!mounted) return;
     setState(() {
       _searchingOnline = false;
       _onlineTracks
         ..clear()
-        ..addAll(results.map((o) => Track.online(
-              o.artist.isEmpty ? o.title : '${o.title} - ${o.artist}',
-              o.streamUrl,
-              tag: '在线',
+        ..addAll(results.map((b) => Track.bili(
+              b.author.isEmpty ? b.title : '${b.title} - ${b.author}',
+              b.bvid,
             )));
     });
   }
 
-  void _play(Track t) {
+  Future<void> _play(Track t) async {
     setState(() => _current = t);
-    Navigator.of(context).push(MaterialPageRoute(
-      builder: (_) => PlayerScreen(source: t.toSource()),
-    ));
+    PlaybackSource src;
+    if (t.bvid != null) {
+      // B站：先弹 loading，异步取音频流
+      showDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const Center(child: CircularProgressIndicator()),
+      );
+      final url = await _bili.getMediaUrl(t.bvid!);
+      if (mounted) Navigator.of(context).pop();
+      if (url == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('获取音频失败，换一首试试')),
+          );
+        }
+        return;
+      }
+      src = PlaybackSource.stream(url, _bili.playHeaders, title: t.name);
+    } else {
+      src = t.toSource();
+    }
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => PlayerScreen(source: src)),
+    );
   }
 
   void _prev() {
@@ -277,7 +302,8 @@ class _HomeShellState extends State<HomeShell> {
       ),
       bottomNavigationBar: PlayerBar(
         title: _current?.name,
-        subtitle: _current?.tag.isNotEmpty == true ? _current!.tag : _current?.ext,
+        subtitle:
+            _current?.tag.isNotEmpty == true ? _current!.tag : _current?.ext,
         onPrev: _prev,
         onNext: _next,
         onPlayPause: () {
@@ -336,7 +362,7 @@ class _HomeShellState extends State<HomeShell> {
                 textInputAction: TextInputAction.search,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
-                  hintText: '搜索歌曲（联网搜全网音乐）…',
+                  hintText: '搜索歌曲（可搜中文歌）…',
                   hintStyle: const TextStyle(color: Colors.white38),
                   prefixIcon:
                       const Icon(Icons.search, color: Colors.white38, size: 20),
@@ -382,8 +408,8 @@ class _HomeShellState extends State<HomeShell> {
                       const SizedBox(height: 12),
                       Text(
                         q.isEmpty
-                            ? '还没有歌曲，点右上角「添加文件」或搜索联网音乐'
-                            : (_searchingOnline ? '联网搜索中…' : '没有找到「$_query」'),
+                            ? '搜索歌曲，或点右上角「添加文件」加本地音乐'
+                            : (_searchingOnline ? '搜索中…' : '没有找到「$_query」'),
                         style: const TextStyle(color: Colors.black54),
                       ),
                     ],
@@ -403,7 +429,10 @@ class _HomeShellState extends State<HomeShell> {
     final selected = t.name == _current?.name;
     Color? tagColor;
     if (t.tag == '热门') tagColor = Colors.orange;
-    if (t.tag == '在线') tagColor = Colors.blueAccent;
+    if (t.tag == '在线') tagColor = const Color(0xFF00A1D6);
+    final icon = t.isLocal
+        ? Icons.music_note
+        : (t.bvid != null ? Icons.smart_display : Icons.cloud_outlined);
     return InkWell(
       onTap: () => _play(t),
       child: Container(
@@ -416,18 +445,16 @@ class _HomeShellState extends State<HomeShell> {
               child:
                   Text('${i + 1}', style: const TextStyle(color: Colors.black45)),
             ),
-            Icon(t.isLocal ? Icons.music_note : Icons.cloud_outlined,
-                color: cs.primary, size: 20),
+            Icon(icon, color: cs.primary, size: 20),
             const SizedBox(width: 12),
             Expanded(
-              child:
-                  Text(t.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+              child: Text(t.name, maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
             if (tagColor != null)
               Padding(
                 padding: const EdgeInsets.only(right: 8),
-                child: Text(t.tag,
-                    style: TextStyle(color: tagColor, fontSize: 12)),
+                child:
+                    Text(t.tag, style: TextStyle(color: tagColor, fontSize: 12)),
               ),
             IconButton(
               icon: const Icon(Icons.play_circle_outline),
@@ -450,7 +477,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.1.3'),
+          title: Text('小李播放器 v2.1.4'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -462,7 +489,7 @@ class _HomeShellState extends State<HomeShell> {
         const ListTile(
           leading: Icon(Icons.travel_explore),
           title: Text('联网搜索'),
-          subtitle: Text('搜索框输入歌名，联网搜索在线音乐（李土豆 免费平台）'),
+          subtitle: Text('搜索框输入歌名，联网搜索（可搜中文歌）'),
         ),
         ListTile(
           leading: const Icon(Icons.description_outlined),
