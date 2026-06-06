@@ -78,8 +78,10 @@ class _HomeShellState extends State<HomeShell> {
   int _navIndex = 0;
   Timer? _searchDebounce;
   bool _searchingOnline = false;
+  bool _biliLoggedIn = false;
 
   static const _prefsKey = 'local_tracks_v1';
+  static const _biliCookieKey = 'bili_cookie';
   static const _sidebarColor = Color(0xFF2B2B33);
   static const _topbarColor = Color(0xFF35353F);
 
@@ -91,6 +93,7 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     _loadSaved();
+    _loadBiliCookie();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
@@ -121,6 +124,75 @@ class _HomeShellState extends State<HomeShell> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(
         _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  Future<void> _loadBiliCookie() async {
+    final prefs = await SharedPreferences.getInstance();
+    final c = prefs.getString(_biliCookieKey) ?? '';
+    if (c.isNotEmpty) _bili.setUserCookie(c);
+    if (mounted) setState(() => _biliLoggedIn = c.isNotEmpty);
+  }
+
+  Future<void> _showBiliLogin() async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('B站登录'),
+        content: SizedBox(
+          width: 420,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                '登录后搜索用你的账号身份，几乎不受限流。获取 Cookie：\n'
+                '1. 电脑浏览器登录 bilibili.com\n'
+                '2. 按 F12 → 顶部「应用/Application」→ 左侧 Cookies → 选 bilibili.com\n'
+                '3. 找到 SESSDATA，复制它的值\n'
+                '4. 粘贴到下面（粘整段 Cookie 也行）',
+                style: TextStyle(fontSize: 13, height: 1.5),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                maxLines: 3,
+                decoration: const InputDecoration(
+                  hintText: '粘贴 SESSDATA 的值，或整段 Cookie…',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          if (_biliLoggedIn)
+            TextButton(
+              onPressed: () => Navigator.of(context).pop('__logout__'),
+              child: const Text('退出登录', style: TextStyle(color: Colors.red)),
+            ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(controller.text.trim()),
+            child: const Text('登录'),
+          ),
+        ],
+      ),
+    );
+    if (result == null) return;
+    final cookie = result == '__logout__' ? '' : result;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_biliCookieKey, cookie);
+    _bili.setUserCookie(cookie);
+    if (!mounted) return;
+    setState(() => _biliLoggedIn = cookie.isNotEmpty);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(cookie.isNotEmpty ? '已登录 B站，搜索更稳定了' : '已退出登录')),
+    );
+    if (cookie.isNotEmpty && _query.trim().isNotEmpty) _searchOnline(_query);
   }
 
   Future<void> _showDisclaimer() async {
@@ -480,7 +552,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.1.6'),
+          title: Text('小李播放器 v2.1.7'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -493,6 +565,15 @@ class _HomeShellState extends State<HomeShell> {
           leading: Icon(Icons.travel_explore),
           title: Text('联网搜索'),
           subtitle: Text('搜索框输入歌名，联网搜索（可搜中文歌）'),
+        ),
+        ListTile(
+          leading: Icon(_biliLoggedIn ? Icons.verified_user : Icons.login,
+              color: _biliLoggedIn ? Colors.green : null),
+          title: const Text('B站登录'),
+          subtitle: Text(_biliLoggedIn
+              ? '已登录 · 搜索不受限流（点此可退出）'
+              : '未登录 · 点此粘贴 Cookie 登录，搜索更稳定'),
+          onTap: _showBiliLogin,
         ),
         ListTile(
           leading: const Icon(Icons.description_outlined),

@@ -26,19 +26,35 @@ class BilibiliService {
 
   final http.Client _http;
   String _cookie = '';
+  String _userCookie = ''; // 登录 cookie（含 SESSDATA），绕过匿名限流
   String? _mixinKey;
 
   BilibiliService([http.Client? client]) : _http = client ?? http.Client();
+
+  /// 设置 B站登录 cookie：可粘整段 cookie，或只粘 SESSDATA 的值。空字符串=退出登录。
+  void setUserCookie(String raw) {
+    final s = raw.trim();
+    _userCookie = s.isEmpty
+        ? ''
+        : (s.contains('=') ? s : 'SESSDATA=$s');
+  }
+
+  bool get isLoggedIn => _userCookie.isNotEmpty;
 
   /// 播放音频/视频流时需要带的请求头（防盗链）。
   Map<String, String> get playHeaders =>
       {'Referer': referer, 'User-Agent': _ua};
 
-  Map<String, String> get _headers => {
-        'User-Agent': _ua,
-        'Referer': referer,
-        if (_cookie.isNotEmpty) 'Cookie': _cookie,
-      };
+  Map<String, String> get _headers {
+    final parts = <String>[];
+    if (_userCookie.isNotEmpty) parts.add(_userCookie); // 登录 cookie 优先
+    if (_cookie.isNotEmpty) parts.add(_cookie);
+    return {
+      'User-Agent': _ua,
+      'Referer': referer,
+      if (parts.isNotEmpty) 'Cookie': parts.join('; '),
+    };
+  }
 
   /// 获取完整 cookie（降低风控）+ wbi 密钥。
   Future<void> _ensureInit() async {
