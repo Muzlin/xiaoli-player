@@ -194,7 +194,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
               children: [
                 Expanded(
                   child: (widget.source.isVideo || _hasVideo)
-                      ? Video(controller: _controller)
+                      // 关掉自带控件浮层：它会在视频左上角显示流的 media-title
+                      // （B站流标题含 bilibili）。本页已有自己的控制条。
+                      ? Video(controller: _controller, controls: NoVideoControls)
                       : Center(child: _cover(cs)),
                 ),
                 Padding(
