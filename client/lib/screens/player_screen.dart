@@ -93,7 +93,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           : Column(
               children: [
                 Expanded(
-                  child: _hasVideo
+                  child: (widget.source.isVideo || _hasVideo)
                       ? Video(controller: _controller)
                       : Center(child: _cover(cs)),
                 ),
