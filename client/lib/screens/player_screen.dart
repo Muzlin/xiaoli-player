@@ -27,10 +27,93 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String? _error;
   double _speed = 1.0;
 
-  static const _speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+  String _fmtSpeed(double s) {
+    final r = (s * 100).round() / 100;
+    return r == r.roundToDouble() ? '${r.toInt()}x' : '${r}x';
+  }
 
-  String _fmtSpeed(double s) =>
-      s == s.roundToDouble() ? '${s.toInt()}x' : '${s}x';
+  void _setSpeed(double v) {
+    v = (v * 100).round() / 100;
+    if (v < 0.1) v = 0.1; // 下限防止卡死；上限无限制
+    setState(() => _speed = v);
+    _player.setRate(v);
+  }
+
+  void _showSpeedSheet() {
+    final cs = Theme.of(context).colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (context, setSheet) {
+          void apply(double v) {
+            _setSpeed(v);
+            setSheet(() {});
+          }
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 18, 20, 28),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('播放速度  ${_fmtSpeed(_speed)}',
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold)),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: const Icon(Icons.remove_circle_outline,
+                          color: Colors.white),
+                      onPressed: () => apply(_speed - 0.25),
+                    ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderThemeData(
+                          activeTrackColor: cs.primary,
+                          thumbColor: cs.primary,
+                          inactiveTrackColor: Colors.white24,
+                          overlayShape: SliderComponentShape.noOverlay,
+                        ),
+                        child: Slider(
+                          min: 0.25,
+                          max: 5.0,
+                          value: _speed.clamp(0.25, 5.0),
+                          onChanged: apply,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.add_circle_outline,
+                          color: Colors.white),
+                      onPressed: () => apply(_speed + 0.25),
+                    ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 4,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    for (final s in const [0.5, 1.0, 1.5, 2.0, 3.0])
+                      ActionChip(
+                        label: Text(_fmtSpeed(s)),
+                        backgroundColor: const Color(0xFF3A3A44),
+                        labelStyle: const TextStyle(color: Colors.white),
+                        onPressed: () => apply(s),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text('滑块 0.25x–5x；用 − / ＋ 可超过 5x，无上限',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -87,42 +170,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
         title: Text(widget.source.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
-          PopupMenuButton<double>(
-            tooltip: '播放速度',
-            initialValue: _speed,
-            color: const Color(0xFF2B2B33),
-            onSelected: (v) {
-              setState(() => _speed = v);
-              _player.setRate(v);
-            },
-            itemBuilder: (_) => [
-              for (final s in _speeds)
-                PopupMenuItem<double>(
-                  value: s,
-                  child: Text(
-                    s == 1.0 ? '正常 (1x)' : _fmtSpeed(s),
-                    style: TextStyle(
-                      color: s == _speed ? Theme.of(context).colorScheme.primary
-                          : Colors.white,
-                      fontWeight:
-                          s == _speed ? FontWeight.bold : FontWeight.normal,
-                    ),
-                  ),
-                ),
-            ],
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.speed, size: 18, color: Colors.white70),
-                  const SizedBox(width: 4),
-                  Text(_fmtSpeed(_speed),
-                      style: const TextStyle(
-                          color: Colors.white, fontWeight: FontWeight.w600)),
-                ],
-              ),
-            ),
+          TextButton.icon(
+            onPressed: _showSpeedSheet,
+            style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 12)),
+            icon: const Icon(Icons.speed, size: 18, color: Colors.white70),
+            label: Text(_fmtSpeed(_speed),
+                style: const TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.w600)),
           ),
         ],
       ),
