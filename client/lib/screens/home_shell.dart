@@ -4,7 +4,9 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../player/playback_source.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/audius_service.dart';
+import '../services/update_service.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
 
@@ -65,6 +67,7 @@ class _HomeShellState extends State<HomeShell> {
   final List<Track> _localTracks = [];
   final List<Track> _onlineTracks = [];
   final AudiusService _audius = AudiusService();
+  final UpdateService _update = UpdateService();
   Track? _current;
   String _query = '';
   int _navIndex = 0;
@@ -83,7 +86,63 @@ class _HomeShellState extends State<HomeShell> {
   void initState() {
     super.initState();
     _loadSaved();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _showDisclaimer());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showDisclaimer();
+      _silentCheckUpdate();
+    });
+  }
+
+  /// 启动时静默检查更新，有新版才弹窗。
+  Future<void> _silentCheckUpdate() async {
+    final info = await _update.check();
+    if (info != null && mounted) _showUpdateDialog(info);
+  }
+
+  /// 设置页手动检查更新（无更新会提示）。
+  Future<void> _checkUpdateManually() async {
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    final info = await _update.check();
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    if (info != null) {
+      _showUpdateDialog(info);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已是最新版本 v${UpdateService.currentVersion}')),
+      );
+    }
+  }
+
+  void _showUpdateDialog(UpdateInfo info) {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('发现新版本 v${info.version}'),
+        content: SingleChildScrollView(
+          child: Text(info.notes.isEmpty ? '有可用更新，建议下载最新版本。' : info.notes),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('稍后'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+              final uri = Uri.tryParse(info.url);
+              if (uri != null) {
+                await launchUrl(uri, mode: LaunchMode.externalApplication);
+              }
+            },
+            child: const Text('前往下载'),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -393,6 +452,12 @@ class _HomeShellState extends State<HomeShell> {
           leading: Icon(Icons.info_outline),
           title: Text('小李播放器 v2.1.3'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+        ),
+        ListTile(
+          leading: const Icon(Icons.system_update),
+          title: const Text('检查更新'),
+          subtitle: const Text('检测并下载最新版本'),
+          onTap: _checkUpdateManually,
         ),
         const ListTile(
           leading: Icon(Icons.travel_explore),
