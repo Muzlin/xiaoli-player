@@ -7,11 +7,15 @@ class PlaybackSource {
   final Map<String, String>? headers;
   final String title;
   final bool isVideo;
-  const PlaybackSource._(this.resource, this.headers, this.title, this.isVideo);
+  final Future<String?>? subtitleFuture; // B站自带字幕(SRT)，异步取，可空
+  const PlaybackSource._(this.resource, this.headers, this.title, this.isVideo,
+      [this.subtitleFuture]);
 
   factory PlaybackSource.stream(String url, Map<String, String> headers,
-          {String title = '', bool isVideo = false}) =>
-      PlaybackSource._(url, headers, title, isVideo);
+          {String title = '',
+          bool isVideo = false,
+          Future<String?>? subtitleFuture}) =>
+      PlaybackSource._(url, headers, title, isVideo, subtitleFuture);
 
   factory PlaybackSource.local(String path) {
     final ext = path.contains('.') ? path.split('.').last.toLowerCase() : '';

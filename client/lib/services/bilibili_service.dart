@@ -173,6 +173,70 @@ class BilibiliService {
     }
   }
 
+  /// 取 B站 自带字幕（AI/CC），转成 SRT 文本；无字幕或失败返回 null。
+  Future<String?> getSubtitles(String bvid) async {
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final cid = view['data']['cid'].toString();
+      final qs = _sign({'bvid': bvid, 'cid': cid});
+      final v2 = jsonDecode((await _http.get(
+              Uri.parse('https://api.bilibili.com/x/player/wbi/v2?$qs'),
+              headers: _headers))
+          .body);
+      final subs = (v2['data']?['subtitle']?['subtitles'] as List?) ?? [];
+      if (subs.isEmpty) return null;
+      // 优先中文/AI中文，否则第一条
+      final sel = subs.firstWhere(
+        (s) {
+          final lan = (s['lan'] as String? ?? '');
+          return lan.startsWith('zh') || lan.contains('ai-zh') || lan == 'ai-zh';
+        },
+        orElse: () => subs.first,
+      ) as Map;
+      var url = (sel['subtitle_url'] as String? ?? '');
+      if (url.isEmpty) return null;
+      if (url.startsWith('//')) url = 'https:$url';
+      final body = jsonDecode((await _http
+              .get(Uri.parse(url), headers: {'User-Agent': _ua}))
+          .body);
+      final lines = (body['body'] as List?) ?? [];
+      if (lines.isEmpty) return null;
+      return _toSrt(lines);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static String _toSrt(List lines) {
+    final sb = StringBuffer();
+    for (var i = 0; i < lines.length; i++) {
+      final l = lines[i] as Map;
+      final from = (l['from'] as num).toDouble();
+      final to = (l['to'] as num).toDouble();
+      final content = (l['content'] as String? ?? '');
+      sb.writeln('${i + 1}');
+      sb.writeln('${_srtTime(from)} --> ${_srtTime(to)}');
+      sb.writeln(content);
+      sb.writeln();
+    }
+    return sb.toString();
+  }
+
+  static String _srtTime(double sec) {
+    final h = (sec ~/ 3600).toString().padLeft(2, '0');
+    final m = ((sec % 3600) ~/ 60).toString().padLeft(2, '0');
+    final s = (sec % 60).floor().toString().padLeft(2, '0');
+    final ms = (((sec - sec.floorToDouble()) * 1000).round())
+        .toString()
+        .padLeft(3, '0');
+    return '$h:$m:$s,$ms';
+  }
+
   /// 取某视频的可播放地址：优先「音视频合一」的 mp4，否则退回音频流。
   Future<String?> getMediaUrl(String bvid) async {
     try {

@@ -242,10 +242,7 @@ class _HomeShellState extends State<HomeShell> {
     if (kw.isEmpty) return;
     setState(() {
       _searchHistory.remove(kw);
-      _searchHistory.insert(0, kw);
-      if (_searchHistory.length > 12) {
-        _searchHistory.removeRange(12, _searchHistory.length);
-      }
+      _searchHistory.insert(0, kw); // 不限数量
     });
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(_historyKey, _searchHistory);
@@ -573,6 +570,7 @@ class _HomeShellState extends State<HomeShell> {
         barrierDismissible: false,
         builder: (_) => const Center(child: CircularProgressIndicator()),
       );
+      final subFut = _bili.getSubtitles(t.bvid!); // 并发取字幕，不阻塞起播
       final url = await _bili.getMediaUrl(t.bvid!);
       if (mounted) Navigator.of(context).pop();
       if (url == null) {
@@ -584,7 +582,7 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
       src = PlaybackSource.stream(url, _bili.playHeaders,
-          title: t.name, isVideo: true);
+          title: t.name, isVideo: true, subtitleFuture: subFut);
     } else {
       src = t.toSource();
     }
@@ -832,22 +830,27 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ],
           ),
-          Wrap(
-            spacing: 8,
-            runSpacing: 4,
-            children: [
-              for (final h in _searchHistory)
-                ActionChip(
-                  label: Text(h, style: const TextStyle(fontSize: 13)),
-                  visualDensity: VisualDensity.compact,
-                  onPressed: () {
-                    _searchCtrl.text = h;
-                    _searchDebounce?.cancel();
-                    setState(() => _query = h);
-                    _searchOnline(h); // 点历史词立即搜，不等防抖
-                  },
-                ),
-            ],
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 132),
+            child: SingleChildScrollView(
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                children: [
+                  for (final h in _searchHistory)
+                    ActionChip(
+                      label: Text(h, style: const TextStyle(fontSize: 13)),
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () {
+                        _searchCtrl.text = h;
+                        _searchDebounce?.cancel();
+                        setState(() => _query = h);
+                        _searchOnline(h); // 点历史词立即搜，不等防抖
+                      },
+                    ),
+                ],
+              ),
+            ),
           ),
         ],
       ),
@@ -913,7 +916,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.3.0'),
+          title: Text('小李播放器 v2.4.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(

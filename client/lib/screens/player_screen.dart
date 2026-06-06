@@ -31,6 +31,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _cropEdges = false; // 放大裁边，把角落水印推出画面
   bool _audioOnly = false; // 只听声音、显示封面，彻底不显示带水印的画面
 
+  String? _subtitle; // B站自带字幕(SRT)，异步取到
+  bool _subtitleOn = false;
+  bool _subApplied = false;
+
+  void _applySubtitle() {
+    final srt = _subtitle;
+    if (srt == null) return;
+    _player.setSubtitleTrack(
+        _subtitleOn ? SubtitleTrack.data(srt) : SubtitleTrack.no());
+  }
+
   String _fmtSpeed(double s) {
     final r = (s * 100).round() / 100;
     return r == r.roundToDouble() ? '${r.toInt()}x' : '${r}x';
@@ -129,7 +140,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (mounted) setState(() => _position = p);
     }));
     _subs.add(_player.stream.duration.listen((d) {
-      if (mounted) setState(() => _duration = d);
+      if (!mounted) return;
+      setState(() => _duration = d);
+      // 媒体已加载（有时长）后再贴字幕，避免过早设置不生效
+      if (!_subApplied && _subtitle != null && d > Duration.zero) {
+        _subApplied = true;
+        _applySubtitle();
+      }
     }));
     _subs.add(_player.stream.playing.listen((p) {
       if (mounted) setState(() => _playing = p);
@@ -144,6 +161,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _player.open(
       Media(widget.source.resource, httpHeaders: widget.source.headers),
     );
+    // 字幕异步取到后默认开启（不阻塞起播）
+    widget.source.subtitleFuture?.then((srt) {
+      if (!mounted || srt == null || srt.isEmpty) return;
+      setState(() {
+        _subtitle = srt;
+        _subtitleOn = true;
+      });
+      _applySubtitle();
+    });
   }
 
   @override
@@ -177,6 +203,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
         title: Text(widget.source.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          if (_subtitle != null)
+            IconButton(
+              tooltip: _subtitleOn ? '关闭字幕' : '显示字幕',
+              icon: Icon(
+                  _subtitleOn
+                      ? Icons.closed_caption
+                      : Icons.closed_caption_off,
+                  color: _subtitleOn
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.white70),
+              onPressed: () {
+                setState(() => _subtitleOn = !_subtitleOn);
+                _applySubtitle();
+              },
+            ),
           if (widget.source.isVideo || _hasVideo) ...[
             IconButton(
               tooltip: _audioOnly ? '显示画面' : '只听声音(显示封面·无水印)',
