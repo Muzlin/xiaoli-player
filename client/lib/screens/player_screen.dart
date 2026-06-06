@@ -25,6 +25,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _playing = false;
   bool _hasVideo = false;
   String? _error;
+  double _speed = 1.0;
+
+  static const _speeds = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0];
+
+  String _fmtSpeed(double s) =>
+      s == s.roundToDouble() ? '${s.toInt()}x' : '${s}x';
 
   @override
   void initState() {
@@ -80,6 +86,45 @@ class _PlayerScreenState extends State<PlayerScreen> {
         foregroundColor: Colors.white,
         title: Text(widget.source.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
+        actions: [
+          PopupMenuButton<double>(
+            tooltip: '播放速度',
+            initialValue: _speed,
+            color: const Color(0xFF2B2B33),
+            onSelected: (v) {
+              setState(() => _speed = v);
+              _player.setRate(v);
+            },
+            itemBuilder: (_) => [
+              for (final s in _speeds)
+                PopupMenuItem<double>(
+                  value: s,
+                  child: Text(
+                    s == 1.0 ? '正常 (1x)' : _fmtSpeed(s),
+                    style: TextStyle(
+                      color: s == _speed ? Theme.of(context).colorScheme.primary
+                          : Colors.white,
+                      fontWeight:
+                          s == _speed ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                ),
+            ],
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.speed, size: 18, color: Colors.white70),
+                  const SizedBox(width: 4),
+                  Text(_fmtSpeed(_speed),
+                      style: const TextStyle(
+                          color: Colors.white, fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
       body: _error != null
           ? Center(
