@@ -410,7 +410,9 @@ class _HomeShellState extends State<HomeShell> {
                       Text(
                         q.isEmpty
                             ? '搜索歌曲，或点右上角「添加文件」加本地音乐'
-                            : (_searchingOnline ? '搜索中…' : '没有找到「$_query」'),
+                            : (_searchingOnline
+                                ? '搜索中…'
+                                : '没搜到「$_query」\n（搜太频繁会被平台限流，过会儿再试或换个词）'),
                         style: const TextStyle(color: Colors.black54),
                       ),
                     ],
@@ -478,7 +480,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.1.5'),
+          title: Text('小李播放器 v2.1.6'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
