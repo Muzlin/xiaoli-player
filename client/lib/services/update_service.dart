@@ -19,8 +19,8 @@ class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
   static const currentVersion = '2.1.5';
 
-  /// 更新清单地址（占位）。
-  static const manifestUrl = 'https://example.com/xiaoli-player/latest.json';
+  /// 更新清单地址（局域网更新服务）。
+  static const manifestUrl = 'http://10.10.10.5:8899/latest.json';
 
   final http.Client _http;
   UpdateService([http.Client? client]) : _http = client ?? http.Client();
