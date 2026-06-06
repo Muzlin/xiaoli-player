@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -45,6 +46,30 @@ class Track {
   PlaybackSource toSource() => isLocal
       ? PlaybackSource.local(localPath!)
       : PlaybackSource.stream(url!, const {}, title: name);
+
+  /// 收藏去重/比较用的唯一键。
+  String get key => localPath ?? bvid ?? url ?? name;
+
+  /// 至少有一个可播放来源，才是有效曲目（防止损坏的收藏数据导致播放崩溃）。
+  bool get isValid => localPath != null || bvid != null || url != null;
+
+  Map<String, dynamic> toJson() => {
+        'name': name,
+        'localPath': localPath,
+        'url': url,
+        'bvid': bvid,
+        'tag': tag,
+      };
+
+  static Track fromJson(Map<String, dynamic> j) {
+    if (j['localPath'] != null) return Track.local(j['localPath'] as String);
+    if (j['bvid'] != null) {
+      return Track.bili(j['name'] as String, j['bvid'] as String,
+          tag: (j['tag'] as String?) ?? '');
+    }
+    return Track.online(j['name'] as String, j['url'] as String?,
+        tag: (j['tag'] as String?) ?? '');
+  }
 }
 
 /// 桌面音乐播放器风格主界面：侧栏 + 顶部搜索（B站） + 列表 + 底部播放条。
@@ -82,6 +107,10 @@ class _HomeShellState extends State<HomeShell> {
   bool _searchingOnline = false;
   bool _biliLoggedIn = false;
 
+  final List<Track> _favorites = [];
+  final List<String> _searchHistory = [];
+  final TextEditingController _searchCtrl = TextEditingController();
+
   // 外观：自定义背景（图片或纯色）+ 透明度。背景图会复制进 app 容器，重启不丢。
   String? _bgImagePath;
   int? _bgColorValue;
@@ -89,6 +118,8 @@ class _HomeShellState extends State<HomeShell> {
 
   static const _prefsKey = 'local_tracks_v1';
   static const _biliCookieKey = 'bili_cookie';
+  static const _favKey = 'favorites_v1';
+  static const _historyKey = 'search_history_v1';
   static const _bgImageKey = 'bg_image_v1';
   static const _bgColorKey = 'bg_color_v1';
   static const _bgOpacityKey = 'bg_opacity_v1';
@@ -124,6 +155,8 @@ class _HomeShellState extends State<HomeShell> {
     _loadSaved();
     _loadBiliCookie();
     _loadAppearance();
+    _loadFavorites();
+    _loadHistory();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
@@ -133,6 +166,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -154,6 +188,73 @@ class _HomeShellState extends State<HomeShell> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(
         _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  // ---- 收藏 ----
+  Future<void> _loadFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_favKey);
+    if (raw == null || !mounted) return;
+    try {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      setState(() {
+        _favorites
+          ..clear()
+          ..addAll(list.map(Track.fromJson).where((t) => t.isValid));
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveFavorites() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        _favKey, jsonEncode(_favorites.map((t) => t.toJson()).toList()));
+  }
+
+  bool _isFav(Track t) => _favorites.any((f) => f.key == t.key);
+
+  Future<void> _toggleFav(Track t) async {
+    setState(() {
+      final i = _favorites.indexWhere((f) => f.key == t.key);
+      if (i >= 0) {
+        _favorites.removeAt(i);
+      } else {
+        _favorites.add(t);
+      }
+    });
+    await _saveFavorites();
+  }
+
+  // ---- 搜索记录 ----
+  Future<void> _loadHistory() async {
+    final prefs = await SharedPreferences.getInstance();
+    final list = prefs.getStringList(_historyKey) ?? [];
+    if (!mounted) return;
+    setState(() {
+      _searchHistory
+        ..clear()
+        ..addAll(list);
+    });
+  }
+
+  Future<void> _addHistory(String kw) async {
+    kw = kw.trim();
+    if (kw.isEmpty) return;
+    setState(() {
+      _searchHistory.remove(kw);
+      _searchHistory.insert(0, kw);
+      if (_searchHistory.length > 12) {
+        _searchHistory.removeRange(12, _searchHistory.length);
+      }
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList(_historyKey, _searchHistory);
+  }
+
+  Future<void> _clearHistory() async {
+    setState(() => _searchHistory.clear());
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_historyKey);
   }
 
   Future<void> _loadAppearance() async {
@@ -266,7 +367,11 @@ class _HomeShellState extends State<HomeShell> {
   /// 内容区：有自定义背景时盖一层 _baseBg 蒙层（透明度 = 1 − 背景透出度），
   /// 透明度滑块越大背景越显、越小越接近常规浅色界面；深色背景下文字也清晰。
   Widget _content(ColorScheme cs) {
-    final view = _navIndex == 0 ? _libraryView(cs) : _settingsView(cs);
+    final view = _navIndex == 0
+        ? _libraryView(cs)
+        : _navIndex == 1
+            ? _favoritesView(cs)
+            : _settingsView(cs);
     if (!_hasCustomBg) return view;
     return ColoredBox(
       color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
@@ -455,6 +560,7 @@ class _HomeShellState extends State<HomeShell> {
               b.bvid,
             )));
     });
+    if (results.isNotEmpty) _addHistory(q); // 搜到结果才记入历史，避开误输
   }
 
   Future<void> _play(Track t) async {
@@ -544,7 +650,8 @@ class _HomeShellState extends State<HomeShell> {
           Icon(Icons.music_video, color: cs.primary, size: 30),
           const SizedBox(height: 24),
           _navIcon(Icons.library_music, 0, cs),
-          _navIcon(Icons.settings, 1, cs),
+          _navIcon(Icons.favorite, 1, cs),
+          _navIcon(Icons.settings, 2, cs),
           const Spacer(),
         ],
       ),
@@ -579,7 +686,12 @@ class _HomeShellState extends State<HomeShell> {
             child: SizedBox(
               height: 38,
               child: TextField(
+                controller: _searchCtrl,
                 onChanged: _onSearchChanged,
+                onSubmitted: (v) {
+                  _addHistory(v);
+                  _searchOnline(v);
+                },
                 textInputAction: TextInputAction.search,
                 style: const TextStyle(color: Colors.white),
                 decoration: InputDecoration(
@@ -618,6 +730,7 @@ class _HomeShellState extends State<HomeShell> {
     return Column(
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
+        if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
         Expanded(
           child: items.isEmpty
               ? Center(
@@ -679,6 +792,13 @@ class _HomeShellState extends State<HomeShell> {
                     Text(t.tag, style: TextStyle(color: tagColor, fontSize: 12)),
               ),
             IconButton(
+              icon: Icon(_isFav(t) ? Icons.favorite : Icons.favorite_border,
+                  size: 20),
+              color: _isFav(t) ? Colors.redAccent : Colors.black38,
+              tooltip: _isFav(t) ? '取消收藏' : '收藏',
+              onPressed: () => _toggleFav(t),
+            ),
+            IconButton(
               icon: const Icon(Icons.play_circle_outline),
               color: cs.primary,
               onPressed: () => _play(t),
@@ -686,6 +806,74 @@ class _HomeShellState extends State<HomeShell> {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _historyBar(ColorScheme cs) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.history, size: 16, color: Colors.black45),
+              const SizedBox(width: 4),
+              const Text('搜索记录',
+                  style: TextStyle(color: Colors.black54, fontSize: 13)),
+              const Spacer(),
+              TextButton(
+                onPressed: _clearHistory,
+                style: TextButton.styleFrom(
+                    minimumSize: const Size(0, 0),
+                    padding: const EdgeInsets.symmetric(horizontal: 8)),
+                child: const Text('清空', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+          Wrap(
+            spacing: 8,
+            runSpacing: 4,
+            children: [
+              for (final h in _searchHistory)
+                ActionChip(
+                  label: Text(h, style: const TextStyle(fontSize: 13)),
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () {
+                    _searchCtrl.text = h;
+                    _searchDebounce?.cancel();
+                    setState(() => _query = h);
+                    _searchOnline(h); // 点历史词立即搜，不等防抖
+                  },
+                ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _favoritesView(ColorScheme cs) {
+    if (_favorites.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.favorite_border,
+                size: 64, color: cs.primary.withValues(alpha: 0.4)),
+            const SizedBox(height: 12),
+            const Text('还没有收藏\n点歌曲右侧的 ♡ 即可收藏',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.black54)),
+          ],
+        ),
+      );
+    }
+    return ListView.separated(
+      itemCount: _favorites.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, i) => _trackRow(cs, _favorites[i], i),
     );
   }
 
@@ -725,7 +913,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.2.1'),
+          title: Text('小李播放器 v2.3.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(

@@ -27,6 +27,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   String? _error;
   double _speed = 1.0;
 
+  bool _isWebVideo = false; // 网络视频（B站等），可能带烧录角标水印
+  bool _cropEdges = false; // 放大裁边，把角落水印推出画面
+  bool _audioOnly = false; // 只听声音、显示封面，彻底不显示带水印的画面
+
   String _fmtSpeed(double s) {
     final r = (s * 100).round() / 100;
     return r == r.roundToDouble() ? '${r.toInt()}x' : '${r}x';
@@ -118,6 +122,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    _isWebVideo =
+        widget.source.isVideo && widget.source.resource.startsWith('http');
+    _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _subs.add(_player.stream.position.listen((p) {
       if (mounted) setState(() => _position = p);
     }));
@@ -170,6 +177,25 @@ class _PlayerScreenState extends State<PlayerScreen> {
         title: Text(widget.source.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          if (widget.source.isVideo || _hasVideo) ...[
+            IconButton(
+              tooltip: _audioOnly ? '显示画面' : '只听声音(显示封面·无水印)',
+              icon: Icon(_audioOnly ? Icons.music_note : Icons.image_outlined,
+                  color: _audioOnly
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.white70),
+              onPressed: () => setState(() => _audioOnly = !_audioOnly),
+            ),
+            if (!_audioOnly)
+              IconButton(
+                tooltip: _cropEdges ? '取消裁边' : '放大裁边·去角标水印',
+                icon: Icon(_cropEdges ? Icons.crop : Icons.crop_free,
+                    color: _cropEdges
+                        ? Theme.of(context).colorScheme.primary
+                        : Colors.white70),
+                onPressed: () => setState(() => _cropEdges = !_cropEdges),
+              ),
+          ],
           TextButton.icon(
             onPressed: _showSpeedSheet,
             style: TextButton.styleFrom(
@@ -193,10 +219,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
           : Column(
               children: [
                 Expanded(
-                  child: (widget.source.isVideo || _hasVideo)
-                      // 关掉自带控件浮层：它会在视频左上角显示流的 media-title
-                      // （B站流标题含 bilibili）。本页已有自己的控制条。
-                      ? Video(controller: _controller, controls: NoVideoControls)
+                  child: (!_audioOnly && (widget.source.isVideo || _hasVideo))
+                      // 关掉自带控件浮层（它会在角上显示流的 media-title，B站含 bilibili）。
+                      // _cropEdges：放大 1.22 倍并裁掉溢出，把角落烧录水印推出画面。
+                      ? ClipRect(
+                          child: Transform.scale(
+                            scale: _cropEdges ? 1.22 : 1.0,
+                            child: Video(
+                                controller: _controller,
+                                controls: NoVideoControls),
+                          ),
+                        )
                       : Center(child: _cover(cs)),
                 ),
                 Padding(
