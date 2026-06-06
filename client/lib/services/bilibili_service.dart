@@ -103,6 +103,27 @@ class BilibiliService {
     _mixinKey = sb.toString().substring(0, 32);
   }
 
+  /// 清洗 B站标题：去掉搜索高亮 <em> 等 HTML 标签、解码常见实体。保留正文。
+  static String cleanTitle(String raw) {
+    var s = raw;
+    const entities = {
+      '&amp;': '&',
+      '&lt;': '<',
+      '&gt;': '>',
+      '&quot;': '"',
+      '&#34;': '"',
+      '&#39;': "'",
+      '&apos;': "'",
+      '&nbsp;': ' ',
+    };
+    entities.forEach((k, v) => s = s.replaceAll(k, v));
+    // 解码后可能又冒出 < >，统一再去一遍标签
+    s = s.replaceAll(RegExp(r'<[^>]*>'), '');
+    // 残留数字实体（十进制 &#123; 与十六进制 &#x1F600;）
+    s = s.replaceAll(RegExp(r'&#(?:\d+|[xX][0-9A-Fa-f]+);'), '');
+    return s.replaceAll(RegExp(r'\s+'), ' ').trim();
+  }
+
   String _enc(String s) =>
       Uri.encodeComponent(s.replaceAll(RegExp(r"[!'()*]"), ''));
 
@@ -138,8 +159,7 @@ class BilibiliService {
       return res
           .map((e) {
             final m = e as Map<String, dynamic>;
-            final title =
-                (m['title'] as String? ?? '').replaceAll(RegExp(r'<[^>]+>'), '');
+            final title = cleanTitle(m['title'] as String? ?? '');
             return BiliTrack(
               bvid: (m['bvid'] ?? '') as String,
               title: title,

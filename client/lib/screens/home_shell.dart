@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:path_provider/path_provider.dart';
 import '../player/playback_source.dart';
 import '../services/bilibili_service.dart';
 import '../services/update_service.dart';
@@ -28,7 +29,8 @@ class Track {
       : localPath = null,
         bvid = null;
 
-  Track.bili(this.name, this.bvid, {this.tag = '在线'})
+  // B站来源：不显示来源标签（作者已并入 name 保留）。
+  Track.bili(this.name, this.bvid, {this.tag = ''})
       : localPath = null,
         url = null;
 
@@ -80,10 +82,37 @@ class _HomeShellState extends State<HomeShell> {
   bool _searchingOnline = false;
   bool _biliLoggedIn = false;
 
+  // 外观：自定义背景（图片或纯色）+ 透明度。背景图会复制进 app 容器，重启不丢。
+  String? _bgImagePath;
+  int? _bgColorValue;
+  double _bgOpacity = 0.6;
+
   static const _prefsKey = 'local_tracks_v1';
   static const _biliCookieKey = 'bili_cookie';
+  static const _bgImageKey = 'bg_image_v1';
+  static const _bgColorKey = 'bg_color_v1';
+  static const _bgOpacityKey = 'bg_opacity_v1';
   static const _sidebarColor = Color(0xFF2B2B33);
   static const _topbarColor = Color(0xFF35353F);
+  static const _baseBg = Color(0xFFF7F7FA);
+  static const _bgPresetColors = [
+    Color(0xFF1E1E26),
+    Color(0xFF263238),
+    Color(0xFF0D47A1),
+    Color(0xFF1B5E20),
+    Color(0xFF4A148C),
+    Color(0xFFF26B21),
+  ];
+
+  bool get _hasCustomBg => _bgImagePath != null || _bgColorValue != null;
+
+  // 底部播放条副标题：有标签显标签，本地显扩展名，B站等无则不显（避免空 Text 占位）。
+  String? get _currentSubtitle {
+    final t = _current;
+    if (t == null) return null;
+    if (t.tag.isNotEmpty) return t.tag;
+    return t.ext.isEmpty ? null : t.ext;
+  }
 
   List<Track> get _allTracks => [..._hotTracks, ..._localTracks];
   List<Track> get _playQueue =>
@@ -94,6 +123,7 @@ class _HomeShellState extends State<HomeShell> {
     super.initState();
     _loadSaved();
     _loadBiliCookie();
+    _loadAppearance();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
@@ -124,6 +154,124 @@ class _HomeShellState extends State<HomeShell> {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setStringList(
         _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  Future<void> _loadAppearance() async {
+    final prefs = await SharedPreferences.getInstance();
+    final img = prefs.getString(_bgImageKey);
+    final col = prefs.getInt(_bgColorKey);
+    final op = prefs.getDouble(_bgOpacityKey);
+    if (!mounted) return;
+    setState(() {
+      _bgImagePath =
+          (img != null && img.isNotEmpty && File(img).existsSync()) ? img : null;
+      _bgColorValue = _bgImagePath != null ? null : col; // 图/色互斥：图优先
+      if (op != null) _bgOpacity = op.clamp(0.0, 1.0);
+    });
+  }
+
+  Future<void> _saveAppearance() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (_bgImagePath != null) {
+      await prefs.setString(_bgImageKey, _bgImagePath!);
+    } else {
+      await prefs.remove(_bgImageKey);
+    }
+    if (_bgColorValue != null) {
+      await prefs.setInt(_bgColorKey, _bgColorValue!);
+    } else {
+      await prefs.remove(_bgColorKey);
+    }
+    await prefs.setDouble(_bgOpacityKey, _bgOpacity);
+  }
+
+  /// 选背景图：复制进 app 支持目录（沙箱内永久可读），存容器内路径。
+  Future<void> _pickBgImage() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.image);
+    final src = r?.files.single.path;
+    if (src == null) return;
+    try {
+      final dir = await getApplicationSupportDirectory();
+      final ext = src.contains('.') ? src.split('.').last : 'img';
+      final dest =
+          '${dir.path}/bg_${DateTime.now().millisecondsSinceEpoch}.$ext';
+      // 删掉上一张复制进来的背景，避免容器堆积
+      final old = _bgImagePath;
+      if (old != null &&
+          old.startsWith(dir.path) &&
+          old.contains('${Platform.pathSeparator}bg_')) {
+        try {
+          File(old).deleteSync();
+        } catch (_) {}
+      }
+      await File(src).copy(dest);
+      if (!mounted) return;
+      setState(() {
+        _bgImagePath = dest;
+        _bgColorValue = null;
+      });
+      await _saveAppearance();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('设置背景失败：$e')));
+      }
+    }
+  }
+
+  void _setBgColor(Color? c) {
+    setState(() {
+      _bgColorValue = c?.value;
+      _bgImagePath = null;
+    });
+    _saveAppearance();
+  }
+
+  Future<void> _resetBg() async {
+    final old = _bgImagePath;
+    setState(() {
+      _bgImagePath = null;
+      _bgColorValue = null;
+      _bgOpacity = 0.6;
+    });
+    if (old != null && old.contains('${Platform.pathSeparator}bg_')) {
+      try {
+        File(old).deleteSync();
+      } catch (_) {}
+    }
+    await _saveAppearance();
+  }
+
+  /// 自定义背景铺满内容区身后（完整不透明）；侧栏/顶栏不透明仍盖住。
+  /// 背景透出多少 + 文字可读性由 _content 的 _baseBg 蒙层按「透明度」控制。
+  Widget _withBackground(Widget child) {
+    if (!_hasCustomBg) return child;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Positioned.fill(
+          child: _bgImagePath != null
+              ? Image.file(
+                  File(_bgImagePath!),
+                  fit: BoxFit.cover,
+                  errorBuilder: (_, _, _) => const ColoredBox(color: _baseBg),
+                )
+              : ColoredBox(color: Color(_bgColorValue!)),
+        ),
+        child,
+      ],
+    );
+  }
+
+  /// 内容区：有自定义背景时盖一层 _baseBg 蒙层（透明度 = 1 − 背景透出度），
+  /// 透明度滑块越大背景越显、越小越接近常规浅色界面；深色背景下文字也清晰。
+  Widget _content(ColorScheme cs) {
+    final view = _navIndex == 0 ? _libraryView(cs) : _settingsView(cs);
+    if (!_hasCustomBg) return view;
+    return ColoredBox(
+      color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
+      child: view,
+    );
   }
 
   Future<void> _loadBiliCookie() async {
@@ -358,25 +506,25 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      body: Row(
-        children: [
-          _sidebar(cs),
-          Expanded(
-            child: Column(
-              children: [
-                _topbar(cs),
-                Expanded(
-                  child: _navIndex == 0 ? _libraryView(cs) : _settingsView(cs),
-                ),
-              ],
+      backgroundColor: _baseBg,
+      body: _withBackground(
+        Row(
+          children: [
+            _sidebar(cs),
+            Expanded(
+              child: Column(
+                children: [
+                  _topbar(cs),
+                  Expanded(child: _content(cs)),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
       bottomNavigationBar: PlayerBar(
         title: _current?.name,
-        subtitle:
-            _current?.tag.isNotEmpty == true ? _current!.tag : _current?.ext,
+        subtitle: _currentSubtitle,
         onPrev: _prev,
         onNext: _next,
         onPlayPause: () {
@@ -504,7 +652,6 @@ class _HomeShellState extends State<HomeShell> {
     final selected = t.name == _current?.name;
     Color? tagColor;
     if (t.tag == '热门') tagColor = Colors.orange;
-    if (t.tag == '在线') tagColor = const Color(0xFF00A1D6);
     final icon = t.isLocal
         ? Icons.music_note
         : (t.bvid != null ? Icons.smart_display : Icons.cloud_outlined);
@@ -542,6 +689,32 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  Widget _colorDot(Color? c) {
+    final cs = Theme.of(context).colorScheme;
+    final selected = c == null
+        ? !_hasCustomBg
+        : (_bgImagePath == null && _bgColorValue == c.value);
+    return GestureDetector(
+      onTap: () => _setBgColor(c),
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        width: 28,
+        height: 28,
+        decoration: BoxDecoration(
+          color: c ?? Colors.white,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? cs.primary : Colors.black26,
+            width: selected ? 3 : 1,
+          ),
+        ),
+        child: c == null
+            ? const Icon(Icons.block, size: 15, color: Colors.black38)
+            : null,
+      ),
+    );
+  }
+
   Widget _settingsView(ColorScheme cs) {
     return ListView(
       padding: const EdgeInsets.all(24),
@@ -552,7 +725,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.1.9'),
+          title: Text('小李播放器 v2.2.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -561,6 +734,66 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('检测并下载最新版本'),
           onTap: _checkUpdateManually,
         ),
+        const Divider(height: 32),
+        Text('外观',
+            style: TextStyle(
+                fontSize: 16, fontWeight: FontWeight.bold, color: cs.primary)),
+        ListTile(
+          leading: const Icon(Icons.wallpaper),
+          title: const Text('背景图片'),
+          subtitle: Text(_bgImagePath != null
+              ? '已设置自定义背景图'
+              : '点此选择一张图片作为界面背景'),
+          trailing: _hasCustomBg
+              ? IconButton(
+                  icon: const Icon(Icons.restore),
+                  tooltip: '恢复默认背景',
+                  onPressed: _resetBg,
+                )
+              : null,
+          onTap: _pickBgImage,
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+          child: Row(
+            children: [
+              const Text('纯色背景：'),
+              const SizedBox(width: 8),
+              for (final c in _bgPresetColors) _colorDot(c),
+              _colorDot(null),
+            ],
+          ),
+        ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text('背景透明度'),
+                  Text('${(_bgOpacity * 100).round()}%',
+                      style: TextStyle(color: cs.primary)),
+                ],
+              ),
+              Slider(
+                value: _bgOpacity,
+                min: 0,
+                max: 1,
+                activeColor: cs.primary,
+                onChanged: _hasCustomBg
+                    ? (v) => setState(() => _bgOpacity = v)
+                    : null,
+                onChangeEnd: (_) => _saveAppearance(),
+              ),
+              if (!_hasCustomBg)
+                const Text('先选背景图或纯色，再调透明度',
+                    style: TextStyle(color: Colors.black38, fontSize: 12)),
+            ],
+          ),
+        ),
+        const Divider(height: 32),
         const ListTile(
           leading: Icon(Icons.travel_explore),
           title: Text('联网搜索'),
