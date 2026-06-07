@@ -138,39 +138,48 @@ class BilibiliService {
   }
 
   /// 联网搜索（单次请求，靠完整 cookie 降低风控）。失败/被限流返回空列表。
-  Future<List<BiliTrack>> search(String keyword) async {
+  Future<List<BiliTrack>> search(String keyword, {int pages = 4}) async {
     if (keyword.trim().isEmpty) return [];
     try {
       await _ensureInit();
-      final qs = _sign({
-        'search_type': 'video',
-        'keyword': keyword,
-        'page': '1',
-      });
-      final r = await _http
-          .get(
-            Uri.parse(
-                'https://api.bilibili.com/x/web-interface/wbi/search/type?$qs'),
-            headers: _headers,
-          )
-          .timeout(const Duration(seconds: 12));
-      final d = jsonDecode(r.body);
-      final res = (d['data']?['result'] as List?) ?? [];
-      return res
-          .map((e) {
-            final m = e as Map<String, dynamic>;
-            final title = cleanTitle(m['title'] as String? ?? '');
-            return BiliTrack(
-              bvid: (m['bvid'] ?? '') as String,
-              title: title,
-              author: (m['author'] ?? '') as String,
-            );
-          })
-          .where((t) => t.bvid.isNotEmpty)
-          .toList();
     } catch (_) {
       return [];
     }
+    final all = <BiliTrack>[];
+    final seen = <String>{};
+    for (var pn = 1; pn <= pages; pn++) {
+      try {
+        final qs = _sign({
+          'search_type': 'video',
+          'keyword': keyword,
+          'page': '$pn',
+        });
+        final r = await _http
+            .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/wbi/search/type?$qs'),
+              headers: _headers,
+            )
+            .timeout(const Duration(seconds: 12));
+        final res =
+            (jsonDecode(r.body)['data']?['result'] as List?) ?? [];
+        if (res.isEmpty) break; // 没有更多
+        for (final e in res) {
+          final m = e as Map<String, dynamic>;
+          final bvid = (m['bvid'] ?? '') as String;
+          if (bvid.isEmpty || seen.contains(bvid)) continue;
+          seen.add(bvid);
+          all.add(BiliTrack(
+            bvid: bvid,
+            title: cleanTitle(m['title'] as String? ?? ''),
+            author: (m['author'] ?? '') as String,
+          ));
+        }
+      } catch (_) {
+        break;
+      }
+    }
+    return all;
   }
 
   /// 生成扫码登录二维码：返回 {url(二维码内容), key(轮询用)}。失败返回 null。
@@ -309,6 +318,38 @@ class BilibiliService {
                 'face': e['face'],
                 'sign': e['sign'] ?? '',
               })
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 取某 UP主 的投稿视频列表（wbi 签名）。受风控/失败返回空。
+  Future<List<BiliTrack>> getUserVideos(int mid, {int pn = 1}) async {
+    try {
+      await _ensureInit();
+      final qs = _sign({
+        'mid': '$mid',
+        'pn': '$pn',
+        'ps': '30',
+        'order': 'pubdate',
+        'platform': 'web',
+      });
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/space/wbi/arc/search?$qs'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      final vlist =
+          (jsonDecode(r.body)['data']?['list']?['vlist'] as List?) ?? [];
+      return vlist
+          .map((e) => BiliTrack(
+                bvid: (e['bvid'] ?? '') as String,
+                title: cleanTitle((e['title'] ?? '') as String),
+                author: (e['author'] ?? '') as String,
+              ))
+          .where((t) => t.bvid.isNotEmpty)
           .toList();
     } catch (_) {
       return [];

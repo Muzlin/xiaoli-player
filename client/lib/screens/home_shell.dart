@@ -326,7 +326,11 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     Navigator.of(context).push(MaterialPageRoute(
-        builder: (_) => _FollowingsPage(bili: _bili, mid: midInt)));
+        builder: (_) => _FollowingsPage(
+              bili: _bili,
+              mid: midInt,
+              onPlay: (bvid, title) => _play(Track.bili(title, bvid)),
+            )));
   }
 
   Future<void> _loadAppearance() async {
@@ -1150,7 +1154,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.9.2'),
+          title: Text('小李播放器 v2.9.3'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -1272,7 +1276,9 @@ class _HomeShellState extends State<HomeShell> {
 class _FollowingsPage extends StatefulWidget {
   final BilibiliService bili;
   final int mid;
-  const _FollowingsPage({required this.bili, required this.mid});
+  final void Function(String bvid, String title) onPlay;
+  const _FollowingsPage(
+      {required this.bili, required this.mid, required this.onPlay});
 
   @override
   State<_FollowingsPage> createState() => _FollowingsPageState();
@@ -1330,6 +1336,9 @@ class _FollowingsPageState extends State<_FollowingsPage> {
                   itemBuilder: (context, i) {
                     final u = _list[i];
                     final face = u['face'];
+                    final mid = u['mid'];
+                    final midInt =
+                        mid is num ? mid.toInt() : int.tryParse('$mid');
                     return ListTile(
                       leading: CircleAvatar(
                         backgroundImage: face is String && face.isNotEmpty
@@ -1343,11 +1352,89 @@ class _FollowingsPageState extends State<_FollowingsPage> {
                       title: Text(u['uname']?.toString() ?? ''),
                       subtitle: Text(u['sign']?.toString() ?? '',
                           maxLines: 1, overflow: TextOverflow.ellipsis),
+                      onTap: midInt == null
+                          ? null
+                          : () => Navigator.of(context).push(MaterialPageRoute(
+                              builder: (_) => _UserVideosPage(
+                                    bili: widget.bili,
+                                    mid: midInt,
+                                    name: u['uname']?.toString() ?? 'UP主',
+                                    onPlay: widget.onPlay,
+                                  ))),
                       trailing: TextButton(
                         onPressed: () => _unfollow(u),
                         child: const Text('取关',
                             style: TextStyle(color: Colors.red)),
                       ),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
+/// 某 UP主 的投稿视频页：点视频即播放。
+class _UserVideosPage extends StatefulWidget {
+  final BilibiliService bili;
+  final int mid;
+  final String name;
+  final void Function(String bvid, String title) onPlay;
+  const _UserVideosPage(
+      {required this.bili,
+      required this.mid,
+      required this.name,
+      required this.onPlay});
+
+  @override
+  State<_UserVideosPage> createState() => _UserVideosPageState();
+}
+
+class _UserVideosPageState extends State<_UserVideosPage> {
+  List<BiliTrack> _list = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final l = await widget.bili.getUserVideos(widget.mid);
+    if (mounted) {
+      setState(() {
+        _list = l;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(title: Text('${widget.name} 的视频')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _list.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('没拿到视频（B站 空间接口风控较严，过会再试）',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.black54)),
+                  ),
+                )
+              : ListView.separated(
+                  itemCount: _list.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final v = _list[i];
+                    return ListTile(
+                      leading: Icon(Icons.smart_display, color: cs.primary),
+                      title: Text(v.title,
+                          maxLines: 2, overflow: TextOverflow.ellipsis),
+                      onTap: () => widget.onPlay(v.bvid, v.title),
                     );
                   },
                 ),
