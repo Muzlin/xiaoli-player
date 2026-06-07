@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../player/playback_source.dart';
@@ -36,6 +38,55 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _subtitleOn = false;
   bool _subApplied = false;
   bool _transcribing = false;
+
+  // 音量 / 循环 / 睡眠定时
+  double _volume = 100;
+  bool _muted = false;
+  bool _loop = false;
+  Timer? _sleepTimer;
+  int? _sleepMin;
+
+  void _toggleMute() {
+    setState(() => _muted = !_muted);
+    _player.setVolume(_muted ? 0 : _volume);
+  }
+
+  void _setVolume(double v) {
+    setState(() {
+      _volume = v;
+      _muted = false;
+    });
+    _player.setVolume(v);
+  }
+
+  void _nudgeVolume(double d) {
+    _setVolume((_volume + d).clamp(0, 100));
+    _saveVolume();
+  }
+
+  Future<void> _saveVolume() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setDouble('player_volume', _volume);
+  }
+
+  void _toggleLoop() {
+    setState(() => _loop = !_loop);
+    _player.setPlaylistMode(_loop ? PlaylistMode.single : PlaylistMode.none);
+  }
+
+  void _setSleep(int? min) {
+    _sleepTimer?.cancel();
+    setState(() => _sleepMin = min);
+    if (min != null) {
+      _sleepTimer = Timer(Duration(minutes: min), () {
+        if (!mounted) return;
+        _player.pause();
+        setState(() => _sleepMin = null);
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('睡眠定时到，已暂停播放')));
+      });
+    }
+  }
 
   void _applySubtitle() {
     final srt = _subtitle;
@@ -202,10 +253,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
       });
       _applySubtitle();
     });
+    SharedPreferences.getInstance().then((p) {
+      final v = p.getDouble('player_volume');
+      if (v != null && mounted) {
+        setState(() => _volume = v);
+        _player.setVolume(v);
+      }
+    });
   }
 
   @override
   void dispose() {
+    _sleepTimer?.cancel();
     for (final s in _subs) {
       s.cancel();
     }
@@ -227,7 +286,21 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final durMs = _duration.inMilliseconds.toDouble();
     final posMs =
         _position.inMilliseconds.clamp(0, _duration.inMilliseconds).toDouble();
-    return Scaffold(
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.space): () =>
+            _player.playOrPause(),
+        const SingleActivator(LogicalKeyboardKey.arrowLeft): () =>
+            _player.seek(_position - const Duration(seconds: 10)),
+        const SingleActivator(LogicalKeyboardKey.arrowRight): () =>
+            _player.seek(_position + const Duration(seconds: 10)),
+        const SingleActivator(LogicalKeyboardKey.arrowUp): () => _nudgeVolume(5),
+        const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
+            _nudgeVolume(-5),
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
       backgroundColor: const Color(0xFF1E1E26),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E1E26),
@@ -293,6 +366,63 @@ class _PlayerScreenState extends State<PlayerScreen> {
             label: Text(_fmtSpeed(_speed),
                 style: const TextStyle(
                     color: Colors.white, fontWeight: FontWeight.w600)),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '更多（循环 / 睡眠定时）',
+            icon: const Icon(Icons.more_vert, color: Colors.white70),
+            color: const Color(0xFF2B2B33),
+            onSelected: (v) {
+              switch (v) {
+                case 'loop':
+                  _toggleLoop();
+                  break;
+                case 's0':
+                  _setSleep(null);
+                  break;
+                case 's15':
+                  _setSleep(15);
+                  break;
+                case 's30':
+                  _setSleep(30);
+                  break;
+                case 's60':
+                  _setSleep(60);
+                  break;
+              }
+            },
+            itemBuilder: (_) => [
+              CheckedPopupMenuItem(
+                value: 'loop',
+                checked: _loop,
+                child:
+                    const Text('单曲循环', style: TextStyle(color: Colors.white)),
+              ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                enabled: false,
+                child: Text('睡眠定时器',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+              ),
+              CheckedPopupMenuItem(
+                  value: 's0',
+                  checked: _sleepMin == null,
+                  child: const Text('关闭', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 's15',
+                  checked: _sleepMin == 15,
+                  child:
+                      const Text('15 分钟', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 's30',
+                  checked: _sleepMin == 30,
+                  child:
+                      const Text('30 分钟', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 's60',
+                  checked: _sleepMin == 60,
+                  child:
+                      const Text('60 分钟', style: TextStyle(color: Colors.white))),
+            ],
           ),
         ],
       ),
@@ -395,9 +525,58 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: 8),
+                _volumeBar(cs),
+                const SizedBox(height: 20),
               ],
             ),
+        ),
+      ),
+    );
+  }
+
+  Widget _volumeBar(ColorScheme cs) {
+    final shown = _muted ? 0.0 : _volume;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 32),
+      child: Row(
+        children: [
+          IconButton(
+            iconSize: 22,
+            color: Colors.white70,
+            tooltip: _muted ? '取消静音' : '静音',
+            icon: Icon(shown == 0
+                ? Icons.volume_off
+                : (shown < 50 ? Icons.volume_down : Icons.volume_up)),
+            onPressed: _toggleMute,
+          ),
+          Expanded(
+            child: SliderTheme(
+              data: SliderThemeData(
+                trackHeight: 3,
+                thumbColor: cs.primary,
+                activeTrackColor: cs.primary,
+                inactiveTrackColor: Colors.white24,
+                overlayShape: SliderComponentShape.noOverlay,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+              ),
+              child: Slider(
+                min: 0,
+                max: 100,
+                value: shown,
+                onChanged: _setVolume,
+                onChangeEnd: (_) => _saveVolume(),
+              ),
+            ),
+          ),
+          SizedBox(
+            width: 34,
+            child: Text('${shown.round()}',
+                textAlign: TextAlign.end,
+                style: const TextStyle(color: Colors.white54, fontSize: 12)),
+          ),
+        ],
+      ),
     );
   }
 

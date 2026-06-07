@@ -759,6 +759,37 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  void _showRowMenu(Track t, Offset pos) {
+    final items = <PopupMenuEntry<String>>[
+      PopupMenuItem(value: 'fav', child: Text(_isFav(t) ? '取消收藏' : '收藏')),
+    ];
+    if (t.isLocal) {
+      items.add(const PopupMenuItem(value: 'remove', child: Text('从列表移除')));
+    }
+    showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx, pos.dy),
+      items: items,
+    ).then((v) {
+      if (!mounted || v == null) return;
+      if (v == 'fav') {
+        _toggleFav(t);
+      } else if (v == 'remove') {
+        _removeLocal(t);
+      }
+    });
+  }
+
+  void _removeLocal(Track t) {
+    setState(() {
+      _localTracks.removeWhere((x) => x.localPath == t.localPath);
+      _favorites.removeWhere((x) => x.key == t.key); // 同步删收藏，避免引用已删文件
+      if (_current?.key == t.key) _current = null;
+    });
+    _saveLocal();
+    _saveFavorites();
+  }
+
   Widget _trackRow(ColorScheme cs, Track t, int i) {
     final selected = t.name == _current?.name;
     Color? tagColor;
@@ -768,6 +799,7 @@ class _HomeShellState extends State<HomeShell> {
         : (t.bvid != null ? Icons.smart_display : Icons.cloud_outlined);
     return InkWell(
       onTap: () => _play(t),
+      onSecondaryTapDown: (d) => _showRowMenu(t, d.globalPosition),
       child: Container(
         color: selected ? cs.primary.withOpacity(0.12) : null,
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
@@ -916,7 +948,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.6.1'),
+          title: Text('小李播放器 v2.7.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
