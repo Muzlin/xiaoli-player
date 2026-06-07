@@ -15,12 +15,14 @@ class PlayerScreen extends StatefulWidget {
   final bool isFavorite; // 进入时是否已收藏
   final VoidCallback? onToggleFavorite; // 切换收藏（由列表页提供）
   final VoidCallback? onCompleted; // 播完且未单曲循环时回调（自动连播）
+  final VoidCallback? onFollow; // 关注当前 UP主（仅 B站）
   const PlayerScreen({
     super.key,
     required this.source,
     this.isFavorite = false,
     this.onToggleFavorite,
     this.onCompleted,
+    this.onFollow,
   });
 
   @override
@@ -455,6 +457,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 setState(() => _fav = !_fav);
                 widget.onToggleFavorite!.call();
               },
+            ),
+          if (widget.onFollow != null)
+            IconButton(
+              tooltip: '关注 UP主',
+              icon: const Icon(Icons.person_add_alt, color: Colors.white70),
+              onPressed: widget.onFollow,
             ),
           if (_subtitle != null)
             IconButton(

@@ -111,6 +111,7 @@ class _HomeShellState extends State<HomeShell> {
   final List<String> _searchHistory = [];
   final TextEditingController _searchCtrl = TextEditingController();
   bool _autoNext = true; // 播完自动连播（推荐/下一首）
+  Map<String, dynamic>? _account; // B站 登录账号信息（昵称/头像）
 
   // 外观：自定义背景（图片或纯色）+ 透明度。背景图会复制进 app 容器，重启不丢。
   String? _bgImagePath;
@@ -292,6 +293,30 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  // ---- B站 账号 / 关注 ----
+  Future<void> _loadAccount() async {
+    final a = _biliLoggedIn ? await _bili.getAccountInfo() : null;
+    if (mounted) setState(() => _account = a);
+  }
+
+  Future<void> _followUp(String bvid) async {
+    final owner = await _bili.getOwner(bvid);
+    final midRaw = owner?['mid'];
+    final mid = midRaw is num ? midRaw.toInt() : int.tryParse('$midRaw');
+    if (owner == null || mid == null || mid <= 0) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('获取 UP主 信息失败')));
+      }
+      return;
+    }
+    final msg = await _bili.followUp(mid);
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('${owner['name']}：$msg')));
+    }
+  }
+
   Future<void> _loadAppearance() async {
     final prefs = await SharedPreferences.getInstance();
     final img = prefs.getString(_bgImageKey);
@@ -419,6 +444,7 @@ class _HomeShellState extends State<HomeShell> {
     final c = prefs.getString(_biliCookieKey) ?? '';
     if (c.isNotEmpty) _bili.setUserCookie(c);
     if (mounted) setState(() => _biliLoggedIn = c.isNotEmpty);
+    if (c.isNotEmpty) _loadAccount();
   }
 
   Future<void> _showBiliLogin() async {
@@ -463,9 +489,17 @@ class _HomeShellState extends State<HomeShell> {
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('取消'),
           ),
+          TextButton.icon(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _showQrLogin();
+            },
+            icon: const Icon(Icons.qr_code, size: 18),
+            label: const Text('扫码登录'),
+          ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(controller.text.trim()),
-            child: const Text('登录'),
+            child: const Text('用Cookie登录'),
           ),
         ],
       ),
@@ -476,11 +510,102 @@ class _HomeShellState extends State<HomeShell> {
     await prefs.setString(_biliCookieKey, cookie);
     _bili.setUserCookie(cookie);
     if (!mounted) return;
-    setState(() => _biliLoggedIn = cookie.isNotEmpty);
+    setState(() {
+      _biliLoggedIn = cookie.isNotEmpty;
+      if (cookie.isEmpty) _account = null;
+    });
+    if (cookie.isNotEmpty) _loadAccount();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(cookie.isNotEmpty ? '已登录 B站，搜索更稳定了' : '已退出登录')),
     );
     if (cookie.isNotEmpty && _query.trim().isNotEmpty) _searchOnline(_query);
+  }
+
+  Future<void> _showQrLogin() async {
+    final qr = await _bili.qrGenerate();
+    if (!mounted) return;
+    if (qr == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('生成二维码失败，请重试')));
+      return;
+    }
+    final qrImg =
+        'https://api.qrserver.com/v1/create-qr-code/?size=240x240&data=${Uri.encodeComponent(qr['url']!)}';
+    String status = '请用 B站 手机 App 扫码登录';
+    Timer? poll;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false, // 防止点遮罩关闭后轮询仍在跑
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setS) {
+          poll ??= Timer.periodic(const Duration(seconds: 2), (t) async {
+            if (!ctx.mounted) {
+              t.cancel();
+              return;
+            }
+            final res = await _bili.qrPoll(qr['key']!);
+            if (!ctx.mounted) {
+              t.cancel();
+              return;
+            }
+            switch (res['state']) {
+              case 'scanned':
+                setS(() => status = '已扫码，请在手机上点「确认登录」');
+                break;
+              case 'expired':
+                t.cancel();
+                setS(() => status = '二维码已过期，请关闭重开');
+                break;
+              case 'done':
+                t.cancel();
+                final cookie = res['cookie'] ?? '';
+                if (cookie.isEmpty) {
+                  setS(() => status = '登录失败：未取到有效凭据，请重试');
+                  break;
+                }
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setString(_biliCookieKey, cookie);
+                _bili.setUserCookie(cookie);
+                if (ctx.mounted) Navigator.of(ctx).pop();
+                if (mounted) {
+                  setState(() => _biliLoggedIn = true);
+                  _loadAccount();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('扫码登录成功 ✓')));
+                  if (_query.trim().isNotEmpty) _searchOnline(_query);
+                }
+                break;
+            }
+          });
+          return AlertDialog(
+            title: const Text('扫码登录 B站'),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Image.network(qrImg,
+                    width: 200,
+                    height: 200,
+                    errorBuilder: (_, _, _) => const SizedBox(
+                        width: 200,
+                        height: 200,
+                        child: Center(child: Text('二维码加载失败')))),
+                const SizedBox(height: 12),
+                Text(status, style: const TextStyle(fontSize: 13)),
+                const SizedBox(height: 4),
+                const Text('扫码登录会拿到完整凭据，关注等功能可用',
+                    style: TextStyle(fontSize: 11, color: Colors.black45)),
+              ],
+            ),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('关闭')),
+            ],
+          );
+        },
+      ),
+    );
+    poll?.cancel();
   }
 
   Future<void> _showDisclaimer() async {
@@ -631,6 +756,7 @@ class _HomeShellState extends State<HomeShell> {
         isFavorite: _isFav(t),
         onToggleFavorite: () => _toggleFav(t),
         onCompleted: () => _onTrackCompleted(),
+        onFollow: t.bvid != null ? () => _followUp(t.bvid!) : null,
       ),
     );
     if (replace) {
@@ -997,7 +1123,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.8.0'),
+          title: Text('小李播放器 v2.9.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -1082,12 +1208,20 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: Text('搜索框输入歌名，联网搜索（可搜中文歌）'),
         ),
         ListTile(
-          leading: Icon(_biliLoggedIn ? Icons.verified_user : Icons.login,
-              color: _biliLoggedIn ? Colors.green : null),
-          title: const Text('B站登录'),
+          leading: (_account != null && _account!['face'] is String)
+              ? CircleAvatar(
+                  radius: 16,
+                  backgroundImage: NetworkImage(_account!['face'] as String),
+                  onBackgroundImageError: (_, __) {},
+                )
+              : Icon(_biliLoggedIn ? Icons.verified_user : Icons.login,
+                  color: _biliLoggedIn ? Colors.green : null),
+          title: Text(_account?['uname'] != null
+              ? 'B站：${_account!['uname']}'
+              : 'B站登录'),
           subtitle: Text(_biliLoggedIn
-              ? '已登录 · 搜索不受限流（点此可退出）'
-              : '未登录 · 点此粘贴 Cookie 登录，搜索更稳定'),
+              ? '已登录 · 搜索不受限流（点此可退出/重登）'
+              : '未登录 · 点此登录（扫码或粘贴 Cookie）'),
           onTap: _showBiliLogin,
         ),
         ListTile(

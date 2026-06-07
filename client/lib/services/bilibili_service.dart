@@ -173,6 +173,115 @@ class BilibiliService {
     }
   }
 
+  /// 生成扫码登录二维码：返回 {url(二维码内容), key(轮询用)}。失败返回 null。
+  Future<Map<String, String>?> qrGenerate() async {
+    try {
+      final d = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://passport.bilibili.com/x/passport-login/web/qrcode/generate'),
+              headers: {'User-Agent': _ua}))
+          .body)['data'];
+      return {'url': d['url'] as String, 'key': d['qrcode_key'] as String};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 轮询扫码状态：state ∈ wait/scanned/done/expired；done 时带 cookie(完整含 bili_jct)。
+  Future<Map<String, String>> qrPoll(String key) async {
+    try {
+      final d = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://passport.bilibili.com/x/passport-login/web/qrcode/poll?qrcode_key=$key'),
+              headers: {'User-Agent': _ua}))
+          .body)['data'];
+      final code = d['code'];
+      if (code == 0) {
+        final qp = Uri.parse(d['url'] as String).queryParameters;
+        final parts = <String>[];
+        for (final k in [
+          'SESSDATA',
+          'bili_jct',
+          'DedeUserID',
+          'DedeUserID__ckMd5'
+        ]) {
+          if (qp[k] != null && qp[k]!.isNotEmpty) parts.add('$k=${qp[k]}');
+        }
+        return {'state': 'done', 'cookie': parts.join('; ')};
+      }
+      if (code == 86090) return {'state': 'scanned'};
+      if (code == 86038) return {'state': 'expired'};
+      return {'state': 'wait'};
+    } catch (_) {
+      return {'state': 'wait'};
+    }
+  }
+
+  /// 从登录 cookie 里取 bili_jct（CSRF，关注等写操作需要）。
+  String get _biliJct {
+    final m = RegExp(r'bili_jct=([^;]+)').firstMatch(_userCookie);
+    return m?.group(1) ?? '';
+  }
+
+  /// 当前登录账号信息（昵称/头像/mid）。未登录或失败返回 null。
+  Future<Map<String, dynamic>?> getAccountInfo() async {
+    if (_userCookie.isEmpty) return null;
+    try {
+      await _ensureInit();
+      final d = jsonDecode((await _http.get(
+              Uri.parse('https://api.bilibili.com/x/web-interface/nav'),
+              headers: _headers))
+          .body)['data'];
+      if (d == null || d['isLogin'] != true) return null;
+      return {'uname': d['uname'], 'face': d['face'], 'mid': d['mid']};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 取视频 UP主 的 mid 与昵称。失败返回 null。
+  Future<Map<String, dynamic>?> getOwner(String bvid) async {
+    try {
+      await _ensureInit();
+      final owner = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body)['data']?['owner'] as Map?;
+      if (owner == null) return null;
+      return {'mid': owner['mid'], 'name': owner['name']};
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 关注 UP主（act:1关注 2取关）。需登录且含 bili_jct。返回给用户的提示文案。
+  Future<String> followUp(int mid, {int act = 1}) async {
+    if (_userCookie.isEmpty) return '请先登录 B站';
+    final jct = _biliJct;
+    if (jct.isEmpty) return '关注需要完整凭据，请用「扫码登录」重新登录';
+    try {
+      final r = await _http
+          .post(
+            Uri.parse('https://api.bilibili.com/x/relation/modify'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: 'fid=$mid&act=$act&re_src=14&csrf=$jct',
+          )
+          .timeout(const Duration(seconds: 10));
+      final d = jsonDecode(r.body);
+      final code = d['code'];
+      if (code == 0) return act == 1 ? '已关注 ✓' : '已取消关注';
+      if (code == 22014) return '你已经关注过了';
+      if (code == -101) return '登录已失效，请重新登录';
+      return '操作失败：${d['message'] ?? code}';
+    } catch (e) {
+      return '关注失败：$e';
+    }
+  }
+
   /// 取某视频的相关推荐（用于自动连播）。失败返回空。
   Future<List<BiliTrack>> getRelated(String bvid) async {
     try {
