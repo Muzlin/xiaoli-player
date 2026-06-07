@@ -1123,7 +1123,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.9.0'),
+          title: Text('小李播放器 v2.9.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -1218,7 +1218,7 @@ class _HomeShellState extends State<HomeShell> {
                   color: _biliLoggedIn ? Colors.green : null),
           title: Text(_account?['uname'] != null
               ? 'B站：${_account!['uname']}'
-              : 'B站登录'),
+              : (_biliLoggedIn ? 'B站 · 已登录' : 'B站登录')),
           subtitle: Text(_biliLoggedIn
               ? '已登录 · 搜索不受限流（点此可退出/重登）'
               : '未登录 · 点此登录（扫码或粘贴 Cookie）'),

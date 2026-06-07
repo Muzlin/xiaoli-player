@@ -227,10 +227,15 @@ class BilibiliService {
   Future<Map<String, dynamic>?> getAccountInfo() async {
     if (_userCookie.isEmpty) return null;
     try {
-      await _ensureInit();
-      final d = jsonDecode((await _http.get(
-              Uri.parse('https://api.bilibili.com/x/web-interface/nav'),
-              headers: _headers))
+      // nav 只需登录 cookie，不必等重量级 _ensureInit（避免启动时拿不到账号）。
+      final d = jsonDecode((await _http
+              .get(Uri.parse('https://api.bilibili.com/x/web-interface/nav'),
+                  headers: {
+                    'User-Agent': _ua,
+                    'Referer': referer,
+                    'Cookie': _userCookie,
+                  })
+              .timeout(const Duration(seconds: 8)))
           .body)['data'];
       if (d == null || d['isLogin'] != true) return null;
       return {'uname': d['uname'], 'face': d['face'], 'mid': d['mid']};
