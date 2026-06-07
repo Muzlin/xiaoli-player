@@ -110,6 +110,7 @@ class _HomeShellState extends State<HomeShell> {
   final List<Track> _favorites = [];
   final List<String> _searchHistory = [];
   final TextEditingController _searchCtrl = TextEditingController();
+  bool _autoNext = true; // 播完自动连播（推荐/下一首）
 
   // 外观：自定义背景（图片或纯色）+ 透明度。背景图会复制进 app 容器，重启不丢。
   String? _bgImagePath;
@@ -157,6 +158,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadAppearance();
     _loadFavorites();
     _loadHistory();
+    _loadAutoNext();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
@@ -252,6 +254,42 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _searchHistory.clear());
     final prefs = await SharedPreferences.getInstance();
     await prefs.remove(_historyKey);
+  }
+
+  // ---- 自动连播 ----
+  Future<void> _loadAutoNext() async {
+    final prefs = await SharedPreferences.getInstance();
+    final v = prefs.getBool('auto_next_v1');
+    if (v != null && mounted) setState(() => _autoNext = v);
+  }
+
+  Future<void> _saveAutoNext(bool v) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('auto_next_v1', v);
+  }
+
+  /// 一首播完（未单曲循环）后：B站放相关推荐，其它放队列下一首。
+  Future<void> _onTrackCompleted() async {
+    if (!_autoNext) return;
+    final cur = _current;
+    if (cur == null) return;
+    if (cur.bvid != null) {
+      final rel = await _bili.getRelated(cur.bvid!);
+      if (rel.isNotEmpty && mounted) {
+        final b = rel.first;
+        _play(
+          Track.bili(
+              b.author.isEmpty ? b.title : '${b.title} - ${b.author}', b.bvid),
+          replace: true,
+        );
+        return;
+      }
+    }
+    final q = _playQueue;
+    final i = q.indexWhere((t) => t.key == cur.key);
+    if (i >= 0 && i < q.length - 1 && mounted) {
+      _play(q[i + 1], replace: true);
+    }
   }
 
   Future<void> _loadAppearance() async {
@@ -560,7 +598,7 @@ class _HomeShellState extends State<HomeShell> {
     if (results.isNotEmpty) _addHistory(q); // 搜到结果才记入历史，避开误输
   }
 
-  Future<void> _play(Track t) async {
+  Future<void> _play(Track t, {bool replace = false}) async {
     setState(() => _current = t);
     PlaybackSource src;
     if (t.bvid != null) {
@@ -587,9 +625,20 @@ class _HomeShellState extends State<HomeShell> {
       src = t.toSource();
     }
     if (!mounted) return;
-    Navigator.of(context).push(
-      MaterialPageRoute(builder: (_) => PlayerScreen(source: src)),
+    final route = MaterialPageRoute<void>(
+      builder: (_) => PlayerScreen(
+        source: src,
+        isFavorite: _isFav(t),
+        onToggleFavorite: () => _toggleFav(t),
+        onCompleted: () => _onTrackCompleted(),
+      ),
     );
+    if (replace) {
+      // 自动连播：收起所有已堆叠的播放页，保持 [列表页, 当前播放页]
+      Navigator.of(context).pushAndRemoveUntil(route, (r) => r.isFirst);
+    } else {
+      Navigator.of(context).push(route);
+    }
   }
 
   void _prev() {
@@ -948,7 +997,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.7.0'),
+          title: Text('小李播放器 v2.8.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -956,6 +1005,16 @@ class _HomeShellState extends State<HomeShell> {
           title: const Text('检查更新'),
           subtitle: const Text('检测并下载最新版本'),
           onTap: _checkUpdateManually,
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.playlist_play),
+          title: const Text('自动连播'),
+          subtitle: const Text('一首播完（未开单曲循环）自动播放推荐/下一首'),
+          value: _autoNext,
+          onChanged: (v) {
+            setState(() => _autoNext = v);
+            _saveAutoNext(v);
+          },
         ),
         const Divider(height: 32),
         Text('外观',

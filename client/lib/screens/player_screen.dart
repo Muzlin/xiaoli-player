@@ -12,7 +12,16 @@ export '../player/playback_source.dart';
 /// 播放页：音频显示封面+进度+控制；视频显示画面。基于 media_kit/libmpv，支持所有格式。
 class PlayerScreen extends StatefulWidget {
   final PlaybackSource source;
-  const PlayerScreen({super.key, required this.source});
+  final bool isFavorite; // 进入时是否已收藏
+  final VoidCallback? onToggleFavorite; // 切换收藏（由列表页提供）
+  final VoidCallback? onCompleted; // 播完且未单曲循环时回调（自动连播）
+  const PlayerScreen({
+    super.key,
+    required this.source,
+    this.isFavorite = false,
+    this.onToggleFavorite,
+    this.onCompleted,
+  });
 
   @override
   State<PlayerScreen> createState() => _PlayerScreenState();
@@ -45,6 +54,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _loop = false;
   Timer? _sleepTimer;
   int? _sleepMin;
+
+  bool _fav = false; // 播放页内收藏态
+  bool _fullscreen = false;
+  bool _fsControls = true; // 全屏时控件浮层是否显示
 
   void _toggleMute() {
     setState(() => _muted = !_muted);
@@ -86,6 +99,118 @@ class _PlayerScreenState extends State<PlayerScreen> {
             const SnackBar(content: Text('睡眠定时到，已暂停播放')));
       });
     }
+  }
+
+  void _enterFullscreen() {
+    setState(() {
+      _fullscreen = true;
+      _fsControls = true;
+    });
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+  }
+
+  void _exitFullscreen() {
+    setState(() => _fullscreen = false);
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  }
+
+  Widget _videoView() {
+    return ClipRect(
+      child: Transform.scale(
+        scale: _cropEdges ? 1.22 : 1.0,
+        child: Video(controller: _controller, controls: NoVideoControls),
+      ),
+    );
+  }
+
+  Widget _fullscreenView(ColorScheme cs) {
+    final durMs = _duration.inMilliseconds.toDouble();
+    final posMs =
+        _position.inMilliseconds.clamp(0, _duration.inMilliseconds).toDouble();
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: GestureDetector(
+        onTap: () => setState(() => _fsControls = !_fsControls),
+        child: Stack(
+          children: [
+            Positioned.fill(child: _videoView()),
+            if (_fsControls) ...[
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  color: Colors.black54,
+                  padding: EdgeInsets.only(
+                      top: MediaQuery.of(context).padding.top + 4, bottom: 4),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        icon: const Icon(Icons.fullscreen_exit,
+                            color: Colors.white),
+                        tooltip: '退出全屏',
+                        onPressed: _exitFullscreen,
+                      ),
+                      Expanded(
+                        child: Text(widget.source.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(color: Colors.white)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: Container(
+                  color: Colors.black54,
+                  padding: EdgeInsets.fromLTRB(
+                      8, 4, 8, MediaQuery.of(context).padding.bottom + 4),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        icon: Icon(_playing ? Icons.pause : Icons.play_arrow,
+                            color: Colors.white),
+                        onPressed: () => _player.playOrPause(),
+                      ),
+                      Text(_fmt(_position),
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 12)),
+                      Expanded(
+                        child: SliderTheme(
+                          data: SliderThemeData(
+                            trackHeight: 3,
+                            thumbColor: cs.primary,
+                            activeTrackColor: cs.primary,
+                            inactiveTrackColor: Colors.white24,
+                            overlayShape: SliderComponentShape.noOverlay,
+                            thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 6),
+                          ),
+                          child: Slider(
+                            min: 0,
+                            max: durMs > 0 ? durMs : 1,
+                            value: durMs > 0 ? posMs : 0,
+                            onChanged: (v) =>
+                                _player.seek(Duration(milliseconds: v.toInt())),
+                          ),
+                        ),
+                      ),
+                      Text(_fmt(_duration),
+                          style: const TextStyle(
+                              color: Colors.white70, fontSize: 12)),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
   }
 
   void _applySubtitle() {
@@ -219,6 +344,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _isWebVideo =
         widget.source.isVideo && widget.source.resource.startsWith('http');
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
+    _fav = widget.isFavorite;
+    _subs.add(_player.stream.completed.listen((done) {
+      if (done && !_loop && mounted) widget.onCompleted?.call();
+    }));
     _subs.add(_player.stream.position.listen((p) {
       if (mounted) setState(() => _position = p);
     }));
@@ -265,6 +394,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _sleepTimer?.cancel();
+    if (_fullscreen) {
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
     for (final s in _subs) {
       s.cancel();
     }
@@ -286,6 +418,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     final durMs = _duration.inMilliseconds.toDouble();
     final posMs =
         _position.inMilliseconds.clamp(0, _duration.inMilliseconds).toDouble();
+    final showVideo = !_audioOnly && (widget.source.isVideo || _hasVideo);
     return CallbackShortcuts(
       bindings: <ShortcutActivator, VoidCallback>{
         const SingleActivator(LogicalKeyboardKey.space): () =>
@@ -297,10 +430,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
         const SingleActivator(LogicalKeyboardKey.arrowUp): () => _nudgeVolume(5),
         const SingleActivator(LogicalKeyboardKey.arrowDown): () =>
             _nudgeVolume(-5),
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (_fullscreen) _exitFullscreen();
+        },
       },
       child: Focus(
         autofocus: true,
-        child: Scaffold(
+        child: (showVideo && _fullscreen)
+            ? _fullscreenView(cs)
+            : Scaffold(
       backgroundColor: const Color(0xFF1E1E26),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E1E26),
@@ -308,6 +446,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         title: Text(widget.source.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          if (widget.onToggleFavorite != null)
+            IconButton(
+              tooltip: _fav ? '取消收藏' : '收藏',
+              icon: Icon(_fav ? Icons.favorite : Icons.favorite_border,
+                  color: _fav ? Colors.redAccent : Colors.white70),
+              onPressed: () {
+                setState(() => _fav = !_fav);
+                widget.onToggleFavorite!.call();
+              },
+            ),
           if (_subtitle != null)
             IconButton(
               tooltip: _subtitleOn ? '关闭字幕' : '显示字幕',
@@ -356,6 +504,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         ? Theme.of(context).colorScheme.primary
                         : Colors.white70),
                 onPressed: () => setState(() => _cropEdges = !_cropEdges),
+              ),
+            if (!_audioOnly)
+              IconButton(
+                tooltip: '全屏',
+                icon: const Icon(Icons.fullscreen, color: Colors.white70),
+                onPressed: _enterFullscreen,
               ),
           ],
           TextButton.icon(
@@ -438,18 +592,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
           : Column(
               children: [
                 Expanded(
-                  child: (!_audioOnly && (widget.source.isVideo || _hasVideo))
-                      // 关掉自带控件浮层（它会在角上显示流的 media-title，B站含 bilibili）。
-                      // _cropEdges：放大 1.22 倍并裁掉溢出，把角落烧录水印推出画面。
-                      ? ClipRect(
-                          child: Transform.scale(
-                            scale: _cropEdges ? 1.22 : 1.0,
-                            child: Video(
-                                controller: _controller,
-                                controls: NoVideoControls),
-                          ),
-                        )
-                      : Center(child: _cover(cs)),
+                  // 关掉自带控件浮层（它会在角上显示流的 media-title，B站含 bilibili）。
+                  // _videoView 内 _cropEdges 放大 1.22 倍裁掉溢出，把角落水印推出画面。
+                  child: showVideo ? _videoView() : Center(child: _cover(cs)),
                 ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),

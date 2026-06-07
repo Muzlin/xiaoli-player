@@ -173,6 +173,33 @@ class BilibiliService {
     }
   }
 
+  /// 取某视频的相关推荐（用于自动连播）。失败返回空。
+  Future<List<BiliTrack>> getRelated(String bvid) async {
+    try {
+      await _ensureInit();
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/archive/related?bvid=$bvid'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      final list = (jsonDecode(r.body)['data'] as List?) ?? [];
+      return list
+          .map((e) {
+            final m = e as Map<String, dynamic>;
+            return BiliTrack(
+              bvid: (m['bvid'] ?? '') as String,
+              title: cleanTitle((m['title'] as String?) ?? ''),
+              author: ((m['owner'] as Map?)?['name'] as String?) ?? '',
+            );
+          })
+          .where((t) => t.bvid.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   /// 取 B站 自带字幕（AI/CC），转成 SRT 文本；无字幕或失败返回 null。
   Future<String?> getSubtitles(String bvid) async {
     try {
