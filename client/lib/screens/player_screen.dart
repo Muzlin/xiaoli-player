@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../player/playback_source.dart';
+import '../services/transcribe_service.dart';
 
 export '../player/playback_source.dart';
 
@@ -31,15 +32,46 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _cropEdges = false; // 放大裁边，把角落水印推出画面
   bool _audioOnly = false; // 只听声音、显示封面，彻底不显示带水印的画面
 
-  String? _subtitle; // B站自带字幕(SRT)，异步取到
+  String? _subtitle; // 字幕(SRT)：B站自带或本地AI生成
   bool _subtitleOn = false;
   bool _subApplied = false;
+  bool _transcribing = false;
 
   void _applySubtitle() {
     final srt = _subtitle;
     if (srt == null) return;
     _player.setSubtitleTrack(
         _subtitleOn ? SubtitleTrack.data(srt) : SubtitleTrack.no());
+  }
+
+  /// 本地 AI 生成字幕（用于 B站 也没字幕的视频/音频）。
+  Future<void> _aiSubtitle() async {
+    if (_transcribing) return;
+    setState(() => _transcribing = true);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('AI 生成字幕中…需要下载音频+转写，可能要几十秒'),
+        duration: Duration(seconds: 4)));
+    final srt = await TranscribeService.transcribe(
+      widget.source.resource,
+      headers: widget.source.headers,
+    );
+    if (!mounted) return;
+    setState(() {
+      _transcribing = false;
+      if (srt != null) {
+        _subtitle = srt;
+        _subtitleOn = true;
+        _subApplied = true;
+      }
+    });
+    if (srt != null) {
+      _applySubtitle();
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('AI 字幕已生成')));
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('生成失败：可能无人声、或工具/模型缺失')));
+    }
   }
 
   String _fmtSpeed(double s) {
@@ -218,6 +250,22 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 _applySubtitle();
               },
             ),
+          if (_subtitle == null && TranscribeService.available)
+            _transcribing
+                ? const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 14),
+                    child: SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                            strokeWidth: 2, color: Colors.white70)),
+                  )
+                : IconButton(
+                    tooltip: 'AI 生成字幕（本地）',
+                    icon: const Icon(Icons.subtitles_outlined,
+                        color: Colors.white70),
+                    onPressed: _aiSubtitle,
+                  ),
           if (widget.source.isVideo || _hasVideo) ...[
             IconButton(
               tooltip: _audioOnly ? '显示画面' : '只听声音(显示封面·无水印)',
