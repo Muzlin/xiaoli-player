@@ -4,6 +4,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../player/playback_source.dart';
 import '../services/transcribe_service.dart';
+import '../services/tts_service.dart';
 
 export '../player/playback_source.dart';
 
@@ -36,6 +37,53 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _subtitleOn = false;
   bool _subApplied = false;
   bool _transcribing = false;
+
+  bool _dubbing = false; // 配音：用系统语音朗读字幕，并静音原声
+  List<_Cue> _cues = const [];
+  int _lastSpoken = -1;
+
+  void _toggleDub() {
+    if (_subtitle == null) return;
+    setState(() => _dubbing = !_dubbing);
+    if (_dubbing) {
+      _cues = _parseSrt(_subtitle!);
+      _lastSpoken = -1;
+      _player.setVolume(0); // 静音原声，只听配音
+    } else {
+      _player.setVolume(100);
+      TtsService.stop();
+    }
+  }
+
+  void _maybeSpeak(Duration pos) {
+    if (_cues.isEmpty) return;
+    final i = _cues.indexWhere((c) => pos >= c.start && pos < c.end);
+    if (i >= 0 && i != _lastSpoken) {
+      _lastSpoken = i;
+      TtsService.speak(_cues[i].text);
+    }
+  }
+
+  static List<_Cue> _parseSrt(String srt) {
+    final cues = <_Cue>[];
+    final timeRe = RegExp(
+        r'(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)');
+    for (final block in srt.replaceAll('\r\n', '\n').split(RegExp(r'\n\n+'))) {
+      final lines = block.split('\n');
+      final ti = lines.indexWhere(timeRe.hasMatch);
+      if (ti < 0) continue;
+      final m = timeRe.firstMatch(lines[ti])!;
+      Duration d(int a, int b, int c, int e) =>
+          Duration(hours: a, minutes: b, seconds: c, milliseconds: e);
+      final start = d(int.parse(m[1]!), int.parse(m[2]!), int.parse(m[3]!),
+          int.parse(m[4]!));
+      final end = d(int.parse(m[5]!), int.parse(m[6]!), int.parse(m[7]!),
+          int.parse(m[8]!));
+      final text = lines.skip(ti + 1).join(' ').trim();
+      if (text.isNotEmpty) cues.add(_Cue(start, end, text));
+    }
+    return cues;
+  }
 
   void _applySubtitle() {
     final srt = _subtitle;
@@ -169,7 +217,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
         widget.source.isVideo && widget.source.resource.startsWith('http');
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _subs.add(_player.stream.position.listen((p) {
-      if (mounted) setState(() => _position = p);
+      if (!mounted) return;
+      setState(() => _position = p);
+      if (_dubbing) _maybeSpeak(p);
     }));
     _subs.add(_player.stream.duration.listen((d) {
       if (!mounted) return;
@@ -206,6 +256,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    TtsService.stop();
     for (final s in _subs) {
       s.cancel();
     }
@@ -249,6 +300,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 setState(() => _subtitleOn = !_subtitleOn);
                 _applySubtitle();
               },
+            ),
+          if (_subtitle != null)
+            IconButton(
+              tooltip: _dubbing ? '关闭配音(恢复原声)' : '配音·朗读字幕(静音原声)',
+              icon: Icon(
+                  _dubbing
+                      ? Icons.record_voice_over
+                      : Icons.record_voice_over_outlined,
+                  color: _dubbing
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.white70),
+              onPressed: _toggleDub,
             ),
           if (_subtitle == null && TranscribeService.available)
             _transcribing
@@ -433,4 +496,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ],
     );
   }
+}
+
+/// 一条字幕（用于配音按时朗读）。
+class _Cue {
+  final Duration start;
+  final Duration end;
+  final String text;
+  const _Cue(this.start, this.end, this.text);
 }
