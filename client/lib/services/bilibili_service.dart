@@ -287,6 +287,34 @@ class BilibiliService {
     }
   }
 
+  /// 取「我的关注」列表（需登录）。失败/受限返回空。
+  Future<List<Map<String, dynamic>>> getFollowings(int mid, {int pn = 1}) async {
+    if (_userCookie.isEmpty) return [];
+    try {
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/relation/followings?vmid=$mid&pn=$pn&ps=50&order=desc'),
+              headers: {
+                'User-Agent': _ua,
+                'Referer': referer,
+                'Cookie': _userCookie,
+              })
+          .timeout(const Duration(seconds: 10));
+      final list = (jsonDecode(r.body)['data']?['list'] as List?) ?? [];
+      return list
+          .map((e) => {
+                'mid': e['mid'],
+                'uname': e['uname'],
+                'face': e['face'],
+                'sign': e['sign'] ?? '',
+              })
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   /// 取某视频的相关推荐（用于自动连播）。失败返回空。
   Future<List<BiliTrack>> getRelated(String bvid) async {
     try {

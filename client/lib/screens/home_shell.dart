@@ -317,6 +317,18 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  void _showFollowings() {
+    final mid = _account?['mid'];
+    final midInt = mid is num ? mid.toInt() : int.tryParse('$mid');
+    if (midInt == null || midInt <= 0) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先登录 B站')));
+      return;
+    }
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => _FollowingsPage(bili: _bili, mid: midInt)));
+  }
+
   Future<void> _loadAppearance() async {
     final prefs = await SharedPreferences.getInstance();
     final img = prefs.getString(_bgImageKey);
@@ -441,6 +453,21 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _loadBiliCookie() async {
     final prefs = await SharedPreferences.getInstance();
+    // 一次性登录导入：存在 ~/小李播放器/bili_login.txt 就读进来并删除。
+    // 由 app 自己写进它真正用的 prefs，绕开外部改 prefs/沙箱容器/cfprefsd 不生效的坑。
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      if (home.isNotEmpty) {
+        final f = File('$home/小李播放器/bili_login.txt');
+        if (f.existsSync()) {
+          final fc = f.readAsStringSync().trim();
+          if (fc.isNotEmpty) await prefs.setString(_biliCookieKey, fc);
+          try {
+            f.deleteSync();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
     final c = prefs.getString(_biliCookieKey) ?? '';
     if (c.isNotEmpty) _bili.setUserCookie(c);
     if (mounted) setState(() => _biliLoggedIn = c.isNotEmpty);
@@ -1123,7 +1150,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.9.1'),
+          title: Text('小李播放器 v2.9.2'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -1224,12 +1251,106 @@ class _HomeShellState extends State<HomeShell> {
               : '未登录 · 点此登录（扫码或粘贴 Cookie）'),
           onTap: _showBiliLogin,
         ),
+        if (_biliLoggedIn)
+          ListTile(
+            leading: const Icon(Icons.people_outline),
+            title: const Text('我的关注 / 关注管理'),
+            subtitle: const Text('查看并管理你关注的 UP主（可取关）'),
+            onTap: _showFollowings,
+          ),
         ListTile(
           leading: const Icon(Icons.description_outlined),
           title: const Text('免责声明'),
           onTap: _showDisclaimer,
         ),
       ],
+    );
+  }
+}
+
+/// 「我的关注」页：列出关注的 UP主，可取关。
+class _FollowingsPage extends StatefulWidget {
+  final BilibiliService bili;
+  final int mid;
+  const _FollowingsPage({required this.bili, required this.mid});
+
+  @override
+  State<_FollowingsPage> createState() => _FollowingsPageState();
+}
+
+class _FollowingsPageState extends State<_FollowingsPage> {
+  List<Map<String, dynamic>> _list = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final l = await widget.bili.getFollowings(widget.mid);
+    if (mounted) setState(() {
+      _list = l;
+      _loading = false;
+    });
+  }
+
+  Future<void> _unfollow(Map<String, dynamic> u) async {
+    final mid = u['mid'];
+    final midInt = mid is num ? mid.toInt() : int.tryParse('$mid');
+    if (midInt == null) return;
+    final msg = await widget.bili.followUp(midInt, act: 2);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('${u['uname']}：$msg')));
+    if (msg.contains('取消')) {
+      setState(() => _list.removeWhere((x) => x['mid'] == u['mid']));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('我的关注（${_list.length}）')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _list.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('没有关注，或 B站 接口受限（关注列表可能被设为隐私）',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.black54)),
+                  ),
+                )
+              : ListView.separated(
+                  itemCount: _list.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, i) {
+                    final u = _list[i];
+                    final face = u['face'];
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundImage: face is String && face.isNotEmpty
+                            ? NetworkImage(face)
+                            : null,
+                        onBackgroundImageError: (_, _) {},
+                        child: face is String && face.isNotEmpty
+                            ? null
+                            : const Icon(Icons.person),
+                      ),
+                      title: Text(u['uname']?.toString() ?? ''),
+                      subtitle: Text(u['sign']?.toString() ?? '',
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: TextButton(
+                        onPressed: () => _unfollow(u),
+                        child: const Text('取关',
+                            style: TextStyle(color: Colors.red)),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }
