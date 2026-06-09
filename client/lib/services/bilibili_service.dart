@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
 
@@ -293,6 +294,119 @@ class BilibiliService {
       return '操作失败：${d['message'] ?? code}';
     } catch (e) {
       return '关注失败：$e';
+    }
+  }
+
+  /// 原生投稿到 B站（实验性：upos 分片上传 + 提交）。风控严，可能失败。
+  /// onStatus 汇报进度。返回给用户的提示文案。
+  Future<String> uploadVideo(
+    String path,
+    String title, {
+    int tid = 21,
+    String tag = '日常',
+    String desc = '',
+    void Function(String)? onStatus,
+  }) async {
+    if (_userCookie.isEmpty) return '请先登录 B站';
+    final jct = _biliJct;
+    if (jct.isEmpty) return '投稿需要完整凭据(bili_jct)，请扫码登录';
+    final file = File(path);
+    if (!file.existsSync()) return '文件不存在';
+    final size = file.lengthSync();
+    final name = path.split(Platform.pathSeparator).last;
+    final memberHeaders = {
+      'User-Agent': _ua,
+      'Referer': 'https://member.bilibili.com/',
+      'Cookie': _userCookie,
+    };
+    RandomAccessFile? raf;
+    try {
+      onStatus?.call('预上传…');
+      final pre = jsonDecode((await _http
+              .get(
+                  Uri.parse('https://member.bilibili.com/preupload'
+                      '?name=${Uri.encodeComponent(name)}&size=$size&r=upos'
+                      '&profile=ugcfx%2Fbup&ssl=0&version=2.14.0&build=2140000&upcdn=bda2'),
+                  headers: memberHeaders)
+              .timeout(const Duration(seconds: 15)))
+          .body);
+      if (pre['OK'] != 1) return '预上传失败（可能无投稿权限或风控）';
+      final endpoint = pre['endpoint'];
+      final uposUri = (pre['upos_uri'] as String).replaceFirst('upos://', '');
+      final auth = pre['auth'] as String;
+      final bizId = pre['biz_id'];
+      final chunkSize = (pre['chunk_size'] as num).toInt();
+      final uploadUrl = 'https:$endpoint/$uposUri';
+      final uh = {'X-Upos-Auth': auth, 'User-Agent': _ua};
+
+      onStatus?.call('初始化…');
+      final initR = jsonDecode((await _http
+              .post(Uri.parse('$uploadUrl?uploads&output=json'), headers: uh))
+          .body);
+      final uploadId = initR['upload_id'];
+      if (uploadId == null) return '上传初始化失败';
+
+      final chunks = (size / chunkSize).ceil();
+      final parts = <Map<String, dynamic>>[];
+      raf = file.openSync();
+      for (var i = 0; i < chunks; i++) {
+        final start = i * chunkSize;
+        final end = (start + chunkSize > size) ? size : start + chunkSize;
+        raf.setPositionSync(start);
+        final chunkBytes = raf.readSync(end - start);
+        onStatus?.call('上传分片 ${i + 1}/$chunks');
+        await _http
+            .put(
+              Uri.parse('$uploadUrl?partNumber=${i + 1}&uploadId=$uploadId'
+                  '&chunk=$i&chunks=$chunks&size=${chunkBytes.length}'
+                  '&start=$start&end=$end&total=$size'),
+              headers: {...uh, 'Content-Type': 'application/octet-stream'},
+              body: chunkBytes,
+            )
+            .timeout(const Duration(seconds: 60));
+        parts.add({'partNumber': i + 1, 'eTag': 'etag'});
+      }
+      raf.closeSync();
+      raf = null;
+
+      onStatus?.call('合并…');
+      await _http.post(
+        Uri.parse('$uploadUrl?output=json&name=${Uri.encodeComponent(name)}'
+            '&profile=ugcfx%2Fbup&uploadId=$uploadId&biz_id=$bizId'),
+        headers: {...uh, 'Content-Type': 'application/json'},
+        body: jsonEncode({'parts': parts}),
+      );
+
+      onStatus?.call('提交投稿…');
+      final fnNoExt = uposUri.split('/').last.split('.').first;
+      final body = {
+        'copyright': 1,
+        'source': '',
+        'title': title,
+        'tid': tid,
+        'tag': tag,
+        'desc': desc,
+        'cover': '',
+        'videos': [
+          {'filename': fnNoExt, 'title': title, 'desc': ''}
+        ],
+      };
+      final addR = jsonDecode((await _http.post(
+              Uri.parse('https://member.bilibili.com/x/vu/web/add'
+                  '?csrf=$jct&t=${DateTime.now().millisecondsSinceEpoch}'),
+              headers: {...memberHeaders, 'Content-Type': 'application/json'},
+              body: jsonEncode(body)))
+          .body);
+      if (addR['code'] == 0) {
+        return '投稿成功！稿件号 ${addR['data']?['bvid'] ?? ''}（审核后可见）';
+      }
+      return '上传完成但提交失败：${addR['message'] ?? addR['code']}（B站风控/需封面或权限）';
+    } catch (e) {
+      return '投稿出错：$e';
+    } finally {
+      try {
+        raf?.closeSync();
+      } catch (_) {}
     }
   }
 

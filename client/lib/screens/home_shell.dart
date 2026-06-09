@@ -108,6 +108,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _biliLoggedIn = false;
 
   final List<Track> _favorites = [];
+  final List<Track> _myVideos = []; // 我的视频（本地收录 / 可发布到B站）
   final List<String> _searchHistory = [];
   final TextEditingController _searchCtrl = TextEditingController();
   bool _autoNext = true; // 播完自动连播（推荐/下一首）
@@ -121,6 +122,7 @@ class _HomeShellState extends State<HomeShell> {
   static const _prefsKey = 'local_tracks_v1';
   static const _biliCookieKey = 'bili_cookie';
   static const _favKey = 'favorites_v1';
+  static const _myVideosKey = 'my_videos_v1';
   static const _historyKey = 'search_history_v1';
   static const _bgImageKey = 'bg_image_v1';
   static const _bgColorKey = 'bg_color_v1';
@@ -158,6 +160,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadBiliCookie();
     _loadAppearance();
     _loadFavorites();
+    _loadMyVideos();
     _loadHistory();
     _loadAutoNext();
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -226,6 +229,173 @@ class _HomeShellState extends State<HomeShell> {
       }
     });
     await _saveFavorites();
+  }
+
+  // ---- 我的视频（本地收录 / 发布到B站） ----
+  Future<void> _loadMyVideos() async {
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_myVideosKey);
+    if (raw == null || !mounted) return;
+    try {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      setState(() {
+        _myVideos
+          ..clear()
+          ..addAll(list.map(Track.fromJson).where((t) => t.isValid));
+      });
+    } catch (_) {}
+  }
+
+  Future<void> _saveMyVideos() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+        _myVideosKey, jsonEncode(_myVideos.map((t) => t.toJson()).toList()));
+  }
+
+  Future<void> _addMyVideo() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.video);
+    final p = r?.files.single.path;
+    if (p == null) return;
+    setState(() {
+      if (!_myVideos.any((t) => t.localPath == p)) {
+        _myVideos.add(Track.local(p));
+      }
+    });
+    await _saveMyVideos();
+  }
+
+  Widget _myVideosView(ColorScheme cs) {
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+          child: Row(
+            children: [
+              FilledButton.icon(
+                onPressed: _addMyVideo,
+                icon: const Icon(Icons.add, size: 18),
+                label: const Text('添加视频'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: _showPublish,
+                icon: const Icon(Icons.cloud_upload_outlined, size: 18),
+                label: const Text('发布到B站'),
+              ),
+            ],
+          ),
+        ),
+        Expanded(
+          child: _myVideos.isEmpty
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(24),
+                    child: Text('还没有视频\n点「添加视频」收录本地视频；点「发布到B站」投稿',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.black54)),
+                  ),
+                )
+              : ListView.separated(
+                  itemCount: _myVideos.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (context, i) => _trackRow(cs, _myVideos[i], i),
+                ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _showPublish() async {
+    final picked = await FilePicker.platform.pickFiles(type: FileType.video);
+    final path = picked?.files.single.path;
+    if (path == null || !mounted) return;
+    final name = picked!.files.single.name;
+    final titleCtrl = TextEditingController(
+        text: name.contains('.')
+            ? name.substring(0, name.lastIndexOf('.'))
+            : name);
+    final act = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('发布视频到 B站'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('文件：$name',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: titleCtrl,
+              decoration: const InputDecoration(
+                  labelText: '标题', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 10),
+            const Text(
+                '⚠️ 原生投稿是实验性的：B站风控严、可能失败；上传即真实公开发布到你的账号。失败请改用「网页发布」。',
+                style: TextStyle(fontSize: 12, color: Colors.redAccent)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, 'web'),
+            child: const Text('网页发布'),
+          ),
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, 'upload'),
+            child: const Text('确认上传'),
+          ),
+        ],
+      ),
+    );
+    if (act == 'web') {
+      final uri =
+          Uri.parse('https://member.bilibili.com/platform/upload/video/frame');
+      if (await canLaunchUrl(uri)) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+      return;
+    }
+    if (act != 'upload') return;
+    final title = titleCtrl.text.trim().isEmpty ? name : titleCtrl.text.trim();
+    final statusN = ValueNotifier<String>('准备上传…');
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        content: ValueListenableBuilder<String>(
+          valueListenable: statusN,
+          builder: (_, sx, __) => Row(
+            children: [
+              const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 16),
+              Expanded(child: Text(sx)),
+            ],
+          ),
+        ),
+      ),
+    );
+    final msg =
+        await _bili.uploadVideo(path, title, onStatus: (sx) => statusN.value = sx);
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('发布结果'),
+        content: Text(msg),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context), child: const Text('好'))
+        ],
+      ),
+    );
   }
 
   // ---- 搜索记录 ----
@@ -447,7 +617,9 @@ class _HomeShellState extends State<HomeShell> {
         ? _libraryView(cs)
         : _navIndex == 1
             ? _favoritesView(cs)
-            : _settingsView(cs);
+            : _navIndex == 2
+                ? _myVideosView(cs)
+                : _settingsView(cs);
     if (!_hasCustomBg) return view;
     return ColoredBox(
       color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
@@ -855,7 +1027,8 @@ class _HomeShellState extends State<HomeShell> {
           const SizedBox(height: 24),
           _navIcon(Icons.library_music, 0, cs),
           _navIcon(Icons.favorite, 1, cs),
-          _navIcon(Icons.settings, 2, cs),
+          _navIcon(Icons.video_library, 2, cs),
+          _navIcon(Icons.settings, 3, cs),
           const Spacer(),
         ],
       ),
@@ -1154,7 +1327,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.9.3'),
+          title: Text('小李播放器 v2.10.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
