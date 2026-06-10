@@ -8,6 +8,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:path_provider/path_provider.dart';
 import '../player/playback_source.dart';
 import '../services/bilibili_service.dart';
+import '../services/platform_service.dart';
 import '../services/update_service.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
@@ -99,6 +100,8 @@ class _HomeShellState extends State<HomeShell> {
   final List<Track> _localTracks = [];
   final List<Track> _onlineTracks = [];
   final BilibiliService _bili = BilibiliService();
+  final PlatformService _platform = PlatformService();
+  final List<Track> _platformTracks = []; // 平台上传的视频(别人/自己)
   final UpdateService _update = UpdateService();
   Track? _current;
   String _query = '';
@@ -149,7 +152,6 @@ class _HomeShellState extends State<HomeShell> {
     return t.ext.isEmpty ? null : t.ext;
   }
 
-  List<Track> get _allTracks => [..._hotTracks, ..._localTracks];
   List<Track> get _playQueue =>
       [..._hotTracks, ..._localTracks, ..._onlineTracks];
 
@@ -162,6 +164,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadFavorites();
     _loadMyVideos();
     _loadHistory();
+    _loadPlatform();
     _loadAutoNext();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
@@ -281,6 +284,12 @@ class _HomeShellState extends State<HomeShell> {
                 onPressed: _showPublish,
                 icon: const Icon(Icons.cloud_upload_outlined, size: 18),
                 label: const Text('发布到B站'),
+              ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                onPressed: _uploadToPlatform,
+                icon: const Icon(Icons.upload_outlined, size: 18),
+                label: const Text('上传到平台'),
               ),
             ],
           ),
@@ -913,17 +922,99 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _searchOnline(String q) async {
     setState(() => _searchingOnline = true);
     final results = await _bili.search(q);
+    final plat = await _platform.search(q);
     if (!mounted) return;
     setState(() {
       _searchingOnline = false;
       _onlineTracks
         ..clear()
+        ..addAll(plat.map(_platTrack))
         ..addAll(results.map((b) => Track.bili(
               b.author.isEmpty ? b.title : '${b.title} - ${b.author}',
               b.bvid,
             )));
     });
-    if (results.isNotEmpty) _addHistory(q); // 搜到结果才记入历史，避开误输
+    if (results.isNotEmpty || plat.isNotEmpty) _addHistory(q);
+  }
+
+  // ---- 共享视频平台 ----
+  Track _platTrack(PlatformVideo v) => Track.online(
+      v.uploader.isEmpty ? v.title : '${v.title} · ${v.uploader}',
+      PlatformService.videoUrl(v.id),
+      tag: '平台');
+
+  Future<void> _loadPlatform() async {
+    final vs = await _platform.list();
+    if (!mounted) return;
+    setState(() {
+      _platformTracks
+        ..clear()
+        ..addAll(vs.map(_platTrack));
+    });
+  }
+
+  Future<void> _uploadToPlatform() async {
+    final picked = await FilePicker.platform.pickFiles(type: FileType.video);
+    final path = picked?.files.single.path;
+    if (path == null || !mounted) return;
+    final fname = picked!.files.single.name;
+    final titleCtrl = TextEditingController(
+        text: fname.contains('.')
+            ? fname.substring(0, fname.lastIndexOf('.'))
+            : fname);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('上传到本应用平台'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('文件：$fname',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: titleCtrl,
+              decoration: const InputDecoration(
+                  labelText: '标题', border: OutlineInputBorder()),
+            ),
+            const SizedBox(height: 8),
+            const Text('上传后任何人在本应用搜索都能看到、跨设备播放。',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('上传')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        content: Row(children: [
+          SizedBox(
+              width: 18,
+              height: 18,
+              child: CircularProgressIndicator(strokeWidth: 2)),
+          SizedBox(width: 16),
+          Expanded(child: Text('上传中…大视频较慢，请稍候')),
+        ]),
+      ),
+    );
+    final uploader = _account?['uname']?.toString() ?? '匿名';
+    final title = titleCtrl.text.trim().isEmpty ? fname : titleCtrl.text.trim();
+    final msg = await _platform.upload(path, title, uploader);
+    if (!mounted) return;
+    Navigator.of(context).pop();
+    _loadPlatform();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
   }
 
   Future<void> _play(Track t, {bool replace = false}) async {
@@ -1100,10 +1191,15 @@ class _HomeShellState extends State<HomeShell> {
 
   Widget _libraryView(ColorScheme cs) {
     final q = _query.toLowerCase();
-    final base = q.isEmpty
-        ? _allTracks
-        : _allTracks.where((t) => t.name.toLowerCase().contains(q)).toList();
-    final items = [...base, ..._onlineTracks];
+    final List<Track> items;
+    if (q.isEmpty) {
+      items = [..._platformTracks, ..._hotTracks, ..._localTracks];
+    } else {
+      final local = [..._hotTracks, ..._localTracks]
+          .where((t) => t.name.toLowerCase().contains(q))
+          .toList();
+      items = [...local, ..._onlineTracks];
+    }
     return Column(
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
@@ -1327,7 +1423,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.10.0'),
+          title: Text('小李播放器 v2.11.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
