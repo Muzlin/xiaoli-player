@@ -244,6 +244,11 @@ class _HomeShellState extends State<HomeShell> {
   /// 下载视频到「下载」目录，带进度弹窗（B站异步解析流地址；平台/直链直接下）。
   Future<void> _download(Track t) async {
     if (t.isLocal || !mounted) return;
+    final dest = await FilePicker.platform.saveFile(
+      dialogTitle: '保存视频到…',
+      fileName: '${t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')}.mp4',
+    );
+    if (dest == null || !mounted) return;
     final progress = ValueNotifier<String>('解析地址…');
     var cancelled = false;
     var dialogOpen = true;
@@ -300,10 +305,6 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     try {
-      final dir = (await getDownloadsDirectory()) ??
-          await getApplicationDocumentsDirectory();
-      final safe = t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
-      final dest = '${dir.path}/$safe.mp4';
       progress.value = '连接中…';
       final req = http.Request('GET', Uri.parse(url));
       req.headers.addAll(headers);
@@ -1537,7 +1538,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.12.0'),
+          title: Text('小李播放器 v2.12.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
