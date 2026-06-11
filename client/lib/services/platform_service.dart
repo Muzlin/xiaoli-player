@@ -13,7 +13,8 @@ class PlatformVideo {
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
 class PlatformService {
   /// 平台公网地址（cloudflared 隧道）。隧道重启会变，届时需更新。
-  static const baseUrl = 'https://mill-vid-analyses-pendant.trycloudflare.com';
+  static const baseUrl =
+      'https://heel-reporter-tribunal-priorities.trycloudflare.com';
 
   final http.Client _http;
   PlatformService([http.Client? c]) : _http = c ?? http.Client();

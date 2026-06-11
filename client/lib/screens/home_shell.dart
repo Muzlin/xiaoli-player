@@ -6,6 +6,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:http/http.dart' as http;
 import '../player/playback_source.dart';
 import '../services/bilibili_service.dart';
 import '../services/platform_service.dart';
@@ -232,6 +233,54 @@ class _HomeShellState extends State<HomeShell> {
       }
     });
     await _saveFavorites();
+  }
+
+  /// 下载视频到「下载」目录（B站异步解析流地址；平台/直链直接下）。
+  Future<void> _download(Track t) async {
+    if (t.isLocal || !mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('准备下载…')));
+    String? url;
+    Map<String, String> headers = const {};
+    if (t.bvid != null) {
+      url = await _bili.getMediaUrl(t.bvid!);
+      headers = _bili.playHeaders;
+    } else {
+      url = t.url;
+    }
+    if (url == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('获取下载地址失败')));
+      }
+      return;
+    }
+    try {
+      final dir = (await getDownloadsDirectory()) ??
+          await getApplicationDocumentsDirectory();
+      final safe = t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+      final dest = '${dir.path}/$safe.mp4';
+      final req = http.Request('GET', Uri.parse(url));
+      req.headers.addAll(headers);
+      final resp = await http.Client().send(req);
+      if (resp.statusCode >= 400) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text('下载失败 ${resp.statusCode}')));
+        }
+        return;
+      }
+      await resp.stream.pipe(File(dest).openWrite());
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('已下载到 $dest')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('下载出错：$e')));
+      }
+    }
   }
 
   // ---- 我的视频（本地收录 / 发布到B站） ----
@@ -1303,6 +1352,13 @@ class _HomeShellState extends State<HomeShell> {
               tooltip: _isFav(t) ? '取消收藏' : '收藏',
               onPressed: () => _toggleFav(t),
             ),
+            if (!t.isLocal)
+              IconButton(
+                icon: const Icon(Icons.download_outlined, size: 20),
+                color: Colors.black38,
+                tooltip: '下载',
+                onPressed: () => _download(t),
+              ),
             IconButton(
               icon: const Icon(Icons.play_circle_outline),
               color: cs.primary,
@@ -1423,7 +1479,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.11.1'),
+          title: Text('小李播放器 v2.11.2'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
