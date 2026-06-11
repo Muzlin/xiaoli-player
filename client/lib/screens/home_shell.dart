@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import '../player/playback_source.dart';
 import '../services/bilibili_service.dart';
+import '../services/transcribe_service.dart';
 import '../services/platform_service.dart';
 import '../services/update_service.dart';
 import '../widgets/player_bar.dart';
@@ -242,11 +243,82 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   /// 下载视频到「下载」目录，带进度弹窗（B站异步解析流地址；平台/直链直接下）。
+  static const _videoFmts = ['mp4', 'mkv', 'mov', 'webm', 'avi', 'ts'];
+  static const _audioFmts = ['mp3', 'm4a', 'aac', 'flac', 'wav'];
+
+  Future<String?> _pickFormat() {
+    return showDialog<String>(
+      context: context,
+      builder: (_) => SimpleDialog(
+        title: const Text('选择保存格式'),
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 4, 20, 4),
+            child: Text('视频',
+                style: TextStyle(color: Colors.black54, fontSize: 12)),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Wrap(
+              spacing: 8,
+              children: [
+                for (final fm in _videoFmts)
+                  ActionChip(
+                      label: Text(fm),
+                      onPressed: () => Navigator.pop(context, fm)),
+              ],
+            ),
+          ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(20, 12, 20, 4),
+            child: Text('音频（仅提取声音）',
+                style: TextStyle(color: Colors.black54, fontSize: 12)),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Wrap(
+              spacing: 8,
+              children: [
+                for (final fm in _audioFmts)
+                  ActionChip(
+                      label: Text(fm),
+                      onPressed: () => Navigator.pop(context, fm)),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
+        ],
+      ),
+    );
+  }
+
+  Future<bool> _ffmpegConvert(String src, String dest, String fmt) async {
+    final ff = TranscribeService.ffmpeg;
+    if (ff == null) return false;
+    const audio = {'mp3', 'm4a', 'aac', 'flac', 'wav', 'ogg', 'opus'};
+    bool good() => File(dest).existsSync() && File(dest).lengthSync() > 0;
+    try {
+      if (audio.contains(fmt)) {
+        final r = await Process.run(ff, ['-y', '-i', src, '-vn', dest]);
+        return r.exitCode == 0 && good();
+      }
+      final copy = await Process.run(ff, ['-y', '-i', src, '-c', 'copy', dest]);
+      if (copy.exitCode == 0 && good()) return true;
+      final tr = await Process.run(ff, ['-y', '-i', src, dest]);
+      return tr.exitCode == 0 && good();
+    } catch (_) {
+      return false;
+    }
+  }
+
   Future<void> _download(Track t) async {
     if (t.isLocal || !mounted) return;
+    final fmt = await _pickFormat();
+    if (fmt == null || !mounted) return;
+    final safe = t.name.replaceAll(RegExp(r'[^\w一-龥 .-]'), '_');
     final dest = await FilePicker.platform.saveFile(
-      dialogTitle: '保存视频到…',
-      fileName: '${t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_')}.mp4',
+      dialogTitle: '保存到…',
+      fileName: '$safe.$fmt',
     );
     if (dest == null || !mounted) return;
     final progress = ValueNotifier<String>('解析地址…');
@@ -304,6 +376,8 @@ class _HomeShellState extends State<HomeShell> {
       _snack('获取下载地址失败');
       return;
     }
+    final tmp =
+        '${Directory.systemTemp.path}/xldl_${DateTime.now().millisecondsSinceEpoch}.src';
     try {
       progress.value = '连接中…';
       final req = http.Request('GET', Uri.parse(url));
@@ -317,31 +391,50 @@ class _HomeShellState extends State<HomeShell> {
       }
       final total = resp.contentLength ?? 0;
       var received = 0;
-      final sink = File(dest).openWrite();
+      final sink = File(tmp).openWrite();
       await for (final chunk in resp.stream) {
         if (cancelled) break;
         sink.add(chunk);
         received += chunk.length;
         final mb = (received / 1048576).toStringAsFixed(1);
         progress.value = total > 0
-            ? '$mb / ${(total / 1048576).toStringAsFixed(1)} MB'
-            : '$mb MB';
+            ? '下载 $mb / ${(total / 1048576).toStringAsFixed(1)} MB'
+            : '下载 $mb MB';
       }
       await sink.close();
       if (cancelled) {
         try {
-          File(dest).deleteSync();
+          File(tmp).deleteSync();
         } catch (_) {}
         return;
       }
+      if (TranscribeService.ffmpeg != null) {
+        progress.value = '转换为 $fmt…（大文件需等一会）';
+        final ok = await _ffmpegConvert(tmp, dest, fmt);
+        try {
+          File(tmp).deleteSync();
+        } catch (_) {}
+        if (!ok) {
+          closeDialog();
+          _snack('转换失败（试试别的格式）');
+          return;
+        }
+      } else {
+        File(tmp).copySync(dest);
+        try {
+          File(tmp).deleteSync();
+        } catch (_) {}
+      }
       closeDialog();
-      _snack('已下载到 $dest');
+      _snack('已保存到 $dest');
     } catch (e) {
+      try {
+        File(tmp).deleteSync();
+      } catch (_) {}
       closeDialog();
       _snack('下载出错：$e');
     }
   }
-
   // ---- 我的视频（本地收录 / 发布到B站） ----
   Future<void> _loadMyVideos() async {
     final prefs = await SharedPreferences.getInstance();
@@ -1538,7 +1631,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.12.1'),
+          title: Text('小李播放器 v2.12.2'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
