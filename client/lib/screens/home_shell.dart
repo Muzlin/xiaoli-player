@@ -235,11 +235,56 @@ class _HomeShellState extends State<HomeShell> {
     await _saveFavorites();
   }
 
-  /// 下载视频到「下载」目录（B站异步解析流地址；平台/直链直接下）。
+  void _snack(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  /// 下载视频到「下载」目录，带进度弹窗（B站异步解析流地址；平台/直链直接下）。
   Future<void> _download(Track t) async {
     if (t.isLocal || !mounted) return;
-    ScaffoldMessenger.of(context)
-        .showSnackBar(const SnackBar(content: Text('准备下载…')));
+    final progress = ValueNotifier<String>('解析地址…');
+    var cancelled = false;
+    var dialogOpen = true;
+    void closeDialog() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('下载视频'),
+        content: ValueListenableBuilder<String>(
+          valueListenable: progress,
+          builder: (_, sx, __) => Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 16),
+              Expanded(child: Text(sx)),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              cancelled = true;
+              closeDialog();
+            },
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+
     String? url;
     Map<String, String> headers = const {};
     if (t.bvid != null) {
@@ -248,11 +293,10 @@ class _HomeShellState extends State<HomeShell> {
     } else {
       url = t.url;
     }
+    if (cancelled) return;
     if (url == null) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text('获取下载地址失败')));
-      }
+      closeDialog();
+      _snack('获取下载地址失败');
       return;
     }
     try {
@@ -260,26 +304,40 @@ class _HomeShellState extends State<HomeShell> {
           await getApplicationDocumentsDirectory();
       final safe = t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
       final dest = '${dir.path}/$safe.mp4';
+      progress.value = '连接中…';
       final req = http.Request('GET', Uri.parse(url));
       req.headers.addAll(headers);
-      final resp = await http.Client().send(req);
+      final resp =
+          await http.Client().send(req).timeout(const Duration(seconds: 30));
       if (resp.statusCode >= 400) {
-        if (mounted) {
-          ScaffoldMessenger.of(context)
-              .showSnackBar(SnackBar(content: Text('下载失败 ${resp.statusCode}')));
-        }
+        closeDialog();
+        _snack('下载失败 ${resp.statusCode}');
         return;
       }
-      await resp.stream.pipe(File(dest).openWrite());
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('已下载到 $dest')));
+      final total = resp.contentLength ?? 0;
+      var received = 0;
+      final sink = File(dest).openWrite();
+      await for (final chunk in resp.stream) {
+        if (cancelled) break;
+        sink.add(chunk);
+        received += chunk.length;
+        final mb = (received / 1048576).toStringAsFixed(1);
+        progress.value = total > 0
+            ? '$mb / ${(total / 1048576).toStringAsFixed(1)} MB'
+            : '$mb MB';
       }
+      await sink.close();
+      if (cancelled) {
+        try {
+          File(dest).deleteSync();
+        } catch (_) {}
+        return;
+      }
+      closeDialog();
+      _snack('已下载到 $dest');
     } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('下载出错：$e')));
-      }
+      closeDialog();
+      _snack('下载出错：$e');
     }
   }
 
@@ -1479,7 +1537,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.11.2'),
+          title: Text('小李播放器 v2.12.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
@@ -49,6 +50,101 @@ class _PlayerScreenState extends State<PlayerScreen> {
   bool _subtitleOn = false;
   bool _subApplied = false;
   bool _transcribing = false;
+
+  // 桌面悬浮字幕（仅 macOS）
+  static const _dsChannel = MethodChannel('xiaoli/desktop_subtitle');
+  bool _desktopSub = false;
+  double _dsOpacity = 0.5;
+  List<_Cue> _dcues = const [];
+  int _dLast = -1;
+
+  void _setDesktopSub(bool on) {
+    setState(() => _desktopSub = on);
+    if (on) {
+      _dcues = _parseSrt(_subtitle ?? '');
+      _dLast = -1;
+      _dsChannel.invokeMethod('show');
+      _dsChannel.invokeMethod('setOpacity', {'opacity': _dsOpacity});
+      _pushDesktopSub(_position);
+    } else {
+      _dsChannel.invokeMethod('hide');
+    }
+  }
+
+  void _pushDesktopSub(Duration pos) {
+    if (_dcues.isEmpty) return;
+    final i = _dcues.indexWhere((c) => pos >= c.start && pos < c.end);
+    if (i != _dLast) {
+      _dLast = i;
+      _dsChannel.invokeMethod('update', {'text': i >= 0 ? _dcues[i].text : ''});
+    }
+  }
+
+  void _showDesktopSubSheet() {
+    final cs = Theme.of(context).colorScheme;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (context, setSheet) => Padding(
+          padding: const EdgeInsets.fromLTRB(8, 8, 8, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SwitchListTile(
+                title: const Text('桌面悬浮字幕',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('置顶在屏幕顶部显示，可拖动',
+                    style: TextStyle(color: Colors.white54, fontSize: 12)),
+                value: _desktopSub,
+                onChanged: (v) {
+                  _setDesktopSub(v);
+                  setSheet(() {});
+                },
+              ),
+              ListTile(
+                title: const Text('背景透明度',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: Slider(
+                  value: _dsOpacity,
+                  activeColor: cs.primary,
+                  onChanged: _desktopSub
+                      ? (v) {
+                          setState(() => _dsOpacity = v);
+                          setSheet(() {});
+                          _dsChannel
+                              .invokeMethod('setOpacity', {'opacity': v});
+                        }
+                      : null,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  static List<_Cue> _parseSrt(String srt) {
+    final cues = <_Cue>[];
+    final timeRe = RegExp(
+        r'(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)');
+    for (final block in srt.replaceAll('\r\n', '\n').split(RegExp(r'\n\n+'))) {
+      final lines = block.split('\n');
+      final ti = lines.indexWhere(timeRe.hasMatch);
+      if (ti < 0) continue;
+      final m = timeRe.firstMatch(lines[ti])!;
+      Duration d(int a, int b, int c, int e) =>
+          Duration(hours: a, minutes: b, seconds: c, milliseconds: e);
+      final start = d(int.parse(m[1]!), int.parse(m[2]!), int.parse(m[3]!),
+          int.parse(m[4]!));
+      final end = d(int.parse(m[5]!), int.parse(m[6]!), int.parse(m[7]!),
+          int.parse(m[8]!));
+      final text = lines.skip(ti + 1).join(' ').trim();
+      if (text.isNotEmpty) cues.add(_Cue(start, end, text));
+    }
+    return cues;
+  }
 
   // 音量 / 循环 / 睡眠定时
   double _volume = 100;
@@ -351,7 +447,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (done && !_loop && mounted) widget.onCompleted?.call();
     }));
     _subs.add(_player.stream.position.listen((p) {
-      if (mounted) setState(() => _position = p);
+      if (!mounted) return;
+      setState(() => _position = p);
+      if (_desktopSub) _pushDesktopSub(p);
     }));
     _subs.add(_player.stream.duration.listen((d) {
       if (!mounted) return;
@@ -396,6 +494,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _sleepTimer?.cancel();
+    if (_desktopSub) _dsChannel.invokeMethod('hide');
     if (_fullscreen) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
@@ -463,6 +562,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
               tooltip: '关注 UP主',
               icon: const Icon(Icons.person_add_alt, color: Colors.white70),
               onPressed: widget.onFollow,
+            ),
+          if (_subtitle != null && Platform.isMacOS)
+            IconButton(
+              tooltip: '桌面悬浮字幕',
+              icon: Icon(
+                  _desktopSub
+                      ? Icons.picture_in_picture
+                      : Icons.picture_in_picture_outlined,
+                  color: _desktopSub
+                      ? Theme.of(context).colorScheme.primary
+                      : Colors.white70),
+              onPressed: _showDesktopSubSheet,
             ),
           if (_subtitle != null)
             IconButton(
@@ -765,4 +876,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       ],
     );
   }
+}
+
+class _Cue {
+  final Duration start;
+  final Duration end;
+  final String text;
+  const _Cue(this.start, this.end, this.text);
 }
