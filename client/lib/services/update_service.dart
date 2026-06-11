@@ -17,7 +17,7 @@ class UpdateInfo {
 /// [manifestUrl] 现为占位地址；有了托管（如 GitHub Releases）后替换即可。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.11.0';
+  static const currentVersion = '2.11.1';
 
   /// 更新清单地址（局域网更新服务）。
   static const manifestUrl = 'http://10.10.10.5:8899/latest.json';

@@ -41,27 +41,42 @@ class PlatformService {
 
   Future<List<PlatformVideo>> list() => search('');
 
+  /// 上传优先级：本机直传(秒级) → 局域网 → 公网(慢，兜底)。
+  /// cloudflared 免费隧道上传极慢，故同机/同网时直传服务器。
+  static const _uploadBases = [
+    'http://localhost:8900',
+    'http://10.10.10.5:8900',
+    baseUrl,
+  ];
+
   /// 上传视频到平台。返回给用户的提示。
   Future<String> upload(String path, String title, String uploader) async {
-    try {
-      final file = File(path);
-      if (!file.existsSync()) return '文件不存在';
-      final ext = path.contains('.') ? path.split('.').last.toLowerCase() : 'mp4';
-      final bytes = await file.readAsBytes();
-      final r = await _http
-          .post(
-            Uri.parse('$baseUrl/upload'
-                '?title=${Uri.encodeComponent(title)}'
-                '&uploader=${Uri.encodeComponent(uploader)}&ext=$ext'),
-            headers: {'Content-Type': 'application/octet-stream'},
-            body: bytes,
-          )
-          .timeout(const Duration(minutes: 15));
-      final d = jsonDecode(r.body);
-      if (d['ok'] == true) return '上传成功！别人搜「$title」就能看到';
-      return '上传失败：${d['error'] ?? r.statusCode}';
-    } catch (e) {
-      return '上传出错：$e';
+    final file = File(path);
+    if (!file.existsSync()) return '文件不存在';
+    final ext = path.contains('.') ? path.split('.').last.toLowerCase() : 'mp4';
+    final bytes = await file.readAsBytes();
+    final query = '?title=${Uri.encodeComponent(title)}'
+        '&uploader=${Uri.encodeComponent(uploader)}&ext=$ext';
+    String lastErr = '服务器连不上';
+    for (final base in _uploadBases) {
+      try {
+        final h = await _http
+            .get(Uri.parse('$base/health'))
+            .timeout(const Duration(seconds: 3));
+        if (h.statusCode != 200) continue;
+        final r = await _http
+            .post(Uri.parse('$base/upload$query'),
+                headers: {'Content-Type': 'application/octet-stream'},
+                body: bytes)
+            .timeout(const Duration(minutes: 20));
+        final d = jsonDecode(r.body);
+        if (d['ok'] == true) return '上传成功！别人搜「$title」就能看到';
+        lastErr = '${d['error'] ?? r.statusCode}';
+      } catch (e) {
+        lastErr = '$e';
+        continue;
+      }
     }
+    return '上传失败：$lastErr（确保平台服务器在运行）';
   }
 }
