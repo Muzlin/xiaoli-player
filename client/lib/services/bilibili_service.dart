@@ -24,6 +24,21 @@ class BiliUser {
       required this.fans});
 }
 
+/// 一条 B站 评论。
+class BiliComment {
+  final String uname;
+  final String avatar;
+  final String content;
+  final int like;
+  final int replyCount;
+  BiliComment(
+      {required this.uname,
+      required this.avatar,
+      required this.content,
+      required this.like,
+      required this.replyCount});
+}
+
 /// 联网搜索中文音乐内容并取可播放地址（搜索/取流需 wbi 签名，播放需 Referer）。
 class BilibiliService {
   static const _ua =
@@ -446,6 +461,45 @@ class BilibiliService {
                 'sign': e['sign'] ?? '',
               })
           .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 取视频热门评论（type=1, oid=aid）。失败/受限返回空。
+  Future<List<BiliComment>> getComments(String bvid, {int pn = 1}) async {
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final aid = view['data']?['aid'];
+      if (aid == null) return [];
+      final r = await _http
+          .get(
+            Uri.parse('https://api.bilibili.com/x/v2/reply'
+                '?type=1&oid=$aid&sort=1&pn=$pn&ps=20'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 12));
+      final data = jsonDecode(r.body)['data'];
+      final replies = (data?['replies'] as List?) ?? [];
+      final out = <BiliComment>[];
+      for (final e in replies) {
+        final m = e as Map<String, dynamic>;
+        final member = (m['member'] as Map<String, dynamic>?) ?? {};
+        final content = (m['content'] as Map<String, dynamic>?) ?? {};
+        out.add(BiliComment(
+          uname: (member['uname'] ?? '') as String,
+          avatar: (member['avatar'] ?? '') as String,
+          content: (content['message'] ?? '') as String,
+          like: (m['like'] as num?)?.toInt() ?? 0,
+          replyCount: (m['rcount'] as num?)?.toInt() ?? 0,
+        ));
+      }
+      return out;
     } catch (_) {
       return [];
     }

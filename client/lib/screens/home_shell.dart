@@ -1159,6 +1159,7 @@ class _HomeShellState extends State<HomeShell> {
       tag: '平台');
 
   Future<void> _loadPlatform() async {
+    await PlatformService.loadLocal();
     final vs = await _platform.list();
     if (!mounted) return;
     setState(() {
@@ -1266,6 +1267,8 @@ class _HomeShellState extends State<HomeShell> {
         onToggleFavorite: () => _toggleFav(t),
         onCompleted: () => _onTrackCompleted(),
         onFollow: t.bvid != null ? () => _followUp(t.bvid!) : null,
+        onLoadComments:
+            t.bvid != null ? () => _bili.getComments(t.bvid!) : null,
       ),
     );
     if (replace) {
@@ -1878,7 +1881,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.14.0'),
+          title: Text('小李播放器 v2.15.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(

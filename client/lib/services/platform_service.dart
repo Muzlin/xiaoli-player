@@ -13,21 +13,39 @@ class PlatformVideo {
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
 class PlatformService {
   /// 平台公网地址（cloudflared 隧道）。隧道重启会变，届时需更新。
+  /// 兜底地址（隧道默认值）。生效地址 [_base] 启动时可被本机 public_url.txt 覆盖。
   static const baseUrl =
-      'https://cleaner-heel-vacation-breach.trycloudflare.com';
+      'https://experimental-gauge-laundry-ranks.trycloudflare.com';
+  static String _base = baseUrl;
+
+  /// macOS 上读本机 ~/xiaoli-platform/public_url.txt（看门狗维护的当前隧道地址），
+  /// 地址变了也不用重打包。其它平台用兜底地址。
+  static Future<void> loadLocal() async {
+    if (!Platform.isMacOS) return;
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      final f = File('$home/xiaoli-platform/public_url.txt');
+      if (f.existsSync()) {
+        final u = f.readAsStringSync().trim();
+        if (u.startsWith('https://')) _base = u;
+      }
+    } catch (_) {}
+  }
+
+  static String get current => _base;
 
   /// 官方下载页（公网，发给别人装 app）。
-  static String get downloadUrl => '$baseUrl/download';
+  static String get downloadUrl => '$_base/download';
 
   final http.Client _http;
   PlatformService([http.Client? c]) : _http = c ?? http.Client();
 
-  static String videoUrl(String id) => '$baseUrl/video/$id';
+  static String videoUrl(String id) => '$_base/video/$id';
 
   Future<List<PlatformVideo>> search(String q) async {
     try {
       final r = await _http
-          .get(Uri.parse('$baseUrl/search?q=${Uri.encodeComponent(q)}'))
+          .get(Uri.parse('$_base/search?q=${Uri.encodeComponent(q)}'))
           .timeout(const Duration(seconds: 15));
       final list = (jsonDecode(r.body) as List?) ?? [];
       return list
@@ -47,11 +65,11 @@ class PlatformService {
 
   /// 上传优先级：本机直传(秒级) → 局域网 → 公网(慢，兜底)。
   /// cloudflared 免费隧道上传极慢，故同机/同网时直传服务器。
-  static const _uploadBases = [
-    'http://localhost:8900',
-    'http://10.10.10.5:8900',
-    baseUrl,
-  ];
+  static List<String> get _uploadBases => [
+        'http://localhost:8900',
+        'http://10.10.10.5:8900',
+        _base,
+      ];
 
   /// 上传视频到平台。返回给用户的提示。
   Future<String> upload(String path, String title, String uploader) async {

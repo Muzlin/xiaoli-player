@@ -7,6 +7,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../player/playback_source.dart';
 import '../services/transcribe_service.dart';
+import '../services/bilibili_service.dart';
 
 export '../player/playback_source.dart';
 
@@ -17,6 +18,7 @@ class PlayerScreen extends StatefulWidget {
   final VoidCallback? onToggleFavorite; // 切换收藏（由列表页提供）
   final VoidCallback? onCompleted; // 播完且未单曲循环时回调（自动连播）
   final VoidCallback? onFollow; // 关注当前 UP主（仅 B站）
+  final Future<List<BiliComment>> Function()? onLoadComments; // 评论(仅 B站)
   const PlayerScreen({
     super.key,
     required this.source,
@@ -24,6 +26,7 @@ class PlayerScreen extends StatefulWidget {
     this.onToggleFavorite,
     this.onCompleted,
     this.onFollow,
+    this.onLoadComments,
   });
 
   @override
@@ -122,6 +125,89 @@ class _PlayerScreenState extends State<PlayerScreen> {
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  void _showComments() {
+    final loader = widget.onLoadComments;
+    if (loader == null) return;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF24242C),
+      isScrollControlled: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.7,
+        maxChildSize: 0.95,
+        builder: (_, controller) => FutureBuilder<List<BiliComment>>(
+          future: loader(),
+          builder: (context, snap) {
+            if (snap.connectionState != ConnectionState.done) {
+              return const Center(
+                  child: Padding(
+                      padding: EdgeInsets.all(40),
+                      child: CircularProgressIndicator()));
+            }
+            final list = snap.data ?? [];
+            if (list.isEmpty) {
+              return const Center(
+                  child: Padding(
+                      padding: EdgeInsets.all(40),
+                      child: Text('暂无评论或加载失败',
+                          style: TextStyle(color: Colors.white54))));
+            }
+            return ListView.separated(
+              controller: controller,
+              padding: const EdgeInsets.symmetric(vertical: 8),
+              itemCount: list.length + 1,
+              separatorBuilder: (_, __) =>
+                  const Divider(height: 1, color: Colors.white12),
+              itemBuilder: (context, i) {
+                if (i == 0) {
+                  return const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
+                    child: Text('热门评论',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold)),
+                  );
+                }
+                final c = list[i - 1];
+                return ListTile(
+                  leading: CircleAvatar(
+                    radius: 18,
+                    backgroundColor: Colors.white12,
+                    backgroundImage:
+                        c.avatar.isNotEmpty ? NetworkImage(c.avatar) : null,
+                    child: c.avatar.isEmpty
+                        ? const Icon(Icons.person,
+                            size: 18, color: Colors.white54)
+                        : null,
+                  ),
+                  title: Text(c.uname,
+                      style:
+                          const TextStyle(color: Colors.white70, fontSize: 12)),
+                  subtitle: Text(c.content,
+                      style:
+                          const TextStyle(color: Colors.white, fontSize: 14)),
+                  trailing: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.thumb_up_alt_outlined,
+                          size: 14, color: Colors.white38),
+                      Text('${c.like}',
+                          style: const TextStyle(
+                              color: Colors.white38, fontSize: 11)),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
         ),
       ),
     );
@@ -593,6 +679,12 @@ class _PlayerScreenState extends State<PlayerScreen> {
               tooltip: '关注 UP主',
               icon: const Icon(Icons.person_add_alt, color: Colors.white70),
               onPressed: widget.onFollow,
+            ),
+          if (widget.onLoadComments != null)
+            IconButton(
+              tooltip: '评论',
+              icon: const Icon(Icons.comment_outlined, color: Colors.white70),
+              onPressed: _showComments,
             ),
           if (_subtitle != null && Platform.isMacOS)
             IconButton(
