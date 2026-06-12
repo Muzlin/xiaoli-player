@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:http/http.dart' as http;
 import '../player/playback_source.dart';
@@ -1631,7 +1632,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.13.0'),
+          title: Text('小李播放器 v2.13.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -1739,6 +1740,30 @@ class _HomeShellState extends State<HomeShell> {
             subtitle: const Text('查看并管理你关注的 UP主（可取关）'),
             onTap: _showFollowings,
           ),
+        ListTile(
+          leading: const Icon(Icons.cloud_download_outlined),
+          title: const Text('官方下载网址'),
+          subtitle: Text(PlatformService.downloadUrl,
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          trailing: IconButton(
+            icon: const Icon(Icons.copy, size: 18),
+            tooltip: '复制',
+            onPressed: () {
+              Clipboard.setData(
+                  ClipboardData(text: PlatformService.downloadUrl));
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已复制下载网址')));
+              }
+            },
+          ),
+          onTap: () async {
+            final uri = Uri.parse(PlatformService.downloadUrl);
+            if (await canLaunchUrl(uri)) {
+              await launchUrl(uri, mode: LaunchMode.externalApplication);
+            }
+          },
+        ),
         ListTile(
           leading: const Icon(Icons.description_outlined),
           title: const Text('免责声明'),

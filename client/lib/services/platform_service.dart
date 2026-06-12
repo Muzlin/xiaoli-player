@@ -14,7 +14,10 @@ class PlatformVideo {
 class PlatformService {
   /// 平台公网地址（cloudflared 隧道）。隧道重启会变，届时需更新。
   static const baseUrl =
-      'https://heel-reporter-tribunal-priorities.trycloudflare.com';
+      'https://cleaner-heel-vacation-breach.trycloudflare.com';
+
+  /// 官方下载页（公网，发给别人装 app）。
+  static String get downloadUrl => '$baseUrl/download';
 
   final http.Client _http;
   PlatformService([http.Client? c]) : _http = c ?? http.Client();
