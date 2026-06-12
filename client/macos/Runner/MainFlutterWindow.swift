@@ -44,7 +44,44 @@ class MainFlutterWindow: NSWindow {
       }
     }
 
+    let winChannel = FlutterMethodChannel(
+      name: "xiaoli/window",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    winChannel.setMethodCallHandler { [weak self] (call, result) in
+      if call.method == "setMini" {
+        let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+        self?.setMini(on)
+        result(nil)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
     super.awakeFromNib()
+  }
+
+  // 小窗播放：把主窗缩成置顶悬浮小窗，浮在所有应用之上。
+  private var savedFrame: NSRect?
+  func setMini(_ on: Bool) {
+    if on {
+      if savedFrame == nil { savedFrame = self.frame }
+      self.level = .floating
+      self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+      let w: CGFloat = 480
+      let h: CGFloat = 300
+      if let scr = NSScreen.main?.visibleFrame {
+        self.setFrame(
+          NSRect(x: scr.maxX - w - 24, y: scr.minY + 24, width: w, height: h),
+          display: true, animate: true)
+      }
+    } else {
+      self.level = .normal
+      self.collectionBehavior = [.fullScreenPrimary]
+      if let f = savedFrame {
+        self.setFrame(f, display: true, animate: true)
+        savedFrame = nil
+      }
+    }
   }
 }
 

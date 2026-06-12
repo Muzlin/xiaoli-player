@@ -53,7 +53,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   // 桌面悬浮字幕（仅 macOS）
   static const _dsChannel = MethodChannel('xiaoli/desktop_subtitle');
+  static const _winChannel = MethodChannel('xiaoli/window');
   bool _desktopSub = false;
+  bool _mini = false; // 小窗播放(仅macOS)
   double _dsOpacity = 0.5;
   List<_Cue> _dcues = const [];
   int _dLast = -1;
@@ -121,6 +123,32 @@ class _PlayerScreenState extends State<PlayerScreen> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _toggleMini() {
+    setState(() => _mini = !_mini);
+    _winChannel.invokeMethod('setMini', {'on': _mini});
+  }
+
+  Widget _miniView(ColorScheme cs) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: Stack(
+        children: [
+          Positioned.fill(child: _videoView()),
+          Positioned(
+            top: 2,
+            right: 2,
+            child: IconButton(
+              tooltip: '退出小窗',
+              icon: const Icon(Icons.close_fullscreen,
+                  color: Colors.white70, size: 18),
+              onPressed: _toggleMini,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -495,6 +523,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void dispose() {
     _sleepTimer?.cancel();
     if (_desktopSub) _dsChannel.invokeMethod('hide');
+    if (_mini) _winChannel.invokeMethod('setMini', {'on': false});
     if (_fullscreen) {
       SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     }
@@ -537,9 +566,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
       },
       child: Focus(
         autofocus: true,
-        child: (showVideo && _fullscreen)
-            ? _fullscreenView(cs)
-            : Scaffold(
+        child: (showVideo && _mini)
+            ? _miniView(cs)
+            : (showVideo && _fullscreen)
+                ? _fullscreenView(cs)
+                : Scaffold(
       backgroundColor: const Color(0xFF1E1E26),
       appBar: AppBar(
         backgroundColor: const Color(0xFF1E1E26),
@@ -623,6 +654,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
                         ? Theme.of(context).colorScheme.primary
                         : Colors.white70),
                 onPressed: () => setState(() => _cropEdges = !_cropEdges),
+              ),
+            if (!_audioOnly && Platform.isMacOS)
+              IconButton(
+                tooltip: '小窗播放',
+                icon: Icon(
+                    _mini
+                        ? Icons.close_fullscreen
+                        : Icons.picture_in_picture_alt,
+                    color: _mini ? cs.primary : Colors.white70),
+                onPressed: _toggleMini,
               ),
             if (!_audioOnly)
               IconButton(
