@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:crypto/crypto.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -117,6 +118,9 @@ class _HomeShellState extends State<HomeShell> {
   int _hideHotkeyCode = 4; // ⌥⌘H 默认(H=4)
   int _hideHotkeyMods = 2304;
   String _hideHotkeyLabel = '⌥⌘H';
+  bool _blockQuit = false;
+  String? _pwdHash;
+  final Set<String> _protectedKeys = {};
   Timer? _urlTimer; // 定时重读本机平台地址
   final UpdateService _update = UpdateService();
   Track? _current;
@@ -182,6 +186,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadHistory();
     _loadPlatform();
     _loadAppSettings();
+    _loadProtection();
     _loadAutoNext();
     if (Platform.isMacOS) {
       _urlTimer = Timer.periodic(
@@ -1441,7 +1446,7 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _loadAppSettings() async {
     if (!Platform.isMacOS) return;
-    var login = false, bg = false, hk = false, hidehk = false;
+    var login = false, bg = false, hk = false, hidehk = false, bq = false;
     try {
       final home = Platform.environment['HOME'] ?? '';
       login = File('$home/Library/LaunchAgents/$_loginPlist').existsSync();
@@ -1454,6 +1459,7 @@ class _HomeShellState extends State<HomeShell> {
       hk = (await _winChannel.invokeMethod<bool>('hotkeyEnabled')) ?? false;
       hidehk =
           (await _winChannel.invokeMethod<bool>('hideHotkeyEnabled')) ?? false;
+      bq = (await _winChannel.invokeMethod<bool>('blockQuitEnabled')) ?? false;
     } catch (_) {}
     try {
       final p = await SharedPreferences.getInstance();
@@ -1470,6 +1476,7 @@ class _HomeShellState extends State<HomeShell> {
         _backgroundRun = bg;
         _hotkey = hk;
         _hideHotkey = hidehk;
+        _blockQuit = bq;
       });
     }
   }
@@ -1624,6 +1631,62 @@ class _HomeShellState extends State<HomeShell> {
       await _winChannel.invokeMethod('setHideHotkey',
           {'on': on, 'code': _hideHotkeyCode, 'mods': _hideHotkeyMods});
     } catch (_) {}
+  }
+
+  Future<void> _setBlockQuit(bool on) async {
+    setState(() => _blockQuit = on);
+    try {
+      await _winChannel.invokeMethod('setBlockQuit', {'on': on});
+    } catch (_) {}
+  }
+
+  Future<void> _loadProtection() async {
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _pwdHash = p.getString('app_pwd_hash');
+      _protectedKeys
+        ..clear()
+        ..addAll(p.getStringList('protected_keys') ?? []);
+    });
+  }
+
+  String _pwdSha(String s) => sha256.convert(utf8.encode(s)).toString();
+
+  Future<bool> _promptPassword() async {
+    if (_pwdHash == null) return true;
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('请输入密码'),
+        content: TextField(
+          controller: ctrl,
+          obscureText: true,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '密码'),
+          onSubmitted: (_) =>
+              Navigator.pop(ctx, _pwdSha(ctrl.text) == _pwdHash),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () =>
+                  Navigator.pop(ctx, _pwdSha(ctrl.text) == _pwdHash),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    return ok == true;
+  }
+
+  Future<void> _guard(String key, FutureOr<void> Function() action) async {
+    if (_pwdHash != null && _protectedKeys.contains(key)) {
+      if (!await _promptPassword()) return;
+    }
+    await action();
   }
 
   void _openUser(BiliUser u) {
@@ -1941,7 +2004,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.16.0'),
+          title: Text('小李播放器 v2.17.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2054,7 +2117,8 @@ class _HomeShellState extends State<HomeShell> {
             secondary: const Icon(Icons.power_settings_new),
             title: const Text('开机自动启动'),
             value: _launchAtLogin,
-            onChanged: _setLaunchAtLogin,
+            onChanged: (v) =>
+                _guard('launchAtLogin', () => _setLaunchAtLogin(v)),
           ),
           SwitchListTile(
             secondary: const Icon(Icons.dark_mode_outlined),
@@ -2062,14 +2126,26 @@ class _HomeShellState extends State<HomeShell> {
             subtitle: const Text('关窗口不退出，点 Dock 图标重新打开',
                 style: TextStyle(fontSize: 12)),
             value: _backgroundRun,
-            onChanged: _setBackgroundRun,
+            onChanged: (v) =>
+                _guard('backgroundRun', () => _setBackgroundRun(v)),
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.block),
+            title: const Text('禁止退出'),
+            subtitle: const Text('开启后 ⌘Q 也退不出，需在此关闭',
+                style: TextStyle(fontSize: 12)),
+            value: _blockQuit,
+            onChanged: (v) =>
+                _guard('blockQuit', () => _setBlockQuit(v)),
           ),
           ListTile(
             leading: const Icon(Icons.keyboard_outlined),
             title: const Text('全局快捷键唤起'),
             subtitle: Text('当前：$_hotkeyLabel · 点这里改键',
                 style: const TextStyle(fontSize: 12)),
-            trailing: Switch(value: _hotkey, onChanged: _setHotkeyEnabled),
+            trailing: Switch(
+                value: _hotkey,
+                onChanged: (v) => _guard('hotkey', () => _setHotkeyEnabled(v))),
             onTap: _recordHotkey,
           ),
           ListTile(
@@ -2077,8 +2153,22 @@ class _HomeShellState extends State<HomeShell> {
             title: const Text('全局快捷键隐藏'),
             subtitle: Text('当前：$_hideHotkeyLabel · 一键隐藏窗口 · 点这里改键',
                 style: const TextStyle(fontSize: 12)),
-            trailing: Switch(value: _hideHotkey, onChanged: _setHideHotkeyEnabled),
+            trailing: Switch(
+                value: _hideHotkey,
+                onChanged: (v) =>
+                    _guard('hideHotkey', () => _setHideHotkeyEnabled(v))),
             onTap: _recordHideHotkey,
+          ),
+          ListTile(
+            leading: const Icon(Icons.lock_outline),
+            title: const Text('密码保护'),
+            subtitle: const Text('设密码 + 自选哪些操作/设置需要密码',
+                style: TextStyle(fontSize: 12)),
+            onTap: () async {
+              await Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const _PasswordProtectPage()));
+              _loadProtection();
+            },
           ),
         ],
         ListTile(
@@ -2300,6 +2390,158 @@ class _UserVideosPageState extends State<_UserVideosPage> {
                     );
                   },
                 ),
+    );
+  }
+}
+
+
+class _PasswordProtectPage extends StatefulWidget {
+  const _PasswordProtectPage();
+  @override
+  State<_PasswordProtectPage> createState() => _PasswordProtectPageState();
+}
+
+class _PasswordProtectPageState extends State<_PasswordProtectPage> {
+  static const _ch = MethodChannel('xiaoli/window');
+  static const _items = [
+    ['quit', '退出 App'],
+    ['launchAtLogin', '开机自动启动'],
+    ['backgroundRun', '后台运行'],
+    ['blockQuit', '禁止退出'],
+    ['hotkey', '全局快捷键唤起'],
+    ['hideHotkey', '全局快捷键隐藏'],
+  ];
+  String? _hash;
+  final Set<String> _protected = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _hash = p.getString('app_pwd_hash');
+      _protected
+        ..clear()
+        ..addAll(p.getStringList('protected_keys') ?? []);
+    });
+  }
+
+  String _sha(String s) => sha256.convert(utf8.encode(s)).toString();
+
+  Future<void> _syncQuit() async {
+    final on = _protected.contains('quit') && _hash != null;
+    try {
+      await _ch.invokeMethod('setQuitPassword', {'on': on, 'hash': _hash ?? ''});
+    } catch (_) {}
+  }
+
+  Future<void> _setPassword() async {
+    final p1 = TextEditingController();
+    final p2 = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('设置密码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+                controller: p1,
+                obscureText: true,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: '新密码')),
+            TextField(
+                controller: p2,
+                obscureText: true,
+                decoration: const InputDecoration(labelText: '确认密码')),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (p1.text.isEmpty || p1.text != p2.text) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('两次密码不一致或为空')));
+      }
+      return;
+    }
+    final h = _sha(p1.text);
+    final p = await SharedPreferences.getInstance();
+    await p.setString('app_pwd_hash', h);
+    setState(() => _hash = h);
+    await _syncQuit();
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('密码已设置')));
+    }
+  }
+
+  Future<void> _clearPassword() async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove('app_pwd_hash');
+    setState(() => _hash = null);
+    await _syncQuit();
+  }
+
+  Future<void> _toggle(String key, bool on) async {
+    setState(() {
+      if (on) {
+        _protected.add(key);
+      } else {
+        _protected.remove(key);
+      }
+    });
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList('protected_keys', _protected.toList());
+    if (key == 'quit') await _syncQuit();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('密码保护')),
+      body: ListView(
+        children: [
+          ListTile(
+            leading: const Icon(Icons.password),
+            title: Text(_hash == null ? '设置密码' : '修改密码'),
+            subtitle: Text(_hash == null ? '未设置密码' : '已设置',
+                style: const TextStyle(fontSize: 12)),
+            trailing: _hash == null
+                ? null
+                : TextButton(
+                    onPressed: _clearPassword, child: const Text('清除')),
+            onTap: _setPassword,
+          ),
+          const Divider(),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 8, 16, 4),
+            child: Text('勾选的操作/设置改动时需要密码（先设密码）',
+                style: TextStyle(color: Colors.black54, fontSize: 13)),
+          ),
+          for (final it in _items)
+            CheckboxListTile(
+              title: Text(it[1]),
+              value: _protected.contains(it[0]),
+              onChanged:
+                  _hash == null ? null : (v) => _toggle(it[0], v ?? false),
+            ),
+        ],
+      ),
     );
   }
 }

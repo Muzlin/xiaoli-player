@@ -79,6 +79,17 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         result(nil)
       case "hideHotkeyEnabled":
         result(UserDefaults.standard.bool(forKey: "hideHotkeyEnabled"))
+      case "setBlockQuit":
+        let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+        UserDefaults.standard.set(on, forKey: "blockQuit")
+        result(nil)
+      case "blockQuitEnabled":
+        result(UserDefaults.standard.bool(forKey: "blockQuit"))
+      case "setQuitPassword":
+        let a = call.arguments as? [String: Any]
+        UserDefaults.standard.set(a?["on"] as? Bool ?? false, forKey: "quitNeedsPassword")
+        UserDefaults.standard.set(a?["hash"] as? String ?? "", forKey: "appPwdHash")
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }
