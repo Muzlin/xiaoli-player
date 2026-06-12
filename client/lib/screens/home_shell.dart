@@ -2004,7 +2004,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.17.0'),
+          title: Text('小李播放器 v2.17.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2165,6 +2165,7 @@ class _HomeShellState extends State<HomeShell> {
             subtitle: const Text('设密码 + 自选哪些操作/设置需要密码',
                 style: TextStyle(fontSize: 12)),
             onTap: () async {
+              if (_pwdHash != null && !await _promptPassword()) return;
               await Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => const _PasswordProtectPage()));
               _loadProtection();
