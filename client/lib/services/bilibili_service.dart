@@ -505,6 +505,45 @@ class BilibiliService {
     }
   }
 
+  /// 发表评论（需登录含 bili_jct）。返回提示。
+  Future<String> postComment(String bvid, String message) async {
+    if (_userCookie.isEmpty) return '请先登录 B站';
+    final jct = _biliJct;
+    if (jct.isEmpty) return '发评论需完整登录(bili_jct)，请扫码登录';
+    if (message.trim().isEmpty) return '评论不能为空';
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final aid = view['data']?['aid'];
+      if (aid == null) return '获取视频失败';
+      final r = await _http
+          .post(
+            Uri.parse('https://api.bilibili.com/x/v2/reply/add'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: {
+              'oid': '$aid',
+              'type': '1',
+              'message': message,
+              'plat': '1',
+              'csrf': jct,
+            },
+          )
+          .timeout(const Duration(seconds: 12));
+      final d = jsonDecode(r.body);
+      if (d['code'] == 0) return '评论成功';
+      return '评论失败：${d['message'] ?? d['code']}';
+    } catch (e) {
+      return '评论出错：$e';
+    }
+  }
+
   /// 搜索 B站 用户/UP主。失败/受限返回空。
   Future<List<BiliUser>> searchUsers(String keyword) async {
     if (keyword.trim().isEmpty) return [];

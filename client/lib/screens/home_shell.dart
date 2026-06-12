@@ -1267,8 +1267,11 @@ class _HomeShellState extends State<HomeShell> {
         onToggleFavorite: () => _toggleFav(t),
         onCompleted: () => _onTrackCompleted(),
         onFollow: t.bvid != null ? () => _followUp(t.bvid!) : null,
-        onLoadComments:
-            t.bvid != null ? () => _bili.getComments(t.bvid!) : null,
+        onLoadComments: t.bvid != null
+            ? (pn) => _bili.getComments(t.bvid!, pn: pn)
+            : null,
+        onPostComment:
+            t.bvid != null ? (msg) => _bili.postComment(t.bvid!, msg) : null,
       ),
     );
     if (replace) {
@@ -1881,7 +1884,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.15.0'),
+          title: Text('小李播放器 v2.15.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(

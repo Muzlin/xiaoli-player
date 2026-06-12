@@ -18,7 +18,8 @@ class PlayerScreen extends StatefulWidget {
   final VoidCallback? onToggleFavorite; // 切换收藏（由列表页提供）
   final VoidCallback? onCompleted; // 播完且未单曲循环时回调（自动连播）
   final VoidCallback? onFollow; // 关注当前 UP主（仅 B站）
-  final Future<List<BiliComment>> Function()? onLoadComments; // 评论(仅 B站)
+  final Future<List<BiliComment>> Function(int pn)? onLoadComments; // 评论分页(仅 B站)
+  final Future<String> Function(String message)? onPostComment; // 发评论(仅 B站)
   const PlayerScreen({
     super.key,
     required this.source,
@@ -27,6 +28,7 @@ class PlayerScreen extends StatefulWidget {
     this.onCompleted,
     this.onFollow,
     this.onLoadComments,
+    this.onPostComment,
   });
 
   @override
@@ -131,88 +133,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   void _showComments() {
-    final loader = widget.onLoadComments;
-    if (loader == null) return;
+    final load = widget.onLoadComments;
+    if (load == null) return;
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF24242C),
       isScrollControlled: true,
-      builder: (_) => DraggableScrollableSheet(
-        expand: false,
-        initialChildSize: 0.7,
-        maxChildSize: 0.95,
-        builder: (_, controller) => FutureBuilder<List<BiliComment>>(
-          future: loader(),
-          builder: (context, snap) {
-            if (snap.connectionState != ConnectionState.done) {
-              return const Center(
-                  child: Padding(
-                      padding: EdgeInsets.all(40),
-                      child: CircularProgressIndicator()));
-            }
-            final list = snap.data ?? [];
-            if (list.isEmpty) {
-              return const Center(
-                  child: Padding(
-                      padding: EdgeInsets.all(40),
-                      child: Text('暂无评论或加载失败',
-                          style: TextStyle(color: Colors.white54))));
-            }
-            return ListView.separated(
-              controller: controller,
-              padding: const EdgeInsets.symmetric(vertical: 8),
-              itemCount: list.length + 1,
-              separatorBuilder: (_, __) =>
-                  const Divider(height: 1, color: Colors.white12),
-              itemBuilder: (context, i) {
-                if (i == 0) {
-                  return const Padding(
-                    padding: EdgeInsets.fromLTRB(16, 4, 16, 8),
-                    child: Text('热门评论',
-                        style: TextStyle(
-                            color: Colors.white,
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold)),
-                  );
-                }
-                final c = list[i - 1];
-                return ListTile(
-                  leading: CircleAvatar(
-                    radius: 18,
-                    backgroundColor: Colors.white12,
-                    backgroundImage:
-                        c.avatar.isNotEmpty ? NetworkImage(c.avatar) : null,
-                    child: c.avatar.isEmpty
-                        ? const Icon(Icons.person,
-                            size: 18, color: Colors.white54)
-                        : null,
-                  ),
-                  title: Text(c.uname,
-                      style:
-                          const TextStyle(color: Colors.white70, fontSize: 12)),
-                  subtitle: Text(c.content,
-                      style:
-                          const TextStyle(color: Colors.white, fontSize: 14)),
-                  trailing: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Icon(Icons.thumb_up_alt_outlined,
-                          size: 14, color: Colors.white38),
-                      Text('${c.like}',
-                          style: const TextStyle(
-                              color: Colors.white38, fontSize: 11)),
-                    ],
-                  ),
-                );
-              },
-            );
-          },
-        ),
-      ),
+      builder: (_) => _CommentsSheet(load: load, post: widget.onPostComment),
     );
   }
-
   void _toggleMini() {
     setState(() => _mini = !_mini);
     _winChannel.invokeMethod('setMini', {'on': _mini});
@@ -1016,4 +945,197 @@ class _Cue {
   final Duration end;
   final String text;
   const _Cue(this.start, this.end, this.text);
+}
+
+
+class _CommentsSheet extends StatefulWidget {
+  final Future<List<BiliComment>> Function(int pn) load;
+  final Future<String> Function(String message)? post;
+  const _CommentsSheet({required this.load, this.post});
+  @override
+  State<_CommentsSheet> createState() => _CommentsSheetState();
+}
+
+class _CommentsSheetState extends State<_CommentsSheet> {
+  final List<BiliComment> _comments = [];
+  final ScrollController _scroll = ScrollController();
+  final TextEditingController _input = TextEditingController();
+  int _page = 0;
+  bool _loading = false;
+  bool _done = false;
+  bool _posting = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(() {
+      if (_scroll.position.pixels > _scroll.position.maxScrollExtent - 300) {
+        _loadMore();
+      }
+    });
+    _loadMore();
+  }
+
+  @override
+  void dispose() {
+    _scroll.dispose();
+    _input.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadMore() async {
+    if (_loading || _done) return;
+    setState(() => _loading = true);
+    final next = _page + 1;
+    final list = await widget.load(next);
+    if (!mounted) return;
+    setState(() {
+      _page = next;
+      _comments.addAll(list);
+      _loading = false;
+      if (list.length < 20) _done = true;
+    });
+  }
+
+  Future<void> _send() async {
+    final msg = _input.text.trim();
+    if (msg.isEmpty || widget.post == null || _posting) return;
+    setState(() => _posting = true);
+    final res = await widget.post!(msg);
+    if (!mounted) return;
+    setState(() => _posting = false);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(res)));
+    if (res.contains('成功')) {
+      _input.clear();
+      FocusScope.of(context).unfocus();
+      setState(() {
+        _comments.clear();
+        _page = 0;
+        _done = false;
+      });
+      _loadMore();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding:
+          EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: SizedBox(
+        height: MediaQuery.of(context).size.height * 0.75,
+        child: Column(
+          children: [
+            const Padding(
+              padding: EdgeInsets.fromLTRB(16, 12, 16, 8),
+              child: Text('评论',
+                  style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold)),
+            ),
+            Expanded(
+              child: (_comments.isEmpty && _done)
+                  ? const Center(
+                      child: Text('暂无评论',
+                          style: TextStyle(color: Colors.white54)))
+                  : ListView.separated(
+                      controller: _scroll,
+                      itemCount: _comments.length + 1,
+                      separatorBuilder: (_, __) =>
+                          const Divider(height: 1, color: Colors.white12),
+                      itemBuilder: (context, i) {
+                        if (i == _comments.length) {
+                          return Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Center(
+                              child: _done
+                                  ? const Text('没有更多了',
+                                      style: TextStyle(
+                                          color: Colors.white38, fontSize: 12))
+                                  : const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2)),
+                            ),
+                          );
+                        }
+                        final c = _comments[i];
+                        return ListTile(
+                          leading: CircleAvatar(
+                            radius: 18,
+                            backgroundColor: Colors.white12,
+                            backgroundImage: c.avatar.isNotEmpty
+                                ? NetworkImage(c.avatar)
+                                : null,
+                            child: c.avatar.isEmpty
+                                ? const Icon(Icons.person,
+                                    size: 18, color: Colors.white54)
+                                : null,
+                          ),
+                          title: Text(c.uname,
+                              style: const TextStyle(
+                                  color: Colors.white70, fontSize: 12)),
+                          subtitle: Text(c.content,
+                              style: const TextStyle(
+                                  color: Colors.white, fontSize: 14)),
+                          trailing: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              const Icon(Icons.thumb_up_alt_outlined,
+                                  size: 14, color: Colors.white38),
+                              Text('${c.like}',
+                                  style: const TextStyle(
+                                      color: Colors.white38, fontSize: 11)),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+            if (widget.post != null)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 8, 10),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _input,
+                        style: const TextStyle(color: Colors.white),
+                        minLines: 1,
+                        maxLines: 3,
+                        decoration: InputDecoration(
+                          hintText: '发条友善的评论…',
+                          hintStyle: const TextStyle(color: Colors.white38),
+                          filled: true,
+                          fillColor: Colors.white10,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 14, vertical: 10),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(22),
+                            borderSide: BorderSide.none,
+                          ),
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: _posting
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2))
+                          : Icon(Icons.send, color: cs.primary),
+                      onPressed: _posting ? null : _send,
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
