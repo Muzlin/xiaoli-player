@@ -113,6 +113,10 @@ class _HomeShellState extends State<HomeShell> {
   int _hotkeyCode = 35; // ⌥⌘P 默认(P=35)
   int _hotkeyMods = 2304; // cmd256|option2048
   String _hotkeyLabel = '⌥⌘P';
+  bool _hideHotkey = false;
+  int _hideHotkeyCode = 4; // ⌥⌘H 默认(H=4)
+  int _hideHotkeyMods = 2304;
+  String _hideHotkeyLabel = '⌥⌘H';
   Timer? _urlTimer; // 定时重读本机平台地址
   final UpdateService _update = UpdateService();
   Track? _current;
@@ -1437,7 +1441,7 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _loadAppSettings() async {
     if (!Platform.isMacOS) return;
-    var login = false, bg = false, hk = false;
+    var login = false, bg = false, hk = false, hidehk = false;
     try {
       final home = Platform.environment['HOME'] ?? '';
       login = File('$home/Library/LaunchAgents/$_loginPlist').existsSync();
@@ -1448,18 +1452,24 @@ class _HomeShellState extends State<HomeShell> {
     } catch (_) {}
     try {
       hk = (await _winChannel.invokeMethod<bool>('hotkeyEnabled')) ?? false;
+      hidehk =
+          (await _winChannel.invokeMethod<bool>('hideHotkeyEnabled')) ?? false;
     } catch (_) {}
     try {
       final p = await SharedPreferences.getInstance();
       _hotkeyCode = p.getInt('hotkey_code') ?? _hotkeyCode;
       _hotkeyMods = p.getInt('hotkey_mods') ?? _hotkeyMods;
       _hotkeyLabel = p.getString('hotkey_label') ?? _hotkeyLabel;
+      _hideHotkeyCode = p.getInt('hide_hotkey_code') ?? _hideHotkeyCode;
+      _hideHotkeyMods = p.getInt('hide_hotkey_mods') ?? _hideHotkeyMods;
+      _hideHotkeyLabel = p.getString('hide_hotkey_label') ?? _hideHotkeyLabel;
     } catch (_) {}
     if (mounted) {
       setState(() {
         _launchAtLogin = login;
         _backgroundRun = bg;
         _hotkey = hk;
+        _hideHotkey = hidehk;
       });
     }
   }
@@ -1513,7 +1523,7 @@ class _HomeShellState extends State<HomeShell> {
     LogicalKeyboardKey.controlRight,
   };
 
-  Future<void> _recordHotkey() async {
+  Future<Map<String, dynamic>?> _recordCombo(String title) async {
     final node = FocusNode();
     int? code;
     var mods = 0;
@@ -1522,7 +1532,7 @@ class _HomeShellState extends State<HomeShell> {
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setD) => AlertDialog(
-          title: const Text('设置全局快捷键'),
+          title: Text(title),
           content: RawKeyboardListener(
             focusNode: node..requestFocus(),
             onKey: (e) {
@@ -1571,18 +1581,49 @@ class _HomeShellState extends State<HomeShell> {
     );
     node.dispose();
     if (ok == true && code != null) {
-      setState(() {
-        _hotkeyCode = code!;
-        _hotkeyMods = mods;
-        _hotkeyLabel = label;
-      });
-      final p = await SharedPreferences.getInstance();
-      await p.setInt('hotkey_code', _hotkeyCode);
-      await p.setInt('hotkey_mods', _hotkeyMods);
-      await p.setString('hotkey_label', _hotkeyLabel);
-      await _winChannel.invokeMethod('setHotkey',
-          {'on': _hotkey, 'code': _hotkeyCode, 'mods': _hotkeyMods});
+      return {'code': code!, 'mods': mods, 'label': label};
     }
+    return null;
+  }
+
+  Future<void> _recordHotkey() async {
+    final r = await _recordCombo('设置「唤起」快捷键');
+    if (r == null) return;
+    setState(() {
+      _hotkeyCode = r['code'] as int;
+      _hotkeyMods = r['mods'] as int;
+      _hotkeyLabel = r['label'] as String;
+    });
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('hotkey_code', _hotkeyCode);
+    await p.setInt('hotkey_mods', _hotkeyMods);
+    await p.setString('hotkey_label', _hotkeyLabel);
+    await _winChannel.invokeMethod('setHotkey',
+        {'on': _hotkey, 'code': _hotkeyCode, 'mods': _hotkeyMods});
+  }
+
+  Future<void> _recordHideHotkey() async {
+    final r = await _recordCombo('设置「隐藏」快捷键');
+    if (r == null) return;
+    setState(() {
+      _hideHotkeyCode = r['code'] as int;
+      _hideHotkeyMods = r['mods'] as int;
+      _hideHotkeyLabel = r['label'] as String;
+    });
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('hide_hotkey_code', _hideHotkeyCode);
+    await p.setInt('hide_hotkey_mods', _hideHotkeyMods);
+    await p.setString('hide_hotkey_label', _hideHotkeyLabel);
+    await _winChannel.invokeMethod('setHideHotkey',
+        {'on': _hideHotkey, 'code': _hideHotkeyCode, 'mods': _hideHotkeyMods});
+  }
+
+  Future<void> _setHideHotkeyEnabled(bool on) async {
+    setState(() => _hideHotkey = on);
+    try {
+      await _winChannel.invokeMethod('setHideHotkey',
+          {'on': on, 'code': _hideHotkeyCode, 'mods': _hideHotkeyMods});
+    } catch (_) {}
   }
 
   void _openUser(BiliUser u) {
@@ -1900,7 +1941,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.15.2'),
+          title: Text('小李播放器 v2.16.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2030,6 +2071,14 @@ class _HomeShellState extends State<HomeShell> {
                 style: const TextStyle(fontSize: 12)),
             trailing: Switch(value: _hotkey, onChanged: _setHotkeyEnabled),
             onTap: _recordHotkey,
+          ),
+          ListTile(
+            leading: const Icon(Icons.keyboard_hide_outlined),
+            title: const Text('全局快捷键隐藏'),
+            subtitle: Text('当前：$_hideHotkeyLabel · 一键隐藏窗口 · 点这里改键',
+                style: const TextStyle(fontSize: 12)),
+            trailing: Switch(value: _hideHotkey, onChanged: _setHideHotkeyEnabled),
+            onTap: _recordHideHotkey,
           ),
         ],
         ListTile(

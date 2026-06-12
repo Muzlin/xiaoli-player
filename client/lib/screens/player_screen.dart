@@ -35,7 +35,8 @@ class PlayerScreen extends StatefulWidget {
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen>
+    with WidgetsBindingObserver {
   late final Player _player = Player();
   late final VideoController _controller = VideoController(_player);
   final List<StreamSubscription<dynamic>> _subs = [];
@@ -482,6 +483,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _isWebVideo =
         widget.source.isVideo && widget.source.resource.startsWith('http');
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
@@ -535,7 +537,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 隐藏窗口(全局热键/Cmd+H)时暂停播放(仅 macOS)。
+    if (Platform.isMacOS && state == AppLifecycleState.hidden) {
+      _player.pause();
+    }
+  }
+
+  @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
     if (_desktopSub) _dsChannel.invokeMethod('hide');
     if (_mini) _winChannel.invokeMethod('setMini', {'on': false});

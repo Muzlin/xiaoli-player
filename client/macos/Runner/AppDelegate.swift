@@ -20,6 +20,19 @@ class AppDelegate: FlutterAppDelegate {
     return true
   }
 
+  // Cmd+Q / 菜单退出时弹确认，防误退。
+  override func applicationShouldTerminate(_ sender: NSApplication)
+    -> NSApplication.TerminateReply
+  {
+    let alert = NSAlert()
+    alert.messageText = "确定要退出小李播放器吗？"
+    alert.informativeText = "正在播放的内容将停止。"
+    alert.addButton(withTitle: "退出")
+    alert.addButton(withTitle: "取消")
+    return alert.runModal() == .alertFirstButtonReturn
+      ? .terminateNow : .terminateCancel
+  }
+
   override func applicationSupportsSecureRestorableState(_ app: NSApplication) -> Bool {
     return true
   }

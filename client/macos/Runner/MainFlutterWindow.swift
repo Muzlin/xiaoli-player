@@ -70,6 +70,15 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         result(nil)
       case "hotkeyEnabled":
         result(UserDefaults.standard.bool(forKey: "hotkeyEnabled"))
+      case "setHideHotkey":
+        let a = call.arguments as? [String: Any]
+        let on = a?["on"] as? Bool ?? false
+        let code = UInt32((a?["code"] as? Int) ?? Int(kVK_ANSI_H))
+        let mods = UInt32((a?["mods"] as? Int) ?? Int(cmdKey | optionKey))
+        self?.setHideHotkey(on, code, mods)
+        result(nil)
+      case "hideHotkeyEnabled":
+        result(UserDefaults.standard.bool(forKey: "hideHotkeyEnabled"))
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -84,13 +93,52 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         UInt32(code == 0 ? Int(kVK_ANSI_P) : code),
         UInt32(mods == 0 ? Int(cmdKey | optionKey) : mods))
     }
+    if UserDefaults.standard.bool(forKey: "hideHotkeyEnabled") {
+      let d = UserDefaults.standard
+      let code = d.integer(forKey: "hideHotkeyCode")
+      let mods = d.integer(forKey: "hideHotkeyMods")
+      setHideHotkey(
+        true,
+        UInt32(code == 0 ? Int(kVK_ANSI_H) : code),
+        UInt32(mods == 0 ? Int(cmdKey | optionKey) : mods))
+    }
 
     super.awakeFromNib()
   }
 
-  // 全局快捷键：后台时按一下把窗口调到最前。Carbon 热键无需辅助功能权限，组合可自定义。
+  // 全局快捷键：唤起(id=1) / 隐藏(id=2)。Carbon 热键无需辅助功能权限，组合可自定义。
   private var hotKeyRef: EventHotKeyRef?
+  private var hideHotKeyRef: EventHotKeyRef?
   private var hotkeyHandlerInstalled = false
+
+  private func installHotkeyHandler() {
+    if hotkeyHandlerInstalled { return }
+    var spec = EventTypeSpec(
+      eventClass: OSType(kEventClassKeyboard),
+      eventKind: OSType(kEventHotKeyPressed))
+    InstallEventHandler(
+      GetApplicationEventTarget(),
+      { (_, event, _) -> OSStatus in
+        var hk = EventHotKeyID()
+        GetEventParameter(
+          event, EventParamName(kEventParamDirectObject),
+          EventParamType(typeEventHotKeyID), nil,
+          MemoryLayout<EventHotKeyID>.size, nil, &hk)
+        let id = hk.id
+        DispatchQueue.main.async {
+          if id == 2 {
+            NSApp.hide(nil)
+          } else {
+            NSApp.activate(ignoringOtherApps: true)
+            for w in NSApp.windows {
+              w.makeKeyAndOrderFront(nil)
+            }
+          }
+        }
+        return noErr
+      }, 1, &spec, nil, nil)
+    hotkeyHandlerInstalled = true
+  }
 
   func setHotkey(_ on: Bool, _ keyCode: UInt32, _ modifiers: UInt32) {
     let d = UserDefaults.standard
@@ -101,31 +149,29 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
       UnregisterEventHotKey(r)
       hotKeyRef = nil
     }
-    if on { registerHotkey(keyCode, modifiers) }
+    if on {
+      installHotkeyHandler()
+      let id = EventHotKeyID(signature: OSType(0x584C_5059), id: 1)
+      RegisterEventHotKey(
+        keyCode, modifiers, id, GetApplicationEventTarget(), 0, &hotKeyRef)
+    }
   }
 
-  private func registerHotkey(_ keyCode: UInt32, _ modifiers: UInt32) {
-    if !hotkeyHandlerInstalled {
-      var spec = EventTypeSpec(
-        eventClass: OSType(kEventClassKeyboard),
-        eventKind: OSType(kEventHotKeyPressed))
-      InstallEventHandler(
-        GetApplicationEventTarget(),
-        { (_, _, _) -> OSStatus in
-          DispatchQueue.main.async {
-            NSApp.activate(ignoringOtherApps: true)
-            for w in NSApp.windows {
-              w.makeKeyAndOrderFront(nil)
-            }
-          }
-          return noErr
-        }, 1, &spec, nil, nil)
-      hotkeyHandlerInstalled = true
+  func setHideHotkey(_ on: Bool, _ keyCode: UInt32, _ modifiers: UInt32) {
+    let d = UserDefaults.standard
+    d.set(on, forKey: "hideHotkeyEnabled")
+    d.set(Int(keyCode), forKey: "hideHotkeyCode")
+    d.set(Int(modifiers), forKey: "hideHotkeyMods")
+    if let r = hideHotKeyRef {
+      UnregisterEventHotKey(r)
+      hideHotKeyRef = nil
     }
-    let hkID = EventHotKeyID(signature: OSType(0x584C_5059), id: 1)  // 'XLPY'
-    RegisterEventHotKey(
-      keyCode, modifiers, hkID,
-      GetApplicationEventTarget(), 0, &hotKeyRef)
+    if on {
+      installHotkeyHandler()
+      let id = EventHotKeyID(signature: OSType(0x584C_5059), id: 2)
+      RegisterEventHotKey(
+        keyCode, modifiers, id, GetApplicationEventTarget(), 0, &hideHotKeyRef)
+    }
   }
 
   // 后台运行开启时，点关闭按钮只隐藏窗口（app 留在后台，Dock 点击可重开）。
