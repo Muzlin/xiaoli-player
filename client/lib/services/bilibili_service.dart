@@ -11,6 +11,19 @@ class BiliTrack {
   BiliTrack({required this.bvid, required this.title, required this.author});
 }
 
+/// 一个 B站 用户/UP主（搜索账号结果）。
+class BiliUser {
+  final int mid;
+  final String uname;
+  final String avatar;
+  final int fans;
+  BiliUser(
+      {required this.mid,
+      required this.uname,
+      required this.avatar,
+      required this.fans});
+}
+
 /// 联网搜索中文音乐内容并取可播放地址（搜索/取流需 wbi 签名，播放需 Referer）。
 class BilibiliService {
   static const _ua =
@@ -433,6 +446,48 @@ class BilibiliService {
                 'sign': e['sign'] ?? '',
               })
           .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 搜索 B站 用户/UP主。失败/受限返回空。
+  Future<List<BiliUser>> searchUsers(String keyword) async {
+    if (keyword.trim().isEmpty) return [];
+    try {
+      await _ensureInit();
+    } catch (_) {
+      return [];
+    }
+    try {
+      final qs = _sign({
+        'search_type': 'bili_user',
+        'keyword': keyword,
+        'page': '1',
+      });
+      final r = await _http
+          .get(
+            Uri.parse(
+                'https://api.bilibili.com/x/web-interface/wbi/search/type?$qs'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 12));
+      final res = (jsonDecode(r.body)['data']?['result'] as List?) ?? [];
+      final users = <BiliUser>[];
+      for (final e in res) {
+        final m = e as Map<String, dynamic>;
+        final mid = (m['mid'] as num?)?.toInt() ?? 0;
+        if (mid == 0) continue;
+        var pic = (m['upic'] ?? '') as String;
+        if (pic.startsWith('//')) pic = 'https:$pic';
+        users.add(BiliUser(
+          mid: mid,
+          uname: cleanTitle((m['uname'] ?? '') as String),
+          avatar: pic,
+          fans: (m['fans'] as num?)?.toInt() ?? 0,
+        ));
+      }
+      return users;
     } catch (_) {
       return [];
     }

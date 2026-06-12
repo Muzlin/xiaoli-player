@@ -105,6 +105,14 @@ class _HomeShellState extends State<HomeShell> {
   final BilibiliService _bili = BilibiliService();
   final PlatformService _platform = PlatformService();
   final List<Track> _platformTracks = []; // 平台上传的视频(别人/自己)
+  final List<BiliUser> _accountResults = []; // 搜索到的 B站账号
+  static const _winChannel = MethodChannel('xiaoli/window');
+  bool _launchAtLogin = false;
+  bool _backgroundRun = false;
+  bool _hotkey = false;
+  int _hotkeyCode = 35; // ⌥⌘P 默认(P=35)
+  int _hotkeyMods = 2304; // cmd256|option2048
+  String _hotkeyLabel = '⌥⌘P';
   final UpdateService _update = UpdateService();
   Track? _current;
   String _query = '';
@@ -168,6 +176,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadMyVideos();
     _loadHistory();
     _loadPlatform();
+    _loadAppSettings();
     _loadAutoNext();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
@@ -1125,9 +1134,13 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _searchingOnline = true);
     final results = await _bili.search(q);
     final plat = await _platform.search(q);
+    final users = await _bili.searchUsers(q);
     if (!mounted) return;
     setState(() {
       _searchingOnline = false;
+      _accountResults
+        ..clear()
+        ..addAll(users);
       _onlineTracks
         ..clear()
         ..addAll(plat.map(_platTrack))
@@ -1391,6 +1404,237 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  String _fmtFans(int n) {
+    if (n >= 10000) {
+      return '${(n / 10000).toStringAsFixed(n >= 1000000 ? 0 : 1)}万';
+    }
+    return '$n';
+  }
+
+  static const _loginPlist = 'com.xiaoli.player.plist';
+
+  Future<void> _loadAppSettings() async {
+    if (!Platform.isMacOS) return;
+    var login = false, bg = false, hk = false;
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      login = File('$home/Library/LaunchAgents/$_loginPlist').existsSync();
+    } catch (_) {}
+    try {
+      bg = (await _winChannel.invokeMethod<bool>('backgroundRunEnabled')) ??
+          false;
+    } catch (_) {}
+    try {
+      hk = (await _winChannel.invokeMethod<bool>('hotkeyEnabled')) ?? false;
+    } catch (_) {}
+    try {
+      final p = await SharedPreferences.getInstance();
+      _hotkeyCode = p.getInt('hotkey_code') ?? _hotkeyCode;
+      _hotkeyMods = p.getInt('hotkey_mods') ?? _hotkeyMods;
+      _hotkeyLabel = p.getString('hotkey_label') ?? _hotkeyLabel;
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _launchAtLogin = login;
+        _backgroundRun = bg;
+        _hotkey = hk;
+      });
+    }
+  }
+
+  Future<void> _setLaunchAtLogin(bool on) async {
+    setState(() => _launchAtLogin = on);
+    try {
+      final home = Platform.environment['HOME'] ?? '';
+      final dir = Directory('$home/Library/LaunchAgents');
+      final file = File('${dir.path}/$_loginPlist');
+      if (on) {
+        if (!dir.existsSync()) dir.createSync(recursive: true);
+        final exe = Platform.resolvedExecutable;
+        file.writeAsStringSync('<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0"><dict>\n'
+            '<key>Label</key><string>com.xiaoli.player</string>\n'
+            '<key>ProgramArguments</key><array><string>$exe</string></array>\n'
+            '<key>RunAtLoad</key><true/>\n'
+            '</dict></plist>\n');
+      } else {
+        if (file.existsSync()) file.deleteSync();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _setBackgroundRun(bool on) async {
+    setState(() => _backgroundRun = on);
+    try {
+      await _winChannel.invokeMethod('setBackgroundRun', {'on': on});
+    } catch (_) {}
+  }
+
+  Future<void> _setHotkeyEnabled(bool on) async {
+    setState(() => _hotkey = on);
+    try {
+      await _winChannel.invokeMethod(
+          'setHotkey', {'on': on, 'code': _hotkeyCode, 'mods': _hotkeyMods});
+    } catch (_) {}
+  }
+
+  static final _modKeys = <LogicalKeyboardKey>{
+    LogicalKeyboardKey.metaLeft,
+    LogicalKeyboardKey.metaRight,
+    LogicalKeyboardKey.shiftLeft,
+    LogicalKeyboardKey.shiftRight,
+    LogicalKeyboardKey.altLeft,
+    LogicalKeyboardKey.altRight,
+    LogicalKeyboardKey.controlLeft,
+    LogicalKeyboardKey.controlRight,
+  };
+
+  Future<void> _recordHotkey() async {
+    final node = FocusNode();
+    int? code;
+    var mods = 0;
+    var label = '';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('设置全局快捷键'),
+          content: RawKeyboardListener(
+            focusNode: node..requestFocus(),
+            onKey: (e) {
+              if (e is! RawKeyDownEvent) return;
+              final d = e.data;
+              if (d is! RawKeyEventDataMacOs) return;
+              if (_modKeys.contains(e.logicalKey)) return;
+              var m = 0;
+              if (e.isControlPressed) m |= 4096;
+              if (e.isAltPressed) m |= 2048;
+              if (e.isShiftPressed) m |= 512;
+              if (e.isMetaPressed) m |= 256;
+              if (m == 0) return;
+              code = d.keyCode;
+              mods = m;
+              final sb = StringBuffer();
+              if (e.isControlPressed) sb.write('⌃');
+              if (e.isAltPressed) sb.write('⌥');
+              if (e.isShiftPressed) sb.write('⇧');
+              if (e.isMetaPressed) sb.write('⌘');
+              sb.write(e.logicalKey.keyLabel.toUpperCase());
+              label = sb.toString();
+              setD(() {});
+            },
+            child: SizedBox(
+              height: 64,
+              child: Center(
+                child: Text(
+                  label.isEmpty ? '请按下快捷键\n（需含 ⌘ / ⌥ / ⌃ / ⇧）' : label,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 22),
+                ),
+              ),
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            TextButton(
+                onPressed: code == null ? null : () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
+          ],
+        ),
+      ),
+    );
+    node.dispose();
+    if (ok == true && code != null) {
+      setState(() {
+        _hotkeyCode = code!;
+        _hotkeyMods = mods;
+        _hotkeyLabel = label;
+      });
+      final p = await SharedPreferences.getInstance();
+      await p.setInt('hotkey_code', _hotkeyCode);
+      await p.setInt('hotkey_mods', _hotkeyMods);
+      await p.setString('hotkey_label', _hotkeyLabel);
+      await _winChannel.invokeMethod('setHotkey',
+          {'on': _hotkey, 'code': _hotkeyCode, 'mods': _hotkeyMods});
+    }
+  }
+
+  void _openUser(BiliUser u) {
+    Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => _UserVideosPage(
+        bili: _bili,
+        mid: u.mid,
+        name: u.uname,
+        onPlay: (bvid, title) => _play(Track.bili(title, bvid)),
+      ),
+    ));
+  }
+
+  Widget _accountsBar(ColorScheme cs) {
+    return Container(
+      height: 104,
+      padding: const EdgeInsets.only(top: 6, bottom: 2),
+      alignment: Alignment.centerLeft,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text('账号',
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.black54,
+                    fontWeight: FontWeight.w600)),
+          ),
+          Expanded(
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              children:
+                  _accountResults.take(15).map((u) => _accountChip(cs, u)).toList(),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _accountChip(ColorScheme cs, BiliUser u) {
+    return GestureDetector(
+      onTap: () => _openUser(u),
+      child: Container(
+        width: 72,
+        margin: const EdgeInsets.symmetric(horizontal: 4),
+        child: Column(
+          children: [
+            CircleAvatar(
+              radius: 26,
+              backgroundColor: Colors.black12,
+              backgroundImage:
+                  u.avatar.isNotEmpty ? NetworkImage(u.avatar) : null,
+              child: u.avatar.isEmpty
+                  ? const Icon(Icons.person, color: Colors.white70)
+                  : null,
+            ),
+            const SizedBox(height: 4),
+            Text(u.uname,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 11)),
+            if (u.fans > 0)
+              Text('${_fmtFans(u.fans)}粉',
+                  style: const TextStyle(fontSize: 10, color: Colors.black45)),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _libraryView(ColorScheme cs) {
     final q = _query.toLowerCase();
     final List<Track> items;
@@ -1406,6 +1650,8 @@ class _HomeShellState extends State<HomeShell> {
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
         if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
+        if (_query.isNotEmpty && _accountResults.isNotEmpty)
+          _accountsBar(cs),
         Expanded(
           child: items.isEmpty
               ? Center(
@@ -1632,7 +1878,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.13.1'),
+          title: Text('小李播放器 v2.14.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -1740,6 +1986,30 @@ class _HomeShellState extends State<HomeShell> {
             subtitle: const Text('查看并管理你关注的 UP主（可取关）'),
             onTap: _showFollowings,
           ),
+        if (Platform.isMacOS) ...[
+          SwitchListTile(
+            secondary: const Icon(Icons.power_settings_new),
+            title: const Text('开机自动启动'),
+            value: _launchAtLogin,
+            onChanged: _setLaunchAtLogin,
+          ),
+          SwitchListTile(
+            secondary: const Icon(Icons.dark_mode_outlined),
+            title: const Text('后台运行'),
+            subtitle: const Text('关窗口不退出，点 Dock 图标重新打开',
+                style: TextStyle(fontSize: 12)),
+            value: _backgroundRun,
+            onChanged: _setBackgroundRun,
+          ),
+          ListTile(
+            leading: const Icon(Icons.keyboard_outlined),
+            title: const Text('全局快捷键唤起'),
+            subtitle: Text('当前：$_hotkeyLabel · 点这里改键',
+                style: const TextStyle(fontSize: 12)),
+            trailing: Switch(value: _hotkey, onChanged: _setHotkeyEnabled),
+            onTap: _recordHotkey,
+          ),
+        ],
         ListTile(
           leading: const Icon(Icons.cloud_download_outlined),
           title: const Text('官方下载网址'),
@@ -1894,6 +2164,16 @@ class _UserVideosPage extends StatefulWidget {
 class _UserVideosPageState extends State<_UserVideosPage> {
   List<BiliTrack> _list = [];
   bool _loading = true;
+  bool _followed = false;
+
+  Future<void> _toggleFollow() async {
+    final msg =
+        await widget.bili.followUp(widget.mid, act: _followed ? 2 : 1);
+    if (!mounted) return;
+    setState(() => _followed = !_followed);
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg)));
+  }
 
   @override
   void initState() {
@@ -1915,7 +2195,16 @@ class _UserVideosPageState extends State<_UserVideosPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      appBar: AppBar(title: Text('${widget.name} 的视频')),
+      appBar: AppBar(
+        title: Text('${widget.name} 的视频'),
+        actions: [
+          TextButton.icon(
+            onPressed: _toggleFollow,
+            icon: Icon(_followed ? Icons.check : Icons.add, size: 18),
+            label: Text(_followed ? '已关注' : '关注'),
+          ),
+        ],
+      ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _list.isEmpty

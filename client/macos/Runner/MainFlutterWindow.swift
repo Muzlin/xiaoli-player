@@ -1,7 +1,8 @@
+import Carbon
 import Cocoa
 import FlutterMacOS
 
-class MainFlutterWindow: NSWindow {
+class MainFlutterWindow: NSWindow, NSWindowDelegate {
   var subtitleOverlay: SubtitleOverlay?
 
   override func awakeFromNib() {
@@ -9,6 +10,7 @@ class MainFlutterWindow: NSWindow {
     let windowFrame = self.frame
     self.contentViewController = flutterViewController
     self.setFrame(windowFrame, display: true)
+    self.delegate = self
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
@@ -48,16 +50,91 @@ class MainFlutterWindow: NSWindow {
       name: "xiaoli/window",
       binaryMessenger: flutterViewController.engine.binaryMessenger)
     winChannel.setMethodCallHandler { [weak self] (call, result) in
-      if call.method == "setMini" {
+      switch call.method {
+      case "setMini":
         let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
         self?.setMini(on)
         result(nil)
-      } else {
+      case "setBackgroundRun":
+        let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+        UserDefaults.standard.set(on, forKey: "backgroundRun")
+        result(nil)
+      case "backgroundRunEnabled":
+        result(UserDefaults.standard.bool(forKey: "backgroundRun"))
+      case "setHotkey":
+        let a = call.arguments as? [String: Any]
+        let on = a?["on"] as? Bool ?? false
+        let code = UInt32((a?["code"] as? Int) ?? Int(kVK_ANSI_P))
+        let mods = UInt32((a?["mods"] as? Int) ?? Int(cmdKey | optionKey))
+        self?.setHotkey(on, code, mods)
+        result(nil)
+      case "hotkeyEnabled":
+        result(UserDefaults.standard.bool(forKey: "hotkeyEnabled"))
+      default:
         result(FlutterMethodNotImplemented)
       }
     }
 
+    if UserDefaults.standard.bool(forKey: "hotkeyEnabled") {
+      let d = UserDefaults.standard
+      let code = d.integer(forKey: "hotkeyCode")
+      let mods = d.integer(forKey: "hotkeyMods")
+      setHotkey(
+        true,
+        UInt32(code == 0 ? Int(kVK_ANSI_P) : code),
+        UInt32(mods == 0 ? Int(cmdKey | optionKey) : mods))
+    }
+
     super.awakeFromNib()
+  }
+
+  // 全局快捷键：后台时按一下把窗口调到最前。Carbon 热键无需辅助功能权限，组合可自定义。
+  private var hotKeyRef: EventHotKeyRef?
+  private var hotkeyHandlerInstalled = false
+
+  func setHotkey(_ on: Bool, _ keyCode: UInt32, _ modifiers: UInt32) {
+    let d = UserDefaults.standard
+    d.set(on, forKey: "hotkeyEnabled")
+    d.set(Int(keyCode), forKey: "hotkeyCode")
+    d.set(Int(modifiers), forKey: "hotkeyMods")
+    if let r = hotKeyRef {
+      UnregisterEventHotKey(r)
+      hotKeyRef = nil
+    }
+    if on { registerHotkey(keyCode, modifiers) }
+  }
+
+  private func registerHotkey(_ keyCode: UInt32, _ modifiers: UInt32) {
+    if !hotkeyHandlerInstalled {
+      var spec = EventTypeSpec(
+        eventClass: OSType(kEventClassKeyboard),
+        eventKind: OSType(kEventHotKeyPressed))
+      InstallEventHandler(
+        GetApplicationEventTarget(),
+        { (_, _, _) -> OSStatus in
+          DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            for w in NSApp.windows {
+              w.makeKeyAndOrderFront(nil)
+            }
+          }
+          return noErr
+        }, 1, &spec, nil, nil)
+      hotkeyHandlerInstalled = true
+    }
+    let hkID = EventHotKeyID(signature: OSType(0x584C_5059), id: 1)  // 'XLPY'
+    RegisterEventHotKey(
+      keyCode, modifiers, hkID,
+      GetApplicationEventTarget(), 0, &hotKeyRef)
+  }
+
+  // 后台运行开启时，点关闭按钮只隐藏窗口（app 留在后台，Dock 点击可重开）。
+  func windowShouldClose(_ sender: NSWindow) -> Bool {
+    if UserDefaults.standard.bool(forKey: "backgroundRun") {
+      self.orderOut(nil)
+      return false
+    }
+    return true
   }
 
   // 小窗播放：把主窗缩成置顶悬浮小窗，浮在所有应用之上。
