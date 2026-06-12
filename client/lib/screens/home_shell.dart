@@ -113,6 +113,7 @@ class _HomeShellState extends State<HomeShell> {
   int _hotkeyCode = 35; // ⌥⌘P 默认(P=35)
   int _hotkeyMods = 2304; // cmd256|option2048
   String _hotkeyLabel = '⌥⌘P';
+  Timer? _urlTimer; // 定时重读本机平台地址
   final UpdateService _update = UpdateService();
   Track? _current;
   String _query = '';
@@ -178,6 +179,10 @@ class _HomeShellState extends State<HomeShell> {
     _loadPlatform();
     _loadAppSettings();
     _loadAutoNext();
+    if (Platform.isMacOS) {
+      _urlTimer = Timer.periodic(
+          const Duration(seconds: 30), (_) => _refreshPlatformUrl());
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
@@ -187,6 +192,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _urlTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -1419,6 +1425,16 @@ class _HomeShellState extends State<HomeShell> {
 
   static const _loginPlist = 'com.xiaoli.player.plist';
 
+  Future<void> _refreshPlatformUrl() async {
+    final before = PlatformService.current;
+    await PlatformService.loadLocal();
+    if (!mounted) return;
+    if (PlatformService.current != before) {
+      setState(() {});
+      _loadPlatform();
+    }
+  }
+
   Future<void> _loadAppSettings() async {
     if (!Platform.isMacOS) return;
     var login = false, bg = false, hk = false;
@@ -1884,7 +1900,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.15.1'),
+          title: Text('小李播放器 v2.15.2'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(

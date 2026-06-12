@@ -15,7 +15,7 @@ class PlatformService {
   /// 平台公网地址（cloudflared 隧道）。隧道重启会变，届时需更新。
   /// 兜底地址（隧道默认值）。生效地址 [_base] 启动时可被本机 public_url.txt 覆盖。
   static const baseUrl =
-      'https://experimental-gauge-laundry-ranks.trycloudflare.com';
+      'https://translator-themes-activated-column.trycloudflare.com';
   static String _base = baseUrl;
 
   /// macOS 上读本机 ~/xiaoli-platform/public_url.txt（看门狗维护的当前隧道地址），
