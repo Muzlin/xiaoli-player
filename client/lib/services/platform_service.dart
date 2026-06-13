@@ -34,6 +34,33 @@ class PlatformService {
   /// 当前生效地址：局域网模式用 lanBase，否则公网 _base。
   static String get current => useLan ? lanBase : _base;
 
+  /// 上传歌单 JSON 到平台，返回分享码(id)。
+  static Future<String?> uploadPlaylist(String jsonBody) async {
+    for (final base in _uploadBases) {
+      try {
+        final r = await http
+            .post(Uri.parse('$base/upload-playlist'), body: jsonBody)
+            .timeout(const Duration(seconds: 15));
+        final id = jsonDecode(r.body)['id'];
+        if (id != null) return id as String;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 用分享码取回歌单 JSON。
+  static Future<String?> getPlaylistJson(String id) async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/playlist/$id'))
+            .timeout(const Duration(seconds: 12));
+        if (r.statusCode == 200) return r.body;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// 读公网地址(public_url.txt) + 探测局域网 IP。
   static Future<void> loadLocal() async {
     if (!Platform.isMacOS) return;

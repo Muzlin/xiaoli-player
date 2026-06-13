@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
 import 'dart:math';
+import '../text_scale.dart';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -25,19 +26,22 @@ class Track {
   final String? url;
   final String? bvid; // B站视频，需异步取音频流
   final String tag; // '' | '热门' | 'B站'
+  final String? cid; // B站分P的cid(可选)
 
   Track.local(this.localPath)
       : name = localPath!.split(Platform.pathSeparator).last,
         url = null,
         bvid = null,
-        tag = '';
+        tag = '',
+        cid = null;
 
   Track.online(this.name, this.url, {this.tag = ''})
       : localPath = null,
-        bvid = null;
+        bvid = null,
+        cid = null;
 
   // B站来源：不显示来源标签（作者已并入 name 保留）。
-  Track.bili(this.name, this.bvid, {this.tag = ''})
+  Track.bili(this.name, this.bvid, {this.tag = '', this.cid})
       : localPath = null,
         url = null;
 
@@ -1298,7 +1302,7 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => const Center(child: CircularProgressIndicator()),
       );
       final subFut = _bili.getSubtitles(t.bvid!); // 并发取字幕，不阻塞起播
-      final url = await _bili.getMediaUrl(t.bvid!);
+      final url = await _bili.getMediaUrl(t.bvid!, cid: t.cid);
       if (mounted) Navigator.of(context).pop();
       if (url == null) {
         if (mounted) {
@@ -1357,6 +1361,13 @@ class _HomeShellState extends State<HomeShell> {
           _speeds[t.key] = sp;
           _saveSpeeds();
         },
+        onAddToFav: t.bvid != null ? () => _addToBiliFav(t.bvid!) : null,
+        onLoadParts:
+            t.bvid != null ? () => _bili.getVideoParts(t.bvid!) : null,
+        onPlayPart: t.bvid != null
+            ? (cid, name) =>
+                _play(Track.bili(name, t.bvid!, cid: cid), replace: true)
+            : null,
       ),
     );
     if (replace) {
@@ -1553,6 +1564,10 @@ class _HomeShellState extends State<HomeShell> {
             icon: const Icon(Icons.explore_outlined, color: Colors.white70),
             color: const Color(0xFF2B2B33),
             onSelected: (v) {
+              if (v == 'fav') {
+                _openFavFolders();
+                return;
+              }
               Future<List<BiliTrack>> Function() fn;
               String title;
               if (v == 'popular') {
@@ -1561,6 +1576,9 @@ class _HomeShellState extends State<HomeShell> {
               } else if (v == 'toview') {
                 fn = () => _bili.getToView();
                 title = '稍后再看';
+              } else if (v == 'dynamic') {
+                fn = () => _bili.getDynamicFeed();
+                title = '关注动态';
               } else {
                 fn = () => _bili.getHistory();
                 title = '观看历史';
@@ -1584,6 +1602,14 @@ class _HomeShellState extends State<HomeShell> {
                   value: 'history',
                   child:
                       Text('🕐 观看历史', style: TextStyle(color: Colors.white))),
+              PopupMenuItem(
+                  value: 'dynamic',
+                  child:
+                      Text('📡 关注动态', style: TextStyle(color: Colors.white))),
+              PopupMenuItem(
+                  value: 'fav',
+                  child:
+                      Text('⭐ 我的收藏夹', style: TextStyle(color: Colors.white))),
             ],
           ),
           const SizedBox(width: 8),
@@ -1874,6 +1900,7 @@ class _HomeShellState extends State<HomeShell> {
     _watchSec = p.getInt('watch_sec') ?? 0;
     _fadeIn = p.getBool('fade_in') ?? false;
     _fadeOut = p.getBool('fade_out') ?? false;
+    textScaleNotifier.value = p.getDouble('text_scale') ?? 1.0;
     try {
       final pl = p.getString('playlists_v1');
       if (pl != null) {
@@ -2240,6 +2267,47 @@ class _HomeShellState extends State<HomeShell> {
     final name = ctrl.text.trim();
     if (name.isEmpty) return;
     final msg = await _bili.changeUname(name);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  Future<int?> _pickFavFolder() async {
+    final folders = await _bili.getFavFolders();
+    if (!mounted) return null;
+    if (folders.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('没有收藏夹（需登录）')));
+      return null;
+    }
+    return showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('选择收藏夹'),
+        children: [
+          for (final fo in folders)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, fo['id'] as int),
+                child: Text('${fo['title']}（${fo['count']}）')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _openFavFolders() async {
+    final mlid = await _pickFavFolder();
+    if (mlid == null || !mounted) return;
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => _BiliListPage(
+            title: '收藏夹',
+            fetch: () => _bili.getFavVideos(mlid),
+            onPlay: (bvid, t) => _play(Track.bili(t, bvid)))));
+  }
+
+  Future<void> _addToBiliFav(String bvid) async {
+    final mlid = await _pickFavFolder();
+    if (mlid == null) return;
+    final msg = await _bili.addToFav(bvid, mlid);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
@@ -2836,7 +2904,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.32.0'),
+          title: Text('小李播放器 v2.33.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2931,6 +2999,22 @@ class _HomeShellState extends State<HomeShell> {
           onTap: () {
             if (_history.isNotEmpty) _play(_history.first);
           },
+        ),
+        ListTile(
+          leading: const Icon(Icons.format_size),
+          title: const Text('界面文字大小'),
+          subtitle: Slider(
+            value: textScaleNotifier.value.clamp(0.8, 1.5),
+            min: 0.8,
+            max: 1.5,
+            divisions: 7,
+            label: '${(textScaleNotifier.value * 100).round()}%',
+            onChanged: (v) async {
+              setState(() => textScaleNotifier.value = v);
+              final p = await SharedPreferences.getInstance();
+              await p.setDouble('text_scale', v);
+            },
+          ),
         ),
         ListTile(
           leading: const Icon(Icons.keyboard_alt_outlined),
@@ -3678,6 +3762,81 @@ class _PlaylistsPage extends StatefulWidget {
 }
 
 class _PlaylistsPageState extends State<_PlaylistsPage> {
+  Future<void> _sharePlaylist(String name) async {
+    final body = jsonEncode({
+      'title': name,
+      'tracks': widget.playlists[name]!.map((t) => t.toJson()).toList(),
+    });
+    final id = await PlatformService.uploadPlaylist(body);
+    if (!mounted) return;
+    if (id == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('分享失败（平台不可达）')));
+      return;
+    }
+    Clipboard.setData(ClipboardData(text: id));
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('歌单分享码'),
+        content: SelectableText('$id\n\n已复制。好友在「导入分享」里输入即可导入。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _importShared() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('导入分享歌单'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: '输入分享码')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('导入')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final id = ctrl.text.trim();
+    if (id.isEmpty) return;
+    final js = await PlatformService.getPlaylistJson(id);
+    if (!mounted) return;
+    if (js == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('导入失败（找不到或平台不可达）')));
+      return;
+    }
+    try {
+      final data = jsonDecode(js) as Map;
+      final name = (data['title'] ?? '分享歌单').toString();
+      final tracks = ((data['tracks'] as List?) ?? [])
+          .map((e) => Track.fromJson(e as Map<String, dynamic>))
+          .where((t) => t.isValid)
+          .toList();
+      widget.playlists[name] = tracks;
+      await widget.onSave();
+      if (!mounted) return;
+      setState(() {});
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已导入「$name」（${tracks.length} 首）')));
+    } catch (e) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('导入解析失败：$e')));
+    }
+  }
+
   Future<void> _importM3u() async {
     final res = await FilePicker.platform.pickFiles(
         type: FileType.custom, allowedExtensions: ['m3u', 'm3u8', 'txt']);
@@ -3731,6 +3890,10 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
     return Scaffold(
       appBar: AppBar(title: const Text('歌单'), actions: [
         IconButton(
+            icon: const Icon(Icons.cloud_download_outlined),
+            tooltip: '导入分享码',
+            onPressed: _importShared),
+        IconButton(
             icon: const Icon(Icons.file_open_outlined),
             tooltip: '导入 m3u',
             onPressed: _importM3u),
@@ -3751,6 +3914,11 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
                     trailing: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        IconButton(
+                          icon: const Icon(Icons.share_outlined, size: 20),
+                          tooltip: '分享(生成分享码)',
+                          onPressed: () => _sharePlaylist(n),
+                        ),
                         IconButton(
                           icon: const Icon(Icons.ios_share, size: 20),
                           tooltip: '导出 m3u',

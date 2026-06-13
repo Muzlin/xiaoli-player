@@ -35,6 +35,9 @@ class PlayerScreen extends StatefulWidget {
   final void Function(List<int>)? onSaveBookmarks;
   final double initialSpeed; // 该视频上次倍速
   final void Function(double)? onSaveSpeed;
+  final Future<void> Function()? onAddToFav; // 收藏到B站
+  final Future<List<Map<String, dynamic>>> Function()? onLoadParts; // 分P列表
+  final void Function(String cid, String name)? onPlayPart; // 播放某分P
   const PlayerScreen({
     super.key,
     required this.source,
@@ -57,6 +60,9 @@ class PlayerScreen extends StatefulWidget {
     this.onSaveBookmarks,
     this.initialSpeed = 0,
     this.onSaveSpeed,
+    this.onAddToFav,
+    this.onLoadParts,
+    this.onPlayPart,
   });
 
   @override
@@ -353,6 +359,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _longPressing = false;
   final List<int> _marks = [];
   int _subOffsetMs = 0; // 字幕延迟
+  List<Map<String, dynamic>> _parts = const []; // 分P
   bool _fadeOut = false; // 结束淡出
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
@@ -832,6 +839,40 @@ class _PlayerScreenState extends State<PlayerScreen>
         const SnackBar(content: Text('已复制 B站 视频链接')));
   }
 
+  void _showParts() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Padding(
+                  padding: EdgeInsets.all(12),
+                  child: Text('分P 选集',
+                      style: TextStyle(color: Colors.white54, fontSize: 12))),
+              for (final pt in _parts)
+                ListTile(
+                  leading: Text('P${pt['page']}',
+                      style: const TextStyle(color: Colors.white70)),
+                  title: Text('${pt['part']}',
+                      style: const TextStyle(color: Colors.white),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                  onTap: () {
+                    widget.onPlayPart?.call(
+                        pt['cid'] as String, 'P${pt['page']} ${pt['part']}');
+                    Navigator.pop(context);
+                  },
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _bvAction(Future<String> Function()? fn) async {
     if (fn == null) return;
     final msg = await fn();
@@ -1233,6 +1274,11 @@ class _PlayerScreenState extends State<PlayerScreen>
     _marks.addAll(widget.bookmarks);
     if (!widget.source.resource.startsWith('http')) {
       _autoLoadSidecarSub(widget.source.resource);
+    }
+    if (widget.onLoadParts != null) {
+      widget.onLoadParts!().then((p) {
+        if (mounted && p.length > 1) setState(() => _parts = p);
+      });
     }
     _subs.add(_player.stream.completed.listen((done) {
       if (done && !_loop && !_stopAtEnd && mounted) widget.onCompleted?.call();
@@ -1642,6 +1688,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'bililink':
                   _copyBiliLink();
                   break;
+                case 'fav':
+                  widget.onAddToFav?.call();
+                  break;
+                case 'parts':
+                  _showParts();
+                  break;
                 case 'tracks':
                   _showTracks();
                   break;
@@ -1709,6 +1761,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                     value: 'bililink',
                     child: Text('复制 B站 链接',
                         style: TextStyle(color: Colors.white))),
+              if (widget.onAddToFav != null)
+                const PopupMenuItem(
+                    value: 'fav',
+                    child: Text('收藏到 B站',
+                        style: TextStyle(color: Colors.white))),
+              if (_parts.length > 1)
+                PopupMenuItem(
+                    value: 'parts',
+                    child: Text('分P 选集（${_parts.length}）',
+                        style: const TextStyle(color: Colors.white))),
               const PopupMenuItem(
                   value: 'tracks',
                   child: Text('音轨 / 内嵌字幕',

@@ -727,6 +727,143 @@ class BilibiliService {
     }
   }
 
+  /// 我创建的收藏夹列表。
+  Future<List<Map<String, dynamic>>> getFavFolders() async {
+    if (_userCookie.isEmpty) return [];
+    try {
+      await _ensureInit();
+      final mid = jsonDecode((await _http.get(
+              Uri.parse('https://api.bilibili.com/x/space/myinfo'),
+              headers: _headers))
+          .body)['data']?['mid'];
+      if (mid == null) return [];
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/v3/fav/folder/created/list-all?up_mid=$mid'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      final list = (jsonDecode(r.body)['data']?['list'] as List?) ?? [];
+      return list
+          .map<Map<String, dynamic>>((e) => {
+                'id': e['id'],
+                'title': (e['title'] ?? '') as String,
+                'count': e['media_count'] ?? 0,
+              })
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 某收藏夹内的视频。
+  Future<List<BiliTrack>> getFavVideos(int mlid, {int pn = 1}) async {
+    try {
+      await _ensureInit();
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/v3/fav/resource/list?media_id=$mlid&pn=$pn&ps=30&order=mtime&type=0&tid=0&platform=web'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      final list = (jsonDecode(r.body)['data']?['medias'] as List?) ?? [];
+      return list
+          .map((e) => BiliTrack(
+                bvid: (e['bvid'] ?? '') as String,
+                title: cleanTitle((e['title'] ?? '') as String),
+                author: (e['upper']?['name'] ?? '') as String,
+              ))
+          .where((t) => t.bvid.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 收藏视频到指定收藏夹。
+  Future<String> addToFav(String bvid, int mlid) async {
+    final jct = _biliJct;
+    if (jct.isEmpty) return '需完整登录(bili_jct)';
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final aid = view['data']?['aid'];
+      if (aid == null) return '获取视频失败';
+      final r = await _http
+          .post(Uri.parse('https://api.bilibili.com/x/v3/fav/resource/deal'),
+              headers: {
+                ..._headers,
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              body: {
+                'rid': '$aid',
+                'type': '2',
+                'add_media_ids': '$mlid',
+                'csrf': jct,
+              })
+          .timeout(const Duration(seconds: 10));
+      final d = jsonDecode(r.body);
+      return d['code'] == 0 ? '已收藏 ⭐' : 'B站返回：${d['message'] ?? d['code']}';
+    } catch (e) {
+      return '收藏失败：$e';
+    }
+  }
+
+  /// 视频的分P列表。
+  Future<List<Map<String, dynamic>>> getVideoParts(String bvid) async {
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final pages = (view['data']?['pages'] as List?) ?? [];
+      return pages
+          .map<Map<String, dynamic>>((e) => {
+                'cid': e['cid'].toString(),
+                'page': e['page'] ?? 0,
+                'part': (e['part'] ?? '') as String,
+              })
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 关注 UP主 的最新视频动态。
+  Future<List<BiliTrack>> getDynamicFeed() async {
+    if (_userCookie.isEmpty) return [];
+    try {
+      await _ensureInit();
+      final r = await _http.get(
+          Uri.parse(
+              'https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/all?type=video'),
+          headers: {..._headers, 'Referer': 'https://t.bilibili.com/'}).timeout(
+          const Duration(seconds: 12));
+      final items = (jsonDecode(r.body)['data']?['items'] as List?) ?? [];
+      final out = <BiliTrack>[];
+      for (final it in items) {
+        final arc = it['modules']?['module_dynamic']?['major']?['archive'];
+        if (arc == null) continue;
+        final bvid = (arc['bvid'] ?? '') as String;
+        if (bvid.isEmpty) continue;
+        out.add(BiliTrack(
+          bvid: bvid,
+          title: cleanTitle((arc['title'] ?? '') as String),
+          author: (it['modules']?['module_author']?['name'] ?? '') as String,
+        ));
+      }
+      return out;
+    } catch (_) {
+      return [];
+    }
+  }
+
   Future<String> tripleVideo(String bvid) async {
     final e = await _videoAction(
         'https://api.bilibili.com/x/web-interface/archive/like/triple',
@@ -1044,18 +1181,23 @@ class BilibiliService {
   }
 
   /// 取某视频的可播放地址：优先「音视频合一」的 mp4，否则退回音频流。
-  Future<String?> getMediaUrl(String bvid) async {
+  Future<String?> getMediaUrl(String bvid, {String? cid}) async {
     try {
       await _ensureInit();
-      final view = jsonDecode((await _http.get(
-              Uri.parse(
-                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
-              headers: _headers))
-          .body);
-      final cid = view['data']['cid'].toString();
+      final String useCid;
+      if (cid != null && cid.isNotEmpty) {
+        useCid = cid;
+      } else {
+        final view = jsonDecode((await _http.get(
+                Uri.parse(
+                    'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+                headers: _headers))
+            .body);
+        useCid = view['data']['cid'].toString();
+      }
       final qs1 = _sign({
         'bvid': bvid,
-        'cid': cid,
+        'cid': useCid,
         'qn': '64',
         'fnval': '1',
         'platform': 'html5',
@@ -1069,7 +1211,7 @@ class BilibiliService {
         final u = durl.first['url'];
         if (u is String && u.isNotEmpty) return u;
       }
-      final qs2 = _sign({'bvid': bvid, 'cid': cid, 'fnval': '16'});
+      final qs2 = _sign({'bvid': bvid, 'cid': useCid, 'fnval': '16'});
       final pu2 = jsonDecode((await _http.get(
               Uri.parse('https://api.bilibili.com/x/player/wbi/playurl?$qs2'),
               headers: _headers))
