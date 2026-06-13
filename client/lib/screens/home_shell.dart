@@ -1329,7 +1329,8 @@ class _HomeShellState extends State<HomeShell> {
                 _bili.postDanmaku(t.bvid!, msg, ms, color: color)
             : null,
         onLike: t.bvid != null ? () => _bili.likeVideo(t.bvid!) : null,
-        onCoin: t.bvid != null ? () => _bili.coinVideo(t.bvid!) : null,
+        onCoin:
+            t.bvid != null ? (n) => _bili.coinVideo(t.bvid!, multiply: n) : null,
         onTriple: t.bvid != null ? () => _bili.tripleVideo(t.bvid!) : null,
       ),
     );
@@ -1966,6 +1967,29 @@ class _HomeShellState extends State<HomeShell> {
     await action();
   }
 
+  Future<void> _followUser(BiliUser u) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('关注 ${u.uname}？'),
+        content: Text('${_fmtFans(u.fans)}粉丝'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('关注')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = await _bili.followUp(u.mid);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
   void _openUser(BiliUser u) {
     Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => _UserVideosPage(
@@ -2009,6 +2033,7 @@ class _HomeShellState extends State<HomeShell> {
   Widget _accountChip(ColorScheme cs, BiliUser u) {
     return GestureDetector(
       onTap: () => _openUser(u),
+      onLongPress: () => _followUser(u),
       child: Container(
         width: 72,
         margin: const EdgeInsets.symmetric(horizontal: 4),
@@ -2281,7 +2306,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.25.0'),
+          title: Text('小李播放器 v2.25.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         SwitchListTile(

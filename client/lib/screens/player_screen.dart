@@ -27,7 +27,7 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function(String msg, int progressMs, int color)?
       onPostDanmaku;
   final Future<String> Function()? onLike; // B站点赞
-  final Future<String> Function()? onCoin; // B站投币
+  final Future<String> Function(int multiply)? onCoin; // B站投币
   final Future<String> Function()? onTriple; // B站一键三连
   const PlayerScreen({
     super.key,
@@ -662,6 +662,28 @@ class _PlayerScreenState extends State<PlayerScreen>
         ),
       ),
     );
+  }
+
+  Future<void> _coin() async {
+    if (widget.onCoin == null) return;
+    final n = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('投币'),
+        content: const Text('给这个视频投几个币？（B站每视频上限 2 个）'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, 1), child: const Text('1 个')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, 2), child: const Text('2 个')),
+        ],
+      ),
+    );
+    if (n == null) return;
+    final msg = await widget.onCoin!(n);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
   }
 
   Future<void> _bvAction(Future<String> Function()? fn) async {
@@ -1328,7 +1350,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   _bvAction(widget.onLike);
                   break;
                 case 'coin':
-                  _bvAction(widget.onCoin);
+                  _coin();
                   break;
                 case 'triple':
                   _bvAction(widget.onTriple);

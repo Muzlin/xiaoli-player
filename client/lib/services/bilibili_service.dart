@@ -595,11 +595,11 @@ class BilibiliService {
     return e.isEmpty ? '已点赞 👍' : (e.contains('6500') ? '已经赞过了' : '点赞失败：$e');
   }
 
-  Future<String> coinVideo(String bvid) async {
+  Future<String> coinVideo(String bvid, {int multiply = 2}) async {
     final e = await _videoAction(
         'https://api.bilibili.com/x/web-interface/coin/add',
-        {'bvid': bvid, 'multiply': '1', 'select_like': '0'});
-    return e.isEmpty ? '已投币 🪙' : '投币失败：$e';
+        {'bvid': bvid, 'multiply': '$multiply', 'select_like': '0'});
+    return e.isEmpty ? '已投 $multiply 个币 🪙' : '投币失败：$e';
   }
 
   Future<String> tripleVideo(String bvid) async {
