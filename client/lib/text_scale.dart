@@ -7,3 +7,7 @@ final ValueNotifier<double> textScaleNotifier = ValueNotifier<double>(1.0);
 /// 全局主题强调色（默认橙）。
 final ValueNotifier<Color> accentNotifier =
     ValueNotifier<Color>(const Color(0xFFF26B21));
+
+/// 主题模式：跟随系统/浅色/深色。
+final ValueNotifier<ThemeMode> themeModeNotifier =
+    ValueNotifier<ThemeMode>(ThemeMode.system);

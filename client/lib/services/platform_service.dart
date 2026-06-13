@@ -9,12 +9,14 @@ class PlatformVideo {
   final String uploader;
   final double rating;
   final int rcount;
+  final String cat; // 分类：'视频' / '音乐'
   PlatformVideo(
       {required this.id,
       required this.title,
       required this.uploader,
       this.rating = 0,
-      this.rcount = 0});
+      this.rcount = 0,
+      this.cat = ''});
 }
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
@@ -130,10 +132,11 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
-  Future<List<PlatformVideo>> search(String q) async {
+  Future<List<PlatformVideo>> search(String q, {String cat = ''}) async {
     try {
+      final catQs = cat.isEmpty ? '' : '&cat=${Uri.encodeComponent(cat)}';
       final r = await _http
-          .get(Uri.parse('$current/search?q=${Uri.encodeComponent(q)}'))
+          .get(Uri.parse('$current/search?q=${Uri.encodeComponent(q)}$catQs'))
           .timeout(const Duration(seconds: 15));
       final list = (jsonDecode(r.body) as List?) ?? [];
       return list
@@ -143,6 +146,7 @@ class PlatformService {
                 uploader: (e['uploader'] ?? '') as String,
                 rating: ((e['rating'] ?? 0) as num).toDouble(),
                 rcount: ((e['rcount'] ?? 0) as num).toInt(),
+                cat: (e['cat'] ?? '') as String,
               ))
           .where((v) => v.id.isNotEmpty)
           .toList();
@@ -151,7 +155,7 @@ class PlatformService {
     }
   }
 
-  Future<List<PlatformVideo>> list() => search('');
+  Future<List<PlatformVideo>> list({String cat = ''}) => search('', cat: cat);
 
   /// 上传优先级：本机直传(秒级) → 局域网 → 公网(慢，兜底)。
   /// cloudflared 免费隧道上传极慢，故同机/同网时直传服务器。

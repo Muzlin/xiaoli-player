@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from .config import get_settings
@@ -18,8 +18,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login", auto_error=True)
 
 
 class CredentialsRequest(BaseModel):
-    email: EmailStr
-    password: str
+    # 账号名（可填邮箱，也可填任意用户名，如 potato）；密码可为空。
+    email: str
+    password: str = ""
 
 
 class TokenResponse(BaseModel):

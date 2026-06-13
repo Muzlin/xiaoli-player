@@ -87,6 +87,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _isWebVideo = false; // 网络视频（B站等），可能带烧录角标水印
   bool _cropEdges = false; // 放大裁边，把角落水印推出画面
   bool _audioOnly = false; // 只听声音、显示封面，彻底不显示带水印的画面
+  int _aspectMode = 0; // 画面比例：0=适应 1=填充裁切 2=拉伸铺满
+  static const List<BoxFit> _aspectFits = [
+    BoxFit.contain,
+    BoxFit.cover,
+    BoxFit.fill
+  ];
+  static const List<String> _aspectNames = ['适应', '填充裁切', '拉伸铺满'];
 
   String? _subtitle; // 字幕(SRT)：B站自带或本地AI生成
   bool _subtitleOn = false;
@@ -505,7 +512,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           scaleX: _flipH ? -1.0 : 1.0,
           child: Transform.scale(
             scale: _cropEdges ? 1.22 : 1.0,
-            child: Video(controller: _controller, controls: NoVideoControls),
+            child: Video(
+                controller: _controller,
+                controls: NoVideoControls,
+                fit: _aspectFits[_aspectMode]),
           ),
         ),
       ),
@@ -1472,6 +1482,10 @@ class _PlayerScreenState extends State<PlayerScreen>
         _player.setRate(sp);
       }
       _fadeOut = p.getBool('fade_out') ?? false;
+      final am = p.getInt('aspect_mode');
+      if (am != null && am != 0 && mounted) {
+        setState(() => _aspectMode = am.clamp(0, 2));
+      }
       if ((p.getBool('fade_in') ?? false) && mounted) {
         final target = _muted ? 0.0 : _volume;
         _player.setVolume(0);
@@ -1642,6 +1656,22 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ? Theme.of(context).colorScheme.primary
                         : Colors.white70),
                 onPressed: () => setState(() => _cropEdges = !_cropEdges),
+              ),
+            if (!_audioOnly)
+              IconButton(
+                tooltip: '画面比例·${_aspectNames[_aspectMode]}',
+                icon: Icon(Icons.aspect_ratio,
+                    color: _aspectMode == 0
+                        ? Colors.white70
+                        : Theme.of(context).colorScheme.primary),
+                onPressed: () {
+                  setState(() => _aspectMode = (_aspectMode + 1) % 3);
+                  SharedPreferences.getInstance()
+                      .then((p) => p.setInt('aspect_mode', _aspectMode));
+                  ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                      duration: const Duration(milliseconds: 700),
+                      content: Text('画面比例：${_aspectNames[_aspectMode]}')));
+                },
               ),
             if (!_audioOnly && Platform.isMacOS)
               IconButton(

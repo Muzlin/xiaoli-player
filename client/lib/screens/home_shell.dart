@@ -137,6 +137,7 @@ class _HomeShellState extends State<HomeShell> {
   final BilibiliService _bili = BilibiliService();
   final PlatformService _platform = PlatformService();
   final List<Track> _platformTracks = []; // 平台上传的视频(别人/自己)
+  final Map<String, bool> _platIsVideo = {}; // 平台曲目 key→是否视频(服务器分类)
   final List<BiliUser> _accountResults = []; // 搜索到的 B站账号
   static const _winChannel = MethodChannel('xiaoli/window');
   bool _launchAtLogin = false;
@@ -162,6 +163,8 @@ class _HomeShellState extends State<HomeShell> {
   int _seekStep = 10; // 快进/快退步长
   String _searchOrder = ''; // B站搜索排序
   String _localFilter = 'all'; // 库类型筛选
+  final Map<String, String> _localTags = {}; // 本地标签：track key→标签
+  String _tagFilter = ''; // 当前标签筛选（''=全部）
   int _watchSec = 0; // 累计观看秒
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
@@ -1243,11 +1246,18 @@ class _HomeShellState extends State<HomeShell> {
     final vs = await _platform.list();
     if (!mounted) return;
     setState(() {
-      _platformTracks
-        ..clear()
-        ..addAll(vs.map(_platTrack));
+      _platformTracks.clear();
+      _platIsVideo.clear();
+      for (final v in vs) {
+        final t = _platTrack(v);
+        _platformTracks.add(t);
+        if (v.cat.isNotEmpty) _platIsVideo[t.key] = v.cat != '音乐';
+      }
     });
   }
+
+  // 类型判断：平台曲目优先用服务器分类，其余按曲目本身。
+  bool _trackIsVideo(Track t) => _platIsVideo[t.key] ?? t.isVideoTrack;
 
   Future<void> _uploadToPlatform() async {
     final picked = await FilePicker.platform.pickFiles(type: FileType.video);
@@ -1931,6 +1941,15 @@ class _HomeShellState extends State<HomeShell> {
     textScaleNotifier.value = p.getDouble('text_scale') ?? 1.0;
     final ac = p.getInt('accent_color');
     if (ac != null) accentNotifier.value = Color(ac);
+    themeModeNotifier.value =
+        ThemeMode.values[(p.getInt('theme_mode') ?? 0).clamp(0, 2)];
+    try {
+      final tg = p.getString('local_tags_v1');
+      if (tg != null) {
+        (jsonDecode(tg) as Map)
+            .forEach((k, v) => _localTags[k as String] = v as String);
+      }
+    } catch (_) {}
     try {
       final pl = p.getString('playlists_v1');
       if (pl != null) {
@@ -2688,6 +2707,38 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  Widget _tagFilterBar(ColorScheme cs) {
+    final tags = _localTags.values.toSet().toList()..sort();
+    return SizedBox(
+      height: 44,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+            child: FilterChip(
+              avatar: const Icon(Icons.label_outline, size: 16),
+              label: const Text('全部标签'),
+              selected: _tagFilter == '',
+              onSelected: (_) => setState(() => _tagFilter = ''),
+            ),
+          ),
+          for (final tag in tags)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+              child: FilterChip(
+                label: Text(tag),
+                selected: _tagFilter == tag,
+                onSelected: (_) =>
+                    setState(() => _tagFilter = _tagFilter == tag ? '' : tag),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _pickAccent() async {
     const colors = [
       0xFFF26B21, 0xFFFF3B30, 0xFFFF2D55, 0xFF007AFF, 0xFF34C759,
@@ -2736,9 +2787,13 @@ class _HomeShellState extends State<HomeShell> {
       if (_localFilter != 'all') {
         items = items
             .where((t) => _localFilter == 'video'
-                ? t.isVideoTrack
-                : !t.isVideoTrack)
+                ? _trackIsVideo(t)
+                : !_trackIsVideo(t))
             .toList();
+      }
+      if (_tagFilter.isNotEmpty) {
+        items =
+            items.where((t) => _localTags[t.key] == _tagFilter).toList();
       }
     } else {
       final local = [..._hotTracks, ..._localTracks]
@@ -2750,6 +2805,7 @@ class _HomeShellState extends State<HomeShell> {
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
         if (_query.isEmpty) _typeFilterBar(cs),
+        if (_query.isEmpty && _localTags.isNotEmpty) _tagFilterBar(cs),
         if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
         if (_query.isNotEmpty && _accountResults.isNotEmpty)
           _accountsBar(cs),
@@ -2790,6 +2846,9 @@ class _HomeShellState extends State<HomeShell> {
       const PopupMenuItem(value: 'copyname', child: Text('复制名称')),
     ];
     if (t.isLocal) {
+      items.add(PopupMenuItem(
+          value: 'tag',
+          child: Text(_localTags.containsKey(t.key) ? '修改标签' : '设置标签')));
       items.add(const PopupMenuItem(value: 'remove', child: Text('从列表移除')));
     }
     showMenu<String>(
@@ -2804,12 +2863,79 @@ class _HomeShellState extends State<HomeShell> {
         _removeLocal(t);
       } else if (v == 'playlist') {
         _addToPlaylist(t);
+      } else if (v == 'tag') {
+        _setTrackTag(t);
       } else if (v == 'copyname') {
         Clipboard.setData(ClipboardData(text: t.name));
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('已复制名称')));
       }
     });
+  }
+
+  Future<void> _saveLocalTags() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('local_tags_v1', jsonEncode(_localTags));
+  }
+
+  // 给本地曲目打/改标签（自定义文字），用于按标签分组浏览。
+  Future<void> _setTrackTag(Track t) async {
+    final cur = _localTags[t.key] ?? '';
+    final ctrl = TextEditingController(text: cur);
+    final existing = _localTags.values.toSet().toList()..sort();
+    final v = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('设置标签'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: const InputDecoration(hintText: '如：练歌 / 学习 / 收藏夹'),
+            ),
+            if (existing.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 10),
+                child: Wrap(
+                  spacing: 6,
+                  children: [
+                    for (final e in existing)
+                      ActionChip(
+                          label: Text(e),
+                          onPressed: () => Navigator.pop(ctx, e)),
+                  ],
+                ),
+              ),
+          ],
+        ),
+        actions: [
+          if (cur.isNotEmpty)
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, '__clear__'),
+                child: const Text('清除标签')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (v == null) return;
+    setState(() {
+      if (v == '__clear__' || v.isEmpty) {
+        _localTags.remove(t.key);
+        if (_tagFilter.isNotEmpty && !_localTags.values.contains(_tagFilter)) {
+          _tagFilter = '';
+        }
+      } else {
+        _localTags[t.key] = v;
+      }
+    });
+    await _saveLocalTags();
   }
 
   void _removeLocal(Track t) {
@@ -2825,7 +2951,13 @@ class _HomeShellState extends State<HomeShell> {
   Widget _trackRow(ColorScheme cs, Track t, int i) {
     final selected = t.name == _current?.name;
     Color? tagColor;
+    String tagText = t.tag;
     if (t.tag == '热门') tagColor = Colors.orange;
+    final localTag = _localTags[t.key];
+    if (localTag != null && localTag.isNotEmpty) {
+      tagText = localTag;
+      tagColor = cs.primary;
+    }
     final icon = t.isLocal
         ? Icons.music_note
         : (t.bvid != null ? Icons.smart_display : Icons.cloud_outlined);
@@ -2847,11 +2979,11 @@ class _HomeShellState extends State<HomeShell> {
             Expanded(
               child: Text(t.name, maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
-            if (tagColor != null)
+            if (tagColor != null && tagText.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child:
-                    Text(t.tag, style: TextStyle(color: tagColor, fontSize: 12)),
+                    Text(tagText, style: TextStyle(color: tagColor, fontSize: 12)),
               ),
             IconButton(
               icon: Icon(_isFav(t) ? Icons.favorite : Icons.favorite_border,
@@ -3007,7 +3139,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.34.0'),
+          title: Text('小李播放器 v2.35.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -3112,6 +3244,31 @@ class _HomeShellState extends State<HomeShell> {
             await _pickAccent();
             setState(() {});
           },
+        ),
+        ListTile(
+          leading: const Icon(Icons.brightness_6_outlined),
+          title: const Text('深色模式'),
+          subtitle: Text(
+              const ['跟随系统', '浅色', '深色'][themeModeNotifier.value.index],
+              style: const TextStyle(fontSize: 12)),
+          trailing: SegmentedButton<ThemeMode>(
+            segments: const [
+              ButtonSegment(
+                  value: ThemeMode.system, icon: Icon(Icons.brightness_auto)),
+              ButtonSegment(
+                  value: ThemeMode.light, icon: Icon(Icons.light_mode)),
+              ButtonSegment(
+                  value: ThemeMode.dark, icon: Icon(Icons.dark_mode)),
+            ],
+            selected: {themeModeNotifier.value},
+            showSelectedIcon: false,
+            onSelectionChanged: (s) async {
+              final m = s.first;
+              setState(() => themeModeNotifier.value = m);
+              final p = await SharedPreferences.getInstance();
+              await p.setInt('theme_mode', m.index);
+            },
+          ),
         ),
         ListTile(
           leading: const Icon(Icons.format_size),
@@ -3997,6 +4154,51 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
     }
   }
 
+  // 批量把歌单里的本地视频抽取成 .m4a 音频，存到所选文件夹（仅桌面端有 ffmpeg）。
+  Future<void> _extractAudio(String name) async {
+    final ff = TranscribeService.ffmpeg;
+    if (ff == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('此功能需要桌面端（ffmpeg）')));
+      return;
+    }
+    final locals = widget.playlists[name]!
+        .where((t) => t.localPath != null && File(t.localPath!).existsSync())
+        .toList();
+    if (locals.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('歌单里没有可提取的本地文件')));
+      return;
+    }
+    final dir = await FilePicker.platform.getDirectoryPath(dialogTitle: '选择保存音频的文件夹');
+    if (dir == null || !mounted) return;
+    var done = 0, fail = 0;
+    final total = locals.length;
+    final sm = ScaffoldMessenger.of(context);
+    for (final t in locals) {
+      final base = t.name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+      final dest = '$dir/$base.m4a';
+      try {
+        final r =
+            await Process.run(ff, ['-y', '-i', t.localPath!, '-vn', '-c:a', 'aac', dest]);
+        final ok = r.exitCode == 0 &&
+            File(dest).existsSync() &&
+            File(dest).lengthSync() > 0;
+        ok ? done++ : fail++;
+      } catch (_) {
+        fail++;
+      }
+      if (!mounted) return;
+      sm.removeCurrentSnackBar();
+      sm.showSnackBar(SnackBar(
+          duration: const Duration(seconds: 30),
+          content: Text('提取音频… ${done + fail}/$total')));
+    }
+    if (!mounted) return;
+    sm.removeCurrentSnackBar();
+    sm.showSnackBar(SnackBar(content: Text('提取完成：成功 $done，失败 $fail → $dir')));
+  }
+
   @override
   Widget build(BuildContext context) {
     final names = widget.playlists.keys.toList();
@@ -4037,6 +4239,12 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
                           tooltip: '导出 m3u',
                           onPressed: () => _exportPlaylist(n),
                         ),
+                        if (!Platform.isAndroid)
+                          IconButton(
+                            icon: const Icon(Icons.audiotrack, size: 20),
+                            tooltip: '批量提取音频(m4a)',
+                            onPressed: () => _extractAudio(n),
+                          ),
                         IconButton(
                           icon: const Icon(Icons.delete_outline),
                           onPressed: () async {

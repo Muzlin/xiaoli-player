@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from .admin import router as admin_router
 from .auth import router as auth_router
@@ -25,6 +26,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="小李播放器", lifespan=lifespan)
 
+# 开发期允许 Web 前端跨端口访问。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth_router)
 app.include_router(media_router)

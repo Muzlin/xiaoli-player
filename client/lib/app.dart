@@ -9,13 +9,21 @@ class MediaApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return ValueListenableBuilder<Color>(
       valueListenable: accentNotifier,
-      builder: (context, accent, _) => MaterialApp(
+      builder: (context, accent, _) => ValueListenableBuilder<ThemeMode>(
+        valueListenable: themeModeNotifier,
+        builder: (context, mode, __) => MaterialApp(
       title: '小李播放器',
       debugShowCheckedModeBanner: false,
+      themeMode: mode,
       theme: ThemeData(
         useMaterial3: true,
         colorScheme: ColorScheme.fromSeed(seedColor: accent),
         scaffoldBackgroundColor: const Color(0xFFF7F7FA),
+      ),
+      darkTheme: ThemeData(
+        useMaterial3: true,
+        colorScheme:
+            ColorScheme.fromSeed(seedColor: accent, brightness: Brightness.dark),
       ),
       // 全局文字缩放：跟随 textScaleNotifier。
       builder: (context, child) => ValueListenableBuilder<double>(
@@ -27,6 +35,7 @@ class MediaApp extends StatelessWidget {
         ),
       ),
       home: const HomeShell(),
+    ),
     ),
     );
   }
