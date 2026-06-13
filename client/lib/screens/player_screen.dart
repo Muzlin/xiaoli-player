@@ -1,13 +1,18 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:http/http.dart' as http;
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../player/playback_source.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
+import '../text_scale.dart';
 import 'package:file_picker/file_picker.dart';
 
 export '../player/playback_source.dart';
@@ -39,6 +44,8 @@ class PlayerScreen extends StatefulWidget {
   final Future<List<Map<String, dynamic>>> Function()? onLoadParts; // 分P列表
   final void Function(String cid, String name)? onPlayPart; // 播放某分P
   final Future<void> Function(int score)? onRate; // 平台视频评分
+  final Future<List<SubtitleOption>> Function()? onLoadSubtitleOptions; // F13
+  final Future<Map<String, String?>> Function()? onLoadMultiSubtitles; // F14
   const PlayerScreen({
     super.key,
     required this.source,
@@ -65,6 +72,8 @@ class PlayerScreen extends StatefulWidget {
     this.onLoadParts,
     this.onPlayPart,
     this.onRate,
+    this.onLoadSubtitleOptions,
+    this.onLoadMultiSubtitles,
   });
 
   @override
@@ -270,6 +279,52 @@ class _PlayerScreenState extends State<PlayerScreen>
         duration: const Duration(milliseconds: 1000)));
   }
 
+  // F38: 把 A-B 标记区间（或当前往后 6 秒）导出为 GIF。仅 macOS+本地视频。
+  Future<void> _exportGif() async {
+    final src = widget.source.resource;
+    final ff = TranscribeService.ffmpeg;
+    if (src.startsWith('http') || ff == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('GIF 导出仅支持本地视频（需 ffmpeg）')));
+      return;
+    }
+    var start = _aPoint ?? _position;
+    var end = _bPoint ?? (start + const Duration(seconds: 6));
+    if (end <= start) end = start + const Duration(seconds: 6);
+    var dur = (end - start).inMilliseconds / 1000.0;
+    if (dur > 60) dur = 60; // 限 60 秒
+    final path = await FilePicker.platform
+        .saveFile(dialogTitle: '导出 GIF', fileName: 'clip.gif');
+    if (path == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('生成 GIF 中…（A-B 区间）')));
+    try {
+      final r = await Process.run(ff, [
+        '-y',
+        '-ss',
+        '${start.inMilliseconds / 1000.0}',
+        '-t',
+        '$dur',
+        '-i',
+        src,
+        '-vf',
+        'fps=12,scale=480:-1:flags=lanczos',
+        '-loop',
+        '0',
+        path,
+      ]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(r.exitCode == 0 ? 'GIF 已保存 → $path' : 'GIF 生成失败')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('出错：$e')));
+      }
+    }
+  }
+
   Future<void> _batchFrames() async {
     final src = widget.source.resource;
     if (src.startsWith('http')) {
@@ -422,6 +477,21 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _dmSpeed = 9;
   int _dmMaxActive = 60;
   List<String> _dmBlock = const [];
+  List<RegExp> _dmBlockRegex = const []; // F8 弹幕正则屏蔽
+  List<String> _dmPresets = const []; // F9 快捷发送预设
+  double _dmTopBlocked = 0; // F10 顶部禁区%
+  double _dmBottomBlocked = 0; // F10 底部禁区%
+  Map<int, int> _danmakuHistogram = const {}; // F11 弹幕热力(秒→条数)
+  String? _subtitleEn; // F14 英文字幕(双语)
+  bool _bilingualMode = false; // F14 双语开关
+  bool _uiCompact = false; // F23 极简UI
+  Color _savedAccent = const Color(0xFFF26B21); // F39 取色前的主题色
+  bool _autoPalette = false; // F39 封面取色开关
+  bool _paletteApplied = false; // F39 是否已改过主题色
+  Duration? _dragPreview; // F22 滑动进度预览
+  bool _isDragSeeking = false; // F22
+  IconData? _seekHintIcon; // F20 双击快进视觉反馈
+  Offset? _doubleTapAt; // F20 双击位置
   Tracks? _tracks;
   bool _onTop = false;
   bool _stopAtEnd = false;
@@ -535,7 +605,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                 fontScale: _dmFontScale,
                 speedSec: _dmSpeed,
                 maxActive: _dmMaxActive,
-                block: _dmBlock),
+                block: _dmBlock,
+                blockRegex: _dmBlockRegex,
+                topBlocked: _dmTopBlocked,
+                bottomBlocked: _dmBottomBlocked),
           ),
         ),
       ],
@@ -552,13 +625,61 @@ class _PlayerScreenState extends State<PlayerScreen>
         _danmakuLoading = false;
         _danmakuOn = list.isNotEmpty;
       });
+      _computeDanmakuHistogram();
       if (list.isEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('没有获取到弹幕')));
       }
       return;
     }
+    // 无 B站弹幕源（本地/平台视频）且还没导入：走文件导入。
+    if (!_danmakuOn && _danmaku.isEmpty && widget.onLoadDanmaku == null) {
+      await _importDanmakuFile();
+      return;
+    }
     setState(() => _danmakuOn = !_danmakuOn);
+  }
+
+  // F11: 把弹幕按整数秒分桶计数，供热力时间轴使用。
+  void _computeDanmakuHistogram() {
+    final h = <int, int>{};
+    for (final d in _danmaku) {
+      final s = d.time.floor();
+      h[s] = (h[s] ?? 0) + 1;
+    }
+    _danmakuHistogram = h;
+  }
+
+  // F12: 从 SRT/VTT/JSON 文件导入弹幕，投射到任意视频上。
+  Future<void> _importDanmakuFile() async {
+    final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom, allowedExtensions: ['srt', 'vtt', 'json', 'ass']);
+    if (res == null || res.files.single.path == null) return;
+    final path = res.files.single.path!;
+    try {
+      final text = await File(path).readAsString();
+      final list = path.toLowerCase().endsWith('.json')
+          ? Danmaku.parseJson(text)
+          : Danmaku.parseSrt(text);
+      if (!mounted) return;
+      if (list.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('文件里没有可用弹幕')));
+        return;
+      }
+      setState(() {
+        _danmaku = list;
+        _danmakuOn = true;
+      });
+      _computeDanmakuHistogram();
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('导入 ${list.length} 条弹幕')));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('导入失败：$e')));
+      }
+    }
   }
 
   Future<void> _sendDanmaku() async {
@@ -576,6 +697,22 @@ class _PlayerScreenState extends State<PlayerScreen>
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (_dmPresets.isNotEmpty)
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final p in _dmPresets)
+                      OutlinedButton(
+                        style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            minimumSize: const Size(0, 32)),
+                        onPressed: () => setD(() => ctrl.text = p),
+                        child: Text(p),
+                      ),
+                  ],
+                ),
+              if (_dmPresets.isNotEmpty) const SizedBox(height: 6),
               TextField(
                 controller: ctrl,
                 autofocus: true,
@@ -644,6 +781,91 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  // F39: 下载封面、采样主色、设为临时主题强调色（退出时还原）。
+  Future<void> _applyCoverPalette() async {
+    final url = widget.source.coverUrl;
+    if (url == null || url.isEmpty) return;
+    try {
+      final r = await http
+          .get(Uri.parse(url), headers: {'User-Agent': 'Mozilla/5.0'})
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return;
+      final codec = await ui.instantiateImageCodec(r.bodyBytes,
+          targetWidth: 32, targetHeight: 32);
+      final frame = await codec.getNextFrame();
+      final data =
+          await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      if (data == null) return;
+      final bytes = data.buffer.asUint8List();
+      var rs = 0, gs = 0, bs = 0, n = 0;
+      for (var i = 0; i + 3 < bytes.length; i += 4) {
+        final r8 = bytes[i], g8 = bytes[i + 1], b8 = bytes[i + 2];
+        final mx = [r8, g8, b8].reduce((a, b) => a > b ? a : b);
+        final mn = [r8, g8, b8].reduce((a, b) => a < b ? a : b);
+        if (mx - mn < 28) continue; // 跳过灰白，取有彩度的
+        rs += r8;
+        gs += g8;
+        bs += b8;
+        n++;
+      }
+      if (n == 0) return;
+      var col = HSLColor.fromColor(
+          Color.fromARGB(255, rs ~/ n, gs ~/ n, bs ~/ n));
+      // 校正亮度保证可读
+      col = col.withLightness(col.lightness.clamp(0.40, 0.60));
+      if (!mounted) return;
+      _savedAccent = accentNotifier.value;
+      accentNotifier.value = col.toColor();
+    } catch (_) {}
+  }
+
+  // F16: 应用上次记住的音轨/字幕语言。
+  Future<void> _applyPreferredTracks(Tracks t) async {
+    try {
+      final p = await SharedPreferences.getInstance();
+      final pa = p.getString('preferred_audio_lang');
+      final ps = p.getString('preferred_subtitle_lang');
+      if (pa != null && pa.isNotEmpty) {
+        for (final a in t.audio) {
+          if ((a.language ?? a.id) == pa) {
+            await _player.setAudioTrack(a);
+            break;
+          }
+        }
+      }
+      if (ps != null && ps.isNotEmpty) {
+        for (final s in t.subtitle) {
+          if ((s.language ?? s.id) == ps) {
+            await _player.setSubtitleTrack(s);
+            break;
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  // F20: 左/右三分之一双击快退/快进，中间双击进全屏。
+  void _handleDoubleTapZone() {
+    final w = MediaQuery.of(context).size.width;
+    final x = _doubleTapAt?.dx ?? w / 2;
+    if (x < w * 0.34) {
+      _seekRel(-widget.seekStep);
+      _flashSeekHint(Icons.fast_rewind);
+    } else if (x > w * 0.66) {
+      _seekRel(widget.seekStep);
+      _flashSeekHint(Icons.fast_forward);
+    } else {
+      _enterFullscreen();
+    }
+  }
+
+  void _flashSeekHint(IconData icon) {
+    setState(() => _seekHintIcon = icon);
+    Future.delayed(const Duration(milliseconds: 450), () {
+      if (mounted) setState(() => _seekHintIcon = null);
+    });
+  }
+
   void _longRate(bool on) {
     if (on) {
       _preLongRate = _speed;
@@ -682,6 +904,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                         style: const TextStyle(color: Colors.white)),
                     onTap: () {
                       _player.setAudioTrack(a);
+                      SharedPreferences.getInstance().then((p) => p.setString(
+                          'preferred_audio_lang', a.language ?? a.id));
                       Navigator.pop(context);
                     },
                   ),
@@ -699,6 +923,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                         style: const TextStyle(color: Colors.white)),
                     onTap: () {
                       _player.setSubtitleTrack(sub);
+                      SharedPreferences.getInstance().then((p) => p.setString(
+                          'preferred_subtitle_lang', sub.language ?? sub.id));
                       Navigator.pop(context);
                     },
                   ),
@@ -1046,43 +1272,268 @@ class _PlayerScreenState extends State<PlayerScreen>
     ]);
   }
 
-  void _showDanmakuSettings() {
-    final blockCtrl = TextEditingController(text: _dmBlock.join(' '));
+  Future<void> _saveDmPresets() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('danmaku_presets', jsonEncode(_dmPresets));
+  }
+
+  // F13/F14: 字幕语言选择 + 双语对照。
+  Future<void> _showSubtitleOptions() async {
+    final loader = widget.onLoadSubtitleOptions;
+    if (loader == null) return;
+    final opts = await loader();
+    if (!mounted) return;
+    if (opts.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('这个视频没有字幕轨')));
+      return;
+    }
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF2B2B33),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const ListTile(
+                dense: true,
+                title: Text('选择字幕语言',
+                    style: TextStyle(color: Colors.white70))),
+            for (final o in opts)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.closed_caption, color: Colors.white54),
+                title: Text(o.lanDoc,
+                    style: const TextStyle(color: Colors.white)),
+                subtitle: o.author.isEmpty
+                    ? null
+                    : Text(o.author,
+                        style: const TextStyle(color: Colors.white38)),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  final srt = await _bili.downloadSubtitle(o.url);
+                  if (!mounted || srt == null) return;
+                  setState(() {
+                    _subtitle = srt;
+                    _subtitleOn = true;
+                  });
+                  _applySubtitle();
+                },
+              ),
+            if (widget.onLoadMultiSubtitles != null)
+              SwitchListTile(
+                value: _bilingualMode,
+                title: const Text('中英双语对照',
+                    style: TextStyle(color: Colors.white)),
+                onChanged: (on) async {
+                  Navigator.pop(ctx);
+                  if (on) {
+                    final m = await widget.onLoadMultiSubtitles!();
+                    if (!mounted) return;
+                    setState(() {
+                      _subtitle = m['zh'] ?? _subtitle;
+                      _subtitleEn = m['en'];
+                      _bilingualMode = m['en'] != null;
+                      _subtitleOn = true;
+                    });
+                    if (m['en'] == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('没有英文字幕，已用单语')));
+                    }
+                  } else {
+                    setState(() => _bilingualMode = false);
+                  }
+                  _applySubtitle();
+                },
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  final BilibiliService _bili = BilibiliService();
+
+  // F15: 在字幕里搜词，列出所有出现时间，点击跳转。
+  void _showSubtitleSearch() {
+    final cues = _parseSrt(_subtitle ?? '');
+    if (cues.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('当前没有字幕')));
+      return;
+    }
+    final ctrl = TextEditingController();
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setS) {
+          final q = ctrl.text.trim().toLowerCase();
+          final hits = q.isEmpty
+              ? cues
+              : cues.where((c) => c.text.toLowerCase().contains(q)).toList();
+          return Padding(
+            padding: EdgeInsets.fromLTRB(
+                16, 14, 16, 16 + MediaQuery.of(ctx).viewInsets.bottom),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: ctrl,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: const InputDecoration(
+                    hintText: '搜字幕…',
+                    hintStyle: TextStyle(color: Colors.white38),
+                    prefixIcon: Icon(Icons.search, color: Colors.white54),
+                  ),
+                  onChanged: (_) => setS(() {}),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: MediaQuery.of(ctx).size.height * 0.4,
+                  child: ListView.builder(
+                    itemCount: hits.length,
+                    itemBuilder: (_, i) => ListTile(
+                      dense: true,
+                      leading: Text(_fmt(hits[i].start),
+                          style: const TextStyle(
+                              color: Colors.white54, fontSize: 12)),
+                      title: Text(hits[i].text,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(color: Colors.white)),
+                      onTap: () {
+                        _player.seek(hits[i].start);
+                        Navigator.pop(ctx);
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  void _showDanmakuSettings() {
+    final blockCtrl = TextEditingController(text: _dmBlock.join(' '));
+    final regexCtrl = TextEditingController(
+        text: _dmBlockRegex.map((r) => r.pattern).join('\n'));
+    final presetCtrl = TextEditingController();
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF2B2B33),
       builder: (_) => StatefulBuilder(
         builder: (ctx, setS) => Padding(
-          padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Text('弹幕设置',
-                  style: TextStyle(
-                      color: Colors.white, fontWeight: FontWeight.bold)),
-              _dmSlider('不透明度', _dmOpacity, 0.2, 1.0,
-                  (v) => setState(() => _dmOpacity = v), setS),
-              _dmSlider('字号', _dmFontScale, 0.6, 1.8,
-                  (v) => setState(() => _dmFontScale = v), setS),
-              _dmSlider('速度(大=慢)', _dmSpeed.toDouble(), 4, 16,
-                  (v) => setState(() => _dmSpeed = v.round()), setS),
-              _dmSlider('密度上限', _dmMaxActive.toDouble(), 10, 100,
-                  (v) => setState(() => _dmMaxActive = v.round()), setS),
-              const SizedBox(height: 6),
-              TextField(
-                controller: blockCtrl,
-                style: const TextStyle(color: Colors.white),
-                decoration: const InputDecoration(
-                  labelText: '屏蔽词（空格分隔）',
-                  labelStyle: TextStyle(color: Colors.white54),
+          padding: EdgeInsets.fromLTRB(
+              16, 14, 16, 28 + MediaQuery.of(ctx).viewInsets.bottom),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('弹幕设置',
+                    style: TextStyle(
+                        color: Colors.white, fontWeight: FontWeight.bold)),
+                _dmSlider('不透明度', _dmOpacity, 0.2, 1.0,
+                    (v) => setState(() => _dmOpacity = v), setS),
+                _dmSlider('字号', _dmFontScale, 0.6, 1.8,
+                    (v) => setState(() => _dmFontScale = v), setS),
+                _dmSlider('速度(大=慢)', _dmSpeed.toDouble(), 4, 16,
+                    (v) => setState(() => _dmSpeed = v.round()), setS),
+                _dmSlider('密度上限', _dmMaxActive.toDouble(), 10, 100,
+                    (v) => setState(() => _dmMaxActive = v.round()), setS),
+                _dmSlider('顶部禁区(%)', _dmTopBlocked, 0, 50, (v) {
+                  setState(() => _dmTopBlocked = v);
+                  SharedPreferences.getInstance()
+                      .then((p) => p.setDouble('dm_top_blocked', v));
+                }, setS),
+                _dmSlider('底部禁区(%)', _dmBottomBlocked, 0, 50, (v) {
+                  setState(() => _dmBottomBlocked = v);
+                  SharedPreferences.getInstance()
+                      .then((p) => p.setDouble('dm_bottom_blocked', v));
+                }, setS),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: blockCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: const InputDecoration(
+                    labelText: '屏蔽词（空格分隔）',
+                    labelStyle: TextStyle(color: Colors.white54),
+                  ),
+                  onChanged: (val) => setState(() => _dmBlock = val
+                      .split(RegExp(r'\s+'))
+                      .where((e) => e.isNotEmpty)
+                      .toList()),
                 ),
-                onChanged: (val) => setState(() => _dmBlock = val
-                    .split(RegExp(r'\s+'))
-                    .where((e) => e.isNotEmpty)
-                    .toList()),
-              ),
-            ],
+                const SizedBox(height: 6),
+                TextField(
+                  controller: regexCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  maxLines: 2,
+                  decoration: const InputDecoration(
+                    labelText: '正则屏蔽（每行一条）',
+                    labelStyle: TextStyle(color: Colors.white54),
+                  ),
+                  onChanged: (val) async {
+                    final list = <RegExp>[];
+                    for (final line in val.split('\n')) {
+                      final t = line.trim();
+                      if (t.isEmpty) continue;
+                      try {
+                        list.add(RegExp(t, caseSensitive: false));
+                      } catch (_) {}
+                    }
+                    setState(() => _dmBlockRegex = list);
+                    final p = await SharedPreferences.getInstance();
+                    await p.setString('dm_block_regex', val);
+                  },
+                ),
+                const SizedBox(height: 10),
+                const Text('快捷发送预设',
+                    style: TextStyle(color: Colors.white70, fontSize: 13)),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 4,
+                  children: [
+                    for (final p in _dmPresets)
+                      Chip(
+                        label: Text(p),
+                        backgroundColor: const Color(0xFF3A3A44),
+                        labelStyle: const TextStyle(color: Colors.white),
+                        deleteIconColor: Colors.white54,
+                        onDeleted: () async {
+                          setState(() => _dmPresets =
+                              _dmPresets.where((x) => x != p).toList());
+                          await _saveDmPresets();
+                          setS(() {});
+                        },
+                      ),
+                  ],
+                ),
+                TextField(
+                  controller: presetCtrl,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: const InputDecoration(
+                    hintText: '加一个预设，回车保存',
+                    hintStyle: TextStyle(color: Colors.white38),
+                  ),
+                  onSubmitted: (val) async {
+                    final t = val.trim();
+                    if (t.isEmpty || _dmPresets.contains(t)) return;
+                    setState(() => _dmPresets = [..._dmPresets, t]);
+                    presetCtrl.clear();
+                    await _saveDmPresets();
+                    setS(() {});
+                  },
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1180,12 +1631,56 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _applySubtitle() {
-    final srt = _subtitle;
+    var srt = _subtitle;
     if (srt == null) return;
+    // F14: 双语模式把中英两条字幕合并显示。
+    if (_bilingualMode && _subtitleEn != null && _subtitleEn!.isNotEmpty) {
+      srt = _mergeBilingual(srt, _subtitleEn!);
+    }
     _player.setSubtitleTrack(_subtitleOn
         ? SubtitleTrack.data(
             _subOffsetMs == 0 ? srt : _shiftSrt(srt, _subOffsetMs))
         : SubtitleTrack.no());
+  }
+
+  // F14: 以第一条字幕为时间轴，把第二条里时间最接近的文本拼到下一行。
+  String _mergeBilingual(String a, String b) {
+    final ca = _parseSrt(a);
+    final cb = _parseSrt(b);
+    if (ca.isEmpty) return b;
+    if (cb.isEmpty) return a;
+    final sb = StringBuffer();
+    for (var i = 0; i < ca.length; i++) {
+      final c = ca[i];
+      // 找时间重叠或最接近的第二语言句
+      _Cue? match;
+      var bestGap = const Duration(days: 1);
+      for (final x in cb) {
+        if (x.start < c.end && x.end > c.start) {
+          match = x;
+          break;
+        }
+        final gap = (x.start - c.start).abs();
+        if (gap < bestGap) {
+          bestGap = gap;
+          if (gap < const Duration(seconds: 1)) match = x;
+        }
+      }
+      sb.writeln('${i + 1}');
+      sb.writeln('${_srt(c.start)} --> ${_srt(c.end)}');
+      sb.writeln(c.text);
+      if (match != null) sb.writeln(match.text);
+      sb.writeln();
+    }
+    return sb.toString();
+  }
+
+  String _srt(Duration d) {
+    final h = d.inHours.toString().padLeft(2, '0');
+    final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    final ms = d.inMilliseconds.remainder(1000).toString().padLeft(3, '0');
+    return '$h:$m:$s,$ms';
   }
 
   String _shiftSrt(String srt, int offsetMs) {
@@ -1439,6 +1934,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           if (p) _error = null; // 成功起播 → 清残留错误，避免非致命错误误报“播放失败”
         });
       }
+      // F45: Android 播放时保持唤醒，暂停立即释放省电。
+      if (Platform.isAndroid) {
+        p ? WakelockPlus.enable() : WakelockPlus.disable();
+      }
+      // F39: 首次起播按封面取色（开关开启时）。
+      if (p && _autoPalette && !_paletteApplied) {
+        _paletteApplied = true;
+        _applyCoverPalette();
+      }
     }));
     _subs.add(_player.stream.videoParams.listen((v) {
       final has = (v.w ?? 0) > 0 && (v.h ?? 0) > 0;
@@ -1452,10 +1956,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _subs.add(_player.stream.tracks.listen((t) {
       if (mounted) setState(() => _tracks = t);
+      _applyPreferredTracks(t); // F16
     }));
     _subs.add(_player.stream.error.listen((e) {
       if (mounted) setState(() => _error = e);
     }));
+    // F48: Android 屏幕锁定时暂停视频（音频可后台续播）。
+    if (Platform.isAndroid) {
+      const MethodChannel('xiaoli/screen_lock')
+          .setMethodCallHandler((call) async {
+        if (call.method == 'screenLocked' && mounted) {
+          if (_hasVideo || widget.source.isVideo) _player.pause();
+        }
+        return null;
+      });
+    }
     _player.open(
       Media(widget.source.resource, httpHeaders: widget.source.headers),
     );
@@ -1485,6 +2000,36 @@ class _PlayerScreenState extends State<PlayerScreen>
       final am = p.getInt('aspect_mode');
       if (am != null && am != 0 && mounted) {
         setState(() => _aspectMode = am.clamp(0, 2));
+      }
+      // 弹幕预设/正则/禁区
+      try {
+        final pr = p.getString('danmaku_presets');
+        if (pr != null) {
+          _dmPresets = (jsonDecode(pr) as List).map((e) => '$e').toList();
+        }
+      } catch (_) {}
+      final rx = p.getString('dm_block_regex');
+      if (rx != null && rx.isNotEmpty) {
+        final list = <RegExp>[];
+        for (final line in rx.split('\n')) {
+          final t = line.trim();
+          if (t.isEmpty) continue;
+          try {
+            list.add(RegExp(t, caseSensitive: false));
+          } catch (_) {}
+        }
+        _dmBlockRegex = list;
+      }
+      _dmTopBlocked = p.getDouble('dm_top_blocked') ?? 0;
+      _dmBottomBlocked = p.getDouble('dm_bottom_blocked') ?? 0;
+      final uc = p.getBool('player_ui_compact') ?? false;
+      _autoPalette = p.getBool('auto_palette') ?? false;
+      final sfs = p.getDouble('subtitle_font_scale');
+      if (mounted) {
+        setState(() {
+          _uiCompact = uc;
+          if (sfs != null) _dmFontScale = sfs;
+        });
       }
       if ((p.getBool('fade_in') ?? false) && mounted) {
         final target = _muted ? 0.0 : _volume;
@@ -1518,6 +2063,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
+    if (_paletteApplied) accentNotifier.value = _savedAccent; // F39 还原主题色
+    if (Platform.isAndroid) WakelockPlus.disable(); // F45
     if (_desktopSub) _dsChannel.invokeMethod('hide');
     if (_mini) _winChannel.invokeMethod('setMini', {'on': false});
     if (_fullscreen) {
@@ -1574,6 +2121,16 @@ class _PlayerScreenState extends State<PlayerScreen>
         title: Text(widget.source.title,
             maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
+          IconButton(
+            tooltip: _uiCompact ? '完整界面' : '极简界面',
+            icon: Icon(_uiCompact ? Icons.unfold_more : Icons.unfold_less,
+                color: Colors.white70),
+            onPressed: () {
+              setState(() => _uiCompact = !_uiCompact);
+              SharedPreferences.getInstance()
+                  .then((p) => p.setBool('player_ui_compact', _uiCompact));
+            },
+          ),
           if (widget.onToggleFavorite != null)
             IconButton(
               tooltip: _fav ? '取消收藏' : '收藏',
@@ -1623,6 +2180,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 _applySubtitle();
               },
             ),
+          if (_subtitle != null && !_uiCompact)
+            IconButton(
+              tooltip: '搜索字幕',
+              icon: const Icon(Icons.manage_search, color: Colors.white70),
+              onPressed: _showSubtitleSearch,
+            ),
           if (_subtitle == null && TranscribeService.available)
             _transcribing
                 ? const Padding(
@@ -1639,7 +2202,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         color: Colors.white70),
                     onPressed: _aiSubtitle,
                   ),
-          if (widget.source.isVideo || _hasVideo) ...[
+          if (!_uiCompact && (widget.source.isVideo || _hasVideo)) ...[
             IconButton(
               tooltip: _audioOnly ? '显示画面' : '只听声音(显示封面·无水印)',
               icon: Icon(_audioOnly ? Icons.music_note : Icons.image_outlined,
@@ -1852,6 +2415,15 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'frames':
                   _batchFrames();
                   break;
+                case 'imdm':
+                  _importDanmakuFile();
+                  break;
+                case 'gif':
+                  _exportGif();
+                  break;
+                case 'subopts':
+                  _showSubtitleOptions();
+                  break;
               }
             },
             itemBuilder: (_) => [
@@ -1870,15 +2442,25 @@ class _PlayerScreenState extends State<PlayerScreen>
                         Text('投币 🪙', style: TextStyle(color: Colors.white))),
                 const PopupMenuDivider(),
               ],
-              if (widget.onLoadDanmaku != null)
+              if (widget.onLoadDanmaku != null || _danmaku.isNotEmpty)
                 const PopupMenuItem(
                     value: 'dmset',
                     child:
                         Text('弹幕设置', style: TextStyle(color: Colors.white))),
+              if (widget.onLoadDanmaku == null)
+                const PopupMenuItem(
+                    value: 'imdm',
+                    child: Text('导入弹幕文件',
+                        style: TextStyle(color: Colors.white))),
               const PopupMenuItem(
                   value: 'subfile',
                   child: Text('加载外挂字幕',
                       style: TextStyle(color: Colors.white))),
+              if (widget.onLoadSubtitleOptions != null)
+                const PopupMenuItem(
+                    value: 'subopts',
+                    child: Text('字幕语言 / 双语',
+                        style: TextStyle(color: Colors.white))),
               const PopupMenuItem(
                   value: 'marks',
                   child:
@@ -1951,6 +2533,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                 const PopupMenuItem(
                     value: 'frames',
                     child: Text('批量截帧',
+                        style: TextStyle(color: Colors.white))),
+              if (Platform.isMacOS &&
+                  TranscribeService.ffmpeg != null &&
+                  !widget.source.resource.startsWith('http'))
+                const PopupMenuItem(
+                    value: 'gif',
+                    child: Text('导出 GIF 片段(A-B)',
                         style: TextStyle(color: Colors.white))),
               const PopupMenuDivider(),
               CheckedPopupMenuItem(
@@ -2041,8 +2630,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                   // _videoView 内 _cropEdges 放大 1.22 倍裁掉溢出，把角落水印推出画面。
                   child: GestureDetector(
                     onTap: () => _player.playOrPause(),
+                    onDoubleTapDown: (d) => _doubleTapAt = d.globalPosition,
                     onDoubleTap: showVideo && !_audioOnly
-                        ? _enterFullscreen
+                        ? _handleDoubleTapZone
                         : null,
                     onLongPressStart: (_) => _longRate(true),
                     onLongPressEnd: (_) => _longRate(false),
@@ -2055,6 +2645,28 @@ class _PlayerScreenState extends State<PlayerScreen>
                             (_dim + d.delta.dy / 300).clamp(0.0, 0.85));
                       }
                     },
+                    onHorizontalDragStart: (_) {
+                      setState(() {
+                        _isDragSeeking = true;
+                        _dragPreview = _position;
+                      });
+                    },
+                    onHorizontalDragUpdate: (d) {
+                      final w = MediaQuery.of(context).size.width;
+                      final delta = (d.delta.dx / w) * _duration.inSeconds * 1.2;
+                      final next = (_dragPreview ?? _position) +
+                          Duration(milliseconds: (delta * 1000).round());
+                      setState(() => _dragPreview = Duration(
+                          milliseconds: next.inMilliseconds
+                              .clamp(0, _duration.inMilliseconds)));
+                    },
+                    onHorizontalDragEnd: (_) {
+                      if (_dragPreview != null) _player.seek(_dragPreview!);
+                      setState(() {
+                        _isDragSeeking = false;
+                        _dragPreview = null;
+                      });
+                    },
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
@@ -2066,6 +2678,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                             child: Container(
                                 color:
                                     Colors.black.withValues(alpha: _dim)),
+                          ),
+                        if (_isDragSeeking && _dragPreview != null)
+                          Center(
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 16, vertical: 8),
+                              decoration: BoxDecoration(
+                                color: Colors.black54,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                  '${_fmt(_dragPreview!)} / ${_fmt(_duration)}',
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 18)),
+                            ),
+                          ),
+                        if (_seekHintIcon != null)
+                          Center(
+                            child: Icon(_seekHintIcon,
+                                size: 56, color: Colors.white70),
                           ),
                         if (_longPressing)
                           const Positioned(
@@ -2092,6 +2724,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                   padding: const EdgeInsets.symmetric(horizontal: 24),
                   child: Column(
                     children: [
+                      if (_danmakuOn && _danmakuHistogram.isNotEmpty && durMs > 0)
+                        _DanmakuHeatmapBar(
+                          histogram: _danmakuHistogram,
+                          durationSec: _duration.inSeconds,
+                          accent: cs.primary,
+                          onSeek: (sec) =>
+                              _player.seek(Duration(seconds: sec)),
+                        ),
                       SliderTheme(
                         data: SliderThemeData(
                           trackHeight: 3,
@@ -2461,6 +3101,9 @@ class _DanmakuLayer extends StatefulWidget {
   final int speedSec;
   final int maxActive;
   final List<String> block;
+  final List<RegExp> blockRegex;
+  final double topBlocked; // 顶部禁区%
+  final double bottomBlocked; // 底部禁区%
   const _DanmakuLayer(
       {required this.items,
       required this.position,
@@ -2469,7 +3112,10 @@ class _DanmakuLayer extends StatefulWidget {
       this.fontScale = 1.0,
       this.speedSec = 9,
       this.maxActive = 60,
-      this.block = const []});
+      this.block = const [],
+      this.blockRegex = const [],
+      this.topBlocked = 0,
+      this.bottomBlocked = 0});
   @override
   State<_DanmakuLayer> createState() => _DanmakuLayerState();
 }
@@ -2533,6 +3179,7 @@ class _DanmakuLayerState extends State<_DanmakuLayer> {
   void _spawn(Danmaku d, double pos) {
     if (_active.length > widget.maxActive) return;
     if (widget.block.any((w) => w.isNotEmpty && d.text.contains(w))) return;
+    if (widget.blockRegex.any((r) => r.hasMatch(d.text))) return;
     var track = 0;
     var best = double.infinity;
     for (var i = 0; i < _tracks; i++) {
@@ -2555,21 +3202,31 @@ class _DanmakuLayerState extends State<_DanmakuLayer> {
     return Opacity(
       opacity: widget.opacity,
       child: ClipRect(
-        child: Stack(
-          children: [
-            for (final d in _active)
-              _FlyingDanmaku(
-                key: d.key,
-                text: d.text,
-                color: d.color,
-                track: d.track,
-                playing: widget.playing,
-                fontScale: widget.fontScale,
-                speedSec: widget.speedSec,
-                onDone: () => _remove(d.key),
-              ),
-          ],
-        ),
+        child: LayoutBuilder(builder: (context, c) {
+          final h = c.maxHeight;
+          final topPx = h * widget.topBlocked / 100;
+          final botPx = h * (100 - widget.bottomBlocked) / 100;
+          final lineH = 19.0 * widget.fontScale + 4;
+          return Stack(
+            children: [
+              for (final d in _active)
+                if (() {
+                  final y = 6.0 + d.track * 27.0 * widget.fontScale;
+                  return y >= topPx && (y + lineH) <= botPx;
+                }())
+                  _FlyingDanmaku(
+                    key: d.key,
+                    text: d.text,
+                    color: d.color,
+                    track: d.track,
+                    playing: widget.playing,
+                    fontScale: widget.fontScale,
+                    speedSec: widget.speedSec,
+                    onDone: () => _remove(d.key),
+                  ),
+            ],
+          );
+        }),
       ),
     );
   }
@@ -2656,4 +3313,72 @@ class _FlyingDanmakuState extends State<_FlyingDanmaku>
       },
     );
   }
+}
+
+/// F11: 弹幕热力时间轴。把每秒弹幕数画成柱状条，点击跳转。
+class _DanmakuHeatmapBar extends StatelessWidget {
+  final Map<int, int> histogram;
+  final int durationSec;
+  final Color accent;
+  final void Function(int sec) onSeek;
+  const _DanmakuHeatmapBar(
+      {required this.histogram,
+      required this.durationSec,
+      required this.accent,
+      required this.onSeek});
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 18,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTapDown: (d) {
+          final w = context.size?.width ?? 1;
+          final sec = (d.localPosition.dx / w * durationSec)
+              .clamp(0, durationSec)
+              .round();
+          onSeek(sec);
+        },
+        child: CustomPaint(
+          painter: _DanmakuHeatmapPainter(histogram, durationSec, accent),
+          size: const Size(double.infinity, 18),
+        ),
+      ),
+    );
+  }
+}
+
+class _DanmakuHeatmapPainter extends CustomPainter {
+  final Map<int, int> histogram;
+  final int durationSec;
+  final Color accent;
+  _DanmakuHeatmapPainter(this.histogram, this.durationSec, this.accent);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (durationSec <= 0 || histogram.isEmpty) return;
+    final maxV =
+        histogram.values.fold<int>(1, (a, b) => b > a ? b : a).toDouble();
+    const buckets = 120;
+    final agg = List<double>.filled(buckets, 0);
+    histogram.forEach((sec, cnt) {
+      final bi = (sec / durationSec * buckets).clamp(0, buckets - 1).floor();
+      agg[bi] += cnt;
+    });
+    final bw = size.width / buckets;
+    final paint = Paint();
+    for (var i = 0; i < buckets; i++) {
+      final h = (agg[i] / maxV).clamp(0.0, 1.0) * size.height;
+      if (h <= 0) continue;
+      paint.color = Color.lerp(
+          accent.withValues(alpha: 0.35), Colors.redAccent, (agg[i] / maxV))!;
+      canvas.drawRect(
+          Rect.fromLTWH(i * bw, size.height - h, bw + 0.5, h), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DanmakuHeatmapPainter old) =>
+      old.histogram != histogram || old.durationSec != durationSec;
 }

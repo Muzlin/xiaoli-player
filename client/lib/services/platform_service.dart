@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:http/http.dart' as http;
@@ -132,11 +133,14 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
-  Future<List<PlatformVideo>> search(String q, {String cat = ''}) async {
+  Future<List<PlatformVideo>> search(String q,
+      {String cat = '', String sort = ''}) async {
     try {
       final catQs = cat.isEmpty ? '' : '&cat=${Uri.encodeComponent(cat)}';
+      final sortQs = sort.isEmpty ? '' : '&sort=${Uri.encodeComponent(sort)}';
       final r = await _http
-          .get(Uri.parse('$current/search?q=${Uri.encodeComponent(q)}$catQs'))
+          .get(Uri.parse(
+              '$current/search?q=${Uri.encodeComponent(q)}$catQs$sortQs'))
           .timeout(const Duration(seconds: 15));
       final list = (jsonDecode(r.body) as List?) ?? [];
       return list
@@ -155,7 +159,102 @@ class PlatformService {
     }
   }
 
-  Future<List<PlatformVideo>> list({String cat = ''}) => search('', cat: cat);
+  Future<List<PlatformVideo>> list({String cat = '', String sort = ''}) =>
+      search('', cat: cat, sort: sort);
+
+  /// 下载平台视频到 [destPath]，onProgress(已收字节, 总字节)。返回 null 成功，否则错误串。
+  Future<String?> downloadVideo(String videoId, String destPath,
+      {void Function(int received, int total)? onProgress}) async {
+    try {
+      final req = http.Request('GET', Uri.parse(videoUrl(videoId)));
+      final resp = await _http.send(req).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) return 'HTTP ${resp.statusCode}';
+      final total = resp.contentLength ?? 0;
+      var received = 0;
+      final sink = File(destPath).openWrite();
+      await for (final chunk in resp.stream) {
+        sink.add(chunk);
+        received += chunk.length;
+        if (onProgress != null) onProgress(received, total);
+      }
+      await sink.close();
+      return null;
+    } catch (e) {
+      return '$e';
+    }
+  }
+
+  /// 生成批量下载脚本（aria2/wget），返回脚本文本。失败返回 null。
+  Future<String?> exportScript(List<String> ids, String fmt) async {
+    try {
+      final idsQs = ids.join(',');
+      final r = await _http
+          .get(Uri.parse(
+              '$current/export-script?ids=${Uri.encodeComponent(idsQs)}&fmt=$fmt'))
+          .timeout(const Duration(seconds: 15));
+      if (r.statusCode != 200) return null;
+      return r.body;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 带进度的上传：yield 进度(0~1)，最后一项为 1.0；出错抛异常。msg 通过 lastMessage 取。
+  String lastUploadMessage = '';
+  Stream<double> uploadWithProgress(
+      String path, String title, String uploader) async* {
+    final file = File(path);
+    if (!file.existsSync()) {
+      lastUploadMessage = '文件不存在';
+      throw Exception(lastUploadMessage);
+    }
+    final ext = path.contains('.') ? path.split('.').last.toLowerCase() : 'mp4';
+    final total = await file.length();
+    final query = '?title=${Uri.encodeComponent(title)}'
+        '&uploader=${Uri.encodeComponent(uploader)}&ext=$ext';
+    String lastErr = '服务器连不上';
+    for (final base in _uploadBases) {
+      try {
+        final h = await _http
+            .get(Uri.parse('$base/health'))
+            .timeout(const Duration(seconds: 3));
+        if (h.statusCode != 200) continue;
+        var sent = 0;
+        final controller = StreamController<double>();
+        final req = http.StreamedRequest('POST', Uri.parse('$base/upload$query'));
+        req.headers['Content-Type'] = 'application/octet-stream';
+        req.contentLength = total;
+        final respFuture = _http.send(req);
+        // 分块喂数据，边喂边报进度；喂完关闭进度流。
+        () async {
+          await for (final chunk in file.openRead()) {
+            req.sink.add(chunk);
+            sent += chunk.length;
+            if (!controller.isClosed) {
+              controller.add(total == 0 ? 0 : sent / total);
+            }
+          }
+          req.sink.close();
+          if (!controller.isClosed) await controller.close();
+        }();
+        yield* controller.stream;
+        final streamed = await respFuture.timeout(const Duration(minutes: 20));
+        final body = await streamed.stream.bytesToString();
+        final d = jsonDecode(body);
+        if (d['ok'] == true) {
+          lastUploadMessage = '上传成功！别人搜「$title」就能看到';
+          yield 1.0;
+          return;
+        }
+        lastErr = '${d['error'] ?? streamed.statusCode}';
+      } catch (e) {
+        lastErr = '$e';
+        continue;
+      }
+    }
+    lastUploadMessage = '上传失败：$lastErr（确保平台服务器在运行）';
+    throw Exception(lastUploadMessage);
+  }
 
   /// 上传优先级：本机直传(秒级) → 局域网 → 公网(慢，兜底)。
   /// cloudflared 免费隧道上传极慢，故同机/同网时直传服务器。

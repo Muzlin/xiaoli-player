@@ -8,7 +8,25 @@ class BiliTrack {
   final String bvid;
   final String title;
   final String author;
-  BiliTrack({required this.bvid, required this.title, required this.author});
+  final String pic; // 封面图 URL（用于封面取色等）
+  BiliTrack(
+      {required this.bvid,
+      required this.title,
+      required this.author,
+      this.pic = ''});
+}
+
+/// 一条可选字幕轨（B站多语言字幕）。
+class SubtitleOption {
+  final String lan; // 语言代码 zh-CN / en-US / ai-zh
+  final String lanDoc; // 显示名 中文/英语
+  final String url; // 字幕 json 地址
+  final String author;
+  SubtitleOption(
+      {required this.lan,
+      required this.lanDoc,
+      required this.url,
+      this.author = ''});
 }
 
 /// 一个 B站 用户/UP主（搜索账号结果）。
@@ -45,6 +63,58 @@ class Danmaku {
   final String text;
   final int color; // RGB
   const Danmaku(this.time, this.text, this.color);
+
+  /// 从 SRT/VTT 文本解析为弹幕（每条字幕变一条弹幕，颜色默认白）。
+  static List<Danmaku> parseSrt(String srt) {
+    final out = <Danmaku>[];
+    final reTime = RegExp(
+        r'(\d{2}):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})');
+    final blocks = srt.replaceAll('\r\n', '\n').split(RegExp(r'\n\s*\n'));
+    for (final b in blocks) {
+      final lines = b.trim().split('\n');
+      if (lines.isEmpty) continue;
+      double? t;
+      final buf = <String>[];
+      for (final ln in lines) {
+        final m = reTime.firstMatch(ln);
+        if (m != null) {
+          t = int.parse(m[1]!) * 3600.0 +
+              int.parse(m[2]!) * 60 +
+              int.parse(m[3]!) +
+              int.parse(m[4]!) / 1000;
+        } else if (t != null && !RegExp(r'^\d+$').hasMatch(ln.trim())) {
+          buf.add(ln.trim());
+        }
+      }
+      if (t != null && buf.isNotEmpty) {
+        out.add(Danmaku(t, buf.join(' '), 0xFFFFFF));
+      }
+    }
+    return out;
+  }
+
+  /// 从 JSON 数组解析弹幕：[{time, text, color?}]，color 支持 int 或 十六进制串。
+  static List<Danmaku> parseJson(String jsonStr) {
+    final out = <Danmaku>[];
+    try {
+      final arr = jsonDecode(jsonStr) as List;
+      for (final e in arr) {
+        final m = e as Map;
+        final t = (m['time'] as num?)?.toDouble() ?? 0;
+        final txt = (m['text'] ?? '').toString();
+        int color = 0xFFFFFF;
+        final c = m['color'];
+        if (c is num) {
+          color = c.toInt();
+        } else if (c is String && c.isNotEmpty) {
+          color = int.tryParse(c.replaceFirst('#', ''), radix: 16) ?? 0xFFFFFF;
+        }
+        if (txt.isNotEmpty) out.add(Danmaku(t, txt, color));
+      }
+    } catch (_) {}
+    out.sort((a, b) => a.time.compareTo(b.time));
+    return out;
+  }
 }
 
 class BilibiliService {
@@ -175,7 +245,7 @@ class BilibiliService {
 
   /// 联网搜索（单次请求，靠完整 cookie 降低风控）。失败/被限流返回空列表。
   Future<List<BiliTrack>> search(String keyword,
-      {int pages = 2, String order = ''}) async {
+      {int pages = 2, String order = '', String tid = ''}) async {
     if (keyword.trim().isEmpty) return [];
     try {
       await _ensureInit();
@@ -191,6 +261,7 @@ class BilibiliService {
           'keyword': keyword,
           'page': '$pn',
           if (order.isNotEmpty) 'order': order,
+          if (tid.isNotEmpty) 'tids': tid,
         });
         final r = await _http
             .get(
@@ -207,10 +278,13 @@ class BilibiliService {
           final bvid = (m['bvid'] ?? '') as String;
           if (bvid.isEmpty || seen.contains(bvid)) continue;
           seen.add(bvid);
+          var pic = (m['pic'] as String? ?? '');
+          if (pic.startsWith('//')) pic = 'https:$pic';
           all.add(BiliTrack(
             bvid: bvid,
             title: cleanTitle(m['title'] as String? ?? ''),
             author: (m['author'] ?? '') as String,
+            pic: pic,
           ));
         }
       } catch (_) {
@@ -218,6 +292,29 @@ class BilibiliService {
       }
     }
     return all;
+  }
+
+  /// 搜索建议词：输入关键字返回 B站热门联想词列表。失败返回 []。
+  Future<List<String>> searchSuggest(String keyword) async {
+    if (keyword.trim().isEmpty) return [];
+    try {
+      final r = await _http.get(
+        Uri.parse(
+            'https://s.search.bilibili.com/main/suggest?term=${Uri.encodeComponent(keyword)}&main_ver=v1'),
+        headers: _headers,
+      ).timeout(const Duration(seconds: 5));
+      final data = jsonDecode(r.body);
+      final result = data['result'];
+      final tags = (result is Map ? result['tag'] : null) as List?;
+      if (tags == null) return [];
+      return tags
+          .map((e) => (e['value'] ?? e['name'] ?? '').toString())
+          .where((s) => s.isNotEmpty)
+          .take(8)
+          .toList();
+    } catch (_) {
+      return [];
+    }
   }
 
   /// 生成扫码登录二维码：返回 {url(二维码内容), key(轮询用)}。失败返回 null。
@@ -999,14 +1096,15 @@ class BilibiliService {
   }
 
   /// 取某 UP主 的投稿视频列表（wbi 签名）。受风控/失败返回空。
-  Future<List<BiliTrack>> getUserVideos(int mid, {int pn = 1}) async {
+  Future<List<BiliTrack>> getUserVideos(int mid,
+      {int pn = 1, String order = 'pubdate'}) async {
     try {
       await _ensureInit();
       final qs = _sign({
         'mid': '$mid',
         'pn': '$pn',
         'ps': '30',
-        'order': 'pubdate',
+        'order': order,
         'platform': 'web',
       });
       final r = await _http
@@ -1161,6 +1259,74 @@ class BilibiliService {
     } catch (_) {
       return null;
     }
+  }
+
+  /// 取某视频全部可选字幕轨（多语言列表）。失败返回 []。
+  Future<List<SubtitleOption>> getSubtitleOptions(String bvid) async {
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final cid = view['data']['cid'].toString();
+      final qs = _sign({'bvid': bvid, 'cid': cid});
+      final v2 = jsonDecode((await _http.get(
+              Uri.parse('https://api.bilibili.com/x/player/wbi/v2?$qs'),
+              headers: _headers))
+          .body);
+      final subs = (v2['data']?['subtitle']?['subtitles'] as List?) ?? [];
+      return subs
+          .map((s) {
+            var url = (s['subtitle_url'] as String? ?? '');
+            if (url.startsWith('//')) url = 'https:$url';
+            return SubtitleOption(
+              lan: (s['lan'] ?? '') as String,
+              lanDoc: (s['lan_doc'] ?? s['lan'] ?? '') as String,
+              url: url,
+              author: ((s['author'] as Map?)?['uname'] ?? '') as String,
+            );
+          })
+          .where((o) => o.url.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// 下载某条字幕轨并转 SRT。失败返回 null。
+  Future<String?> downloadSubtitle(String url) async {
+    try {
+      if (url.isEmpty) return null;
+      if (url.startsWith('//')) url = 'https:$url';
+      final body = jsonDecode((await _http
+              .get(Uri.parse(url), headers: {'User-Agent': _ua}))
+          .body);
+      final lines = (body['body'] as List?) ?? [];
+      if (lines.isEmpty) return null;
+      return _toSrt(lines);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 取中文+英文两条字幕（双语对照用）。返回 {zh, en}，缺失为 null。
+  Future<Map<String, String?>> getMultiSubtitles(String bvid) async {
+    final opts = await getSubtitleOptions(bvid);
+    SubtitleOption? pick(bool Function(String) test) {
+      for (final o in opts) {
+        if (test(o.lan)) return o;
+      }
+      return null;
+    }
+
+    final zh = pick((l) => l.startsWith('zh') || l.contains('zh'));
+    final en = pick((l) => l.startsWith('en') || l.contains('en'));
+    return {
+      'zh': zh == null ? null : await downloadSubtitle(zh.url),
+      'en': en == null ? null : await downloadSubtitle(en.url),
+    };
   }
 
   static String _toSrt(List lines) {

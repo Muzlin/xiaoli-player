@@ -8,14 +8,16 @@ class PlaybackSource {
   final String title;
   final bool isVideo;
   final Future<String?>? subtitleFuture; // B站自带字幕(SRT)，异步取，可空
+  final String? coverUrl; // 封面图 URL（用于封面取色 F39）
   const PlaybackSource._(this.resource, this.headers, this.title, this.isVideo,
-      [this.subtitleFuture]);
+      [this.subtitleFuture, this.coverUrl]);
 
   factory PlaybackSource.stream(String url, Map<String, String> headers,
           {String title = '',
           bool isVideo = false,
-          Future<String?>? subtitleFuture}) =>
-      PlaybackSource._(url, headers, title, isVideo, subtitleFuture);
+          Future<String?>? subtitleFuture,
+          String? coverUrl}) =>
+      PlaybackSource._(url, headers, title, isVideo, subtitleFuture, coverUrl);
 
   factory PlaybackSource.local(String path) {
     final ext = path.contains('.') ? path.split('.').last.toLowerCase() : '';

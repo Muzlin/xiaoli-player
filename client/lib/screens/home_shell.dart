@@ -18,6 +18,7 @@ import '../services/platform_service.dart';
 import '../services/update_service.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
+import 'stats_screen.dart';
 
 /// 一首曲目：本地文件、内置热门、或 B站联网搜索结果。
 class Track {
@@ -27,21 +28,23 @@ class Track {
   final String? bvid; // B站视频，需异步取音频流
   final String tag; // '' | '热门' | 'B站'
   final String? cid; // B站分P的cid(可选)
+  final String pic; // 封面图 URL（F39 封面取色，不持久化）
 
   Track.local(this.localPath)
       : name = localPath!.split(Platform.pathSeparator).last,
         url = null,
         bvid = null,
         tag = '',
-        cid = null;
+        cid = null,
+        pic = '';
 
-  Track.online(this.name, this.url, {this.tag = ''})
+  Track.online(this.name, this.url, {this.tag = '', this.pic = ''})
       : localPath = null,
         bvid = null,
         cid = null;
 
   // B站来源：不显示来源标签（作者已并入 name 保留）。
-  Track.bili(this.name, this.bvid, {this.tag = '', this.cid})
+  Track.bili(this.name, this.bvid, {this.tag = '', this.cid, this.pic = ''})
       : localPath = null,
         url = null;
 
@@ -70,7 +73,7 @@ class Track {
       : PlaybackSource.stream(url!, const {
           'User-Agent':
               'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        }, title: name, isVideo: _onlineIsVideo());
+        }, title: name, isVideo: _onlineIsVideo(), coverUrl: pic.isEmpty ? null : pic);
 
   // 在线 URL 按扩展名判断音/视频：音频后缀→封面，其余(含无后缀/m3u8/mp4)→视频画面。
   bool _onlineIsVideo() {
@@ -162,9 +165,17 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, List<int>> _bookmarks = {}; // 书签 track key→秒列表
   int _seekStep = 10; // 快进/快退步长
   String _searchOrder = ''; // B站搜索排序
+  String _searchTid = ''; // F5 B站分区
+  String _platformCatFilter = ''; // F3 平台分区
+  String _platformSort = ''; // F4 平台排序
+  List<String> _searchSuggestions = const []; // F6 搜索建议
+  Timer? _suggestDebounce;
   String _localFilter = 'all'; // 库类型筛选
   final Map<String, String> _localTags = {}; // 本地标签：track key→标签
   String _tagFilter = ''; // 当前标签筛选（''=全部）
+  double _listDensity = 1.0; // F24 列表密度 0.75/1.0/1.25
+  bool _autoPalette = false; // F39 封面取色开关
+  bool _guestMode = false; // F49 访客模式（不记录历史）
   int _watchSec = 0; // 累计观看秒
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
@@ -185,7 +196,7 @@ class _HomeShellState extends State<HomeShell> {
   final List<Track> _myVideos = []; // 我的视频（本地收录 / 可发布到B站）
   final List<String> _searchHistory = [];
   final TextEditingController _searchCtrl = TextEditingController();
-  bool _autoNext = true; // 播完自动连播（推荐/下一首）
+  String _playMode = 'queue'; // F1 连播策略: recommend|queue|stop
   Map<String, dynamic>? _account; // B站 登录账号信息（昵称/头像）
 
   // 外观：自定义背景（图片或纯色）+ 透明度。背景图会复制进 app 容器，重启不丢。
@@ -246,6 +257,7 @@ class _HomeShellState extends State<HomeShell> {
           const Duration(seconds: 30), (_) => _refreshPlatformUrl());
       _refreshPlatformUrl();
     }
+    if (Platform.isAndroid) _initAndroidChannels();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
@@ -255,6 +267,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _suggestDebounce?.cancel();
     _urlTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
@@ -719,32 +732,42 @@ class _HomeShellState extends State<HomeShell> {
   // ---- 自动连播 ----
   Future<void> _loadAutoNext() async {
     final prefs = await SharedPreferences.getInstance();
-    final v = prefs.getBool('auto_next_v1');
-    if (v != null && mounted) setState(() => _autoNext = v);
+    final m = prefs.getString('play_mode_v1');
+    if (m != null) {
+      if (mounted) setState(() => _playMode = m);
+    } else {
+      // 从旧的 bool 开关迁移
+      final v = prefs.getBool('auto_next_v1');
+      if (v != null && mounted) setState(() => _playMode = v ? 'queue' : 'stop');
+    }
   }
 
-  Future<void> _saveAutoNext(bool v) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setBool('auto_next_v1', v);
+  Future<void> _savePlayMode(String m) async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('play_mode_v1', m);
   }
+
 
   /// 一首播完（未单曲循环）后：B站放相关推荐，其它放队列下一首。
   Future<void> _onTrackCompleted() async {
-    if (!_autoNext) return;
+    if (_playMode == 'stop') return;
     final cur = _current;
     if (cur == null) return;
-    if (cur.bvid != null) {
+    // 推荐模式：B站放相关推荐。
+    if (_playMode == 'recommend' && cur.bvid != null) {
       final rel = await _bili.getRelated(cur.bvid!);
       if (rel.isNotEmpty && mounted) {
         final b = rel.first;
         _play(
           Track.bili(
-              b.author.isEmpty ? b.title : '${b.title} - ${b.author}', b.bvid),
+              b.author.isEmpty ? b.title : '${b.title} - ${b.author}', b.bvid,
+              pic: b.pic),
           replace: true,
         );
         return;
       }
     }
+    // 队列模式（或推荐取不到时）：放队列下一首。
     final q = _playQueue;
     final i = q.indexWhere((t) => t.key == cur.key);
     if (i >= 0 && i < q.length - 1 && mounted) {
@@ -1193,18 +1216,33 @@ class _HomeShellState extends State<HomeShell> {
   void _onSearchChanged(String v) {
     setState(() => _query = v);
     _searchDebounce?.cancel();
+    _suggestDebounce?.cancel();
     if (v.trim().isEmpty) {
-      setState(() => _onlineTracks.clear());
+      setState(() {
+        _onlineTracks.clear();
+        _searchSuggestions = const [];
+      });
       return;
     }
+    // F6: 300ms 拉取搜索建议（防过期）。
+    _suggestDebounce = Timer(const Duration(milliseconds: 300), () async {
+      final sug = await _bili.searchSuggest(v);
+      if (mounted && v == _searchCtrl.text) {
+        setState(() => _searchSuggestions = sug);
+      }
+    });
     _searchDebounce =
         Timer(const Duration(milliseconds: 500), () => _searchOnline(v));
   }
 
   Future<void> _searchOnline(String q) async {
-    setState(() => _searchingOnline = true);
-    final results = await _bili.search(q, order: _searchOrder);
-    final plat = await _platform.search(q);
+    setState(() {
+      _searchingOnline = true;
+      _searchSuggestions = const [];
+    });
+    final results = await _bili.search(q, order: _searchOrder, tid: _searchTid);
+    final plat = await _platform.search(q,
+        cat: _platformCatFilter, sort: _platformSort);
     final users = await _bili.searchUsers(q);
     if (!mounted) return;
     setState(() {
@@ -1218,6 +1256,7 @@ class _HomeShellState extends State<HomeShell> {
         ..addAll(results.map((b) => Track.bili(
               b.author.isEmpty ? b.title : '${b.title} - ${b.author}',
               b.bvid,
+              pic: b.pic,
             )));
     });
     if (results.isNotEmpty || plat.isNotEmpty) _addHistory(q);
@@ -1348,7 +1387,10 @@ class _HomeShellState extends State<HomeShell> {
         return;
       }
       src = PlaybackSource.stream(url, _bili.playHeaders,
-          title: t.name, isVideo: true, subtitleFuture: subFut);
+          title: t.name,
+          isVideo: true,
+          subtitleFuture: subFut,
+          coverUrl: t.pic.isEmpty ? null : t.pic);
     } else {
       src = t.toSource();
     }
@@ -1406,6 +1448,10 @@ class _HomeShellState extends State<HomeShell> {
         onRate: t.tag == '平台' && t.url != null
             ? (score) => _ratePlat(t.url!, score)
             : null,
+        onLoadSubtitleOptions:
+            t.bvid != null ? () => _bili.getSubtitleOptions(t.bvid!) : null,
+        onLoadMultiSubtitles:
+            t.bvid != null ? () => _bili.getMultiSubtitles(t.bvid!) : null,
       ),
     );
     if (replace) {
@@ -1414,6 +1460,38 @@ class _HomeShellState extends State<HomeShell> {
     } else {
       Navigator.of(context).push(route);
     }
+  }
+
+  // F46/F47: Android 原生通道——音量键换曲、接收系统分享链接。
+  void _initAndroidChannels() {
+    const MethodChannel('xiaoli/volume').setMethodCallHandler((call) async {
+      if (call.method == 'next') {
+        _next();
+      } else if (call.method == 'prev') {
+        _prev();
+      }
+      return null;
+    });
+    void openShared(String url) {
+      if (!url.startsWith('http')) return;
+      final name = Uri.tryParse(url)?.pathSegments.lastWhere(
+              (s) => s.isNotEmpty,
+              orElse: () => url) ??
+          url;
+      _play(Track.online(name, url, tag: '分享'));
+    }
+
+    const shareCh = MethodChannel('xiaoli/share');
+    shareCh.setMethodCallHandler((call) async {
+      if (call.method == 'onSharedUrl' && call.arguments is String) {
+        openShared(call.arguments as String);
+      }
+      return null;
+    });
+    // 冷启动时主动拉一次（分享拉起 app 的场景）。
+    shareCh.invokeMethod<String>('getSharedUrl').then((url) {
+      if (url != null && url.isNotEmpty) openShared(url);
+    }).catchError((_) {});
   }
 
   void _prev() {
@@ -1493,7 +1571,12 @@ class _HomeShellState extends State<HomeShell> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: IconButton(
-        onPressed: () => setState(() => _navIndex = index),
+        onPressed: () {
+          setState(() => _navIndex = index);
+          // F26: 记住上次所在 tab。
+          SharedPreferences.getInstance()
+              .then((p) => p.setInt('last_nav', index));
+        },
         icon: Icon(icon, color: selected ? cs.primary : Colors.white60),
       ),
     );
@@ -1549,6 +1632,16 @@ class _HomeShellState extends State<HomeShell> {
                 setState(() =>
                     _searchOrder = v == 'o_default' ? '' : v.substring(2));
                 if (_query.trim().isNotEmpty) _searchOnline(_query);
+              } else if (v.startsWith('t_')) {
+                setState(() =>
+                    _searchTid = v == 't_0' ? '' : v.substring(2));
+                SharedPreferences.getInstance()
+                    .then((p) => p.setString('search_tid_v1', _searchTid));
+                if (_query.trim().isNotEmpty) _searchOnline(_query);
+              } else if (v.startsWith('p_')) {
+                setState(() =>
+                    _platformSort = v == 'p_default' ? '' : v.substring(2));
+                if (_query.trim().isNotEmpty) _searchOnline(_query);
               } else if (v == 'l_name') {
                 _sortLocal();
               } else if (v == 'l_recent') {
@@ -1581,6 +1674,45 @@ class _HomeShellState extends State<HomeShell> {
                   value: 'o_pubdate',
                   checked: _searchOrder == 'pubdate',
                   child: const Text('最新发布',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                  enabled: false,
+                  child: Text('B站分区',
+                      style: TextStyle(color: Colors.white38, fontSize: 12))),
+              for (final e in const [
+                ['t_0', '全部', ''],
+                ['t_1', '动画', '1'],
+                ['t_3', '音乐', '3'],
+                ['t_4', '游戏', '4'],
+                ['t_11', '电视剧', '11'],
+                ['t_23', '电影', '23'],
+                ['t_119', '鬼畜', '119'],
+              ])
+                CheckedPopupMenuItem(
+                    value: e[0],
+                    checked: _searchTid == e[2],
+                    child: Text(e[1],
+                        style: const TextStyle(color: Colors.white))),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                  enabled: false,
+                  child: Text('平台视频排序',
+                      style: TextStyle(color: Colors.white38, fontSize: 12))),
+              CheckedPopupMenuItem(
+                  value: 'p_default',
+                  checked: _platformSort == '',
+                  child:
+                      const Text('默认', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'p_time',
+                  checked: _platformSort == 'time',
+                  child: const Text('最新上传',
+                      style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'p_rating',
+                  checked: _platformSort == 'rating',
+                  child: const Text('评分最高',
                       style: TextStyle(color: Colors.white))),
               const PopupMenuDivider(),
               const PopupMenuItem(
@@ -1943,6 +2075,13 @@ class _HomeShellState extends State<HomeShell> {
     if (ac != null) accentNotifier.value = Color(ac);
     themeModeNotifier.value =
         ThemeMode.values[(p.getInt('theme_mode') ?? 0).clamp(0, 2)];
+    _searchTid = p.getString('search_tid_v1') ?? '';
+    _listDensity = p.getDouble('list_density') ?? 1.0;
+    _autoPalette = p.getBool('auto_palette') ?? false;
+    _guestMode = p.getBool('guest_mode') ?? false;
+    // F26: 启动导航。-1=记住上次；否则固定到该 tab。
+    final sn = p.getInt('startup_nav') ?? -1;
+    _navIndex = sn >= 0 ? sn : (p.getInt('last_nav') ?? 0);
     try {
       final tg = p.getString('local_tags_v1');
       if (tg != null) {
@@ -2450,6 +2589,7 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _pushPlayHistory(Track t) {
+    if (_guestMode) return; // F49 访客模式不记录
     _history.removeWhere((h) => h.key == t.key);
     _history.insert(0, t);
     if (_history.length > 40) _history.removeRange(40, _history.length);
@@ -2739,6 +2879,144 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  // F6: 搜索建议词横条。
+  Widget _suggestionsBar(ColorScheme cs) {
+    return SizedBox(
+      height: 40,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          for (final s in _searchSuggestions)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              child: ActionChip(
+                avatar: const Icon(Icons.north_east, size: 14),
+                label: Text(s),
+                onPressed: () {
+                  _searchCtrl.text = s;
+                  setState(() {
+                    _query = s;
+                    _searchSuggestions = const [];
+                  });
+                  _addHistory(s);
+                  _searchOnline(s);
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // F3: 平台视频分区筛选条（全部/视频/音乐）。
+  Widget _platformCatBar(ColorScheme cs) {
+    return SizedBox(
+      height: 42,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          for (final e in const [
+            ['', '全部'],
+            ['视频', '视频'],
+            ['音乐', '音乐'],
+          ])
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 5),
+              child: FilterChip(
+                label: Text('平台·${e[1]}'),
+                selected: _platformCatFilter == e[0],
+                onSelected: (_) {
+                  setState(() => _platformCatFilter = e[0]);
+                  if (_query.trim().isNotEmpty) _searchOnline(_query);
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // F25: 预设主题包（强调色 + 深浅模式）一键套用。
+  Future<void> _showThemePresets() async {
+    const presets = [
+      ['橙日', 0xFFF26B21, 0], // name, accent, themeModeIndex
+      ['冰蓝夜', 0xFF4FC3F7, 2],
+      ['樱花粉', 0xFFFF6F9C, 1],
+      ['草原绿', 0xFF43A047, 1],
+      ['暗夜紫', 0xFF7E57C2, 2],
+      ['极简灰', 0xFF607D8B, 0],
+      ['热血红', 0xFFE53935, 1],
+      ['深海青', 0xFF00897B, 2],
+    ];
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('快速主题包',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: [
+                  for (final pr in presets)
+                    GestureDetector(
+                      onTap: () async {
+                        Navigator.pop(ctx);
+                        setState(() {
+                          accentNotifier.value = Color(pr[1] as int);
+                          themeModeNotifier.value =
+                              ThemeMode.values[pr[2] as int];
+                        });
+                        final p = await SharedPreferences.getInstance();
+                        await p.setInt('accent_color', pr[1] as int);
+                        await p.setInt('theme_mode', pr[2] as int);
+                      },
+                      child: Column(
+                        children: [
+                          Container(
+                            width: 56,
+                            height: 56,
+                            decoration: BoxDecoration(
+                              color: Color(pr[1] as int),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                  color: (pr[2] as int) == 2
+                                      ? Colors.black87
+                                      : Colors.white,
+                                  width: 2),
+                            ),
+                            child: Icon(
+                                (pr[2] as int) == 2
+                                    ? Icons.dark_mode
+                                    : (pr[2] as int) == 1
+                                        ? Icons.light_mode
+                                        : Icons.brightness_auto,
+                                color: Colors.white70,
+                                size: 18),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(pr[0] as String,
+                              style: const TextStyle(fontSize: 12)),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _pickAccent() async {
     const colors = [
       0xFFF26B21, 0xFFFF3B30, 0xFFFF2D55, 0xFF007AFF, 0xFF34C759,
@@ -2807,6 +3085,9 @@ class _HomeShellState extends State<HomeShell> {
         if (_query.isEmpty) _typeFilterBar(cs),
         if (_query.isEmpty && _localTags.isNotEmpty) _tagFilterBar(cs),
         if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
+        if (_query.isNotEmpty && _searchSuggestions.isNotEmpty)
+          _suggestionsBar(cs),
+        if (_query.isNotEmpty) _platformCatBar(cs),
         if (_query.isNotEmpty && _accountResults.isNotEmpty)
           _accountsBar(cs),
         Expanded(
@@ -2839,6 +3120,56 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  // F34: 把平台视频下载到本地，带进度对话框。
+  Future<void> _downloadPlatformVideo(Track t) async {
+    final id = t.url!.split('/').last;
+    final safe = t.name.replaceAll(RegExp(r'[^\w一-龥 .-]'), '_');
+    final dest = await FilePicker.platform
+        .saveFile(dialogTitle: '保存平台视频到…', fileName: '$safe.mp4');
+    if (dest == null || !mounted) return;
+    final progress = ValueNotifier<String>('开始下载…');
+    var dialogOpen = true;
+    void closeDialog() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('下载平台视频'),
+        content: ValueListenableBuilder<String>(
+          valueListenable: progress,
+          builder: (_, sx, __) => Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 16),
+              Expanded(child: Text(sx)),
+            ],
+          ),
+        ),
+      ),
+    );
+    final err = await PlatformService().downloadVideo(id, dest,
+        onProgress: (recv, total) {
+      final mb = (recv / 1048576).toStringAsFixed(1);
+      progress.value = total > 0
+          ? '$mb MB / ${(total / 1048576).toStringAsFixed(1)} MB'
+          : '已下载 $mb MB';
+    });
+    closeDialog();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(err == null ? '已保存 $dest' : '下载失败：$err')));
+  }
+
   void _showRowMenu(Track t, Offset pos) {
     final items = <PopupMenuEntry<String>>[
       PopupMenuItem(value: 'fav', child: Text(_isFav(t) ? '取消收藏' : '收藏')),
@@ -2850,6 +3181,10 @@ class _HomeShellState extends State<HomeShell> {
           value: 'tag',
           child: Text(_localTags.containsKey(t.key) ? '修改标签' : '设置标签')));
       items.add(const PopupMenuItem(value: 'remove', child: Text('从列表移除')));
+    }
+    if (t.tag == '平台' && t.url != null) {
+      items.add(const PopupMenuItem(
+          value: 'pdownload', child: Text('下载到本地')));
     }
     showMenu<String>(
       context: context,
@@ -2865,6 +3200,8 @@ class _HomeShellState extends State<HomeShell> {
         _addToPlaylist(t);
       } else if (v == 'tag') {
         _setTrackTag(t);
+      } else if (v == 'pdownload') {
+        _downloadPlatformVideo(t);
       } else if (v == 'copyname') {
         Clipboard.setData(ClipboardData(text: t.name));
         ScaffoldMessenger.of(context)
@@ -2938,6 +3275,86 @@ class _HomeShellState extends State<HomeShell> {
     await _saveLocalTags();
   }
 
+  // F29: 检测本地重复文件（按文件名+大小分组），可一键移除多余项。
+  Future<void> _detectDuplicates() async {
+    final groups = <String, List<Track>>{};
+    for (final t in _localTracks) {
+      if (t.localPath == null) continue;
+      final f = File(t.localPath!);
+      if (!f.existsSync()) continue;
+      final base = t.localPath!.split(Platform.pathSeparator).last;
+      final key = '$base|${f.lengthSync()}';
+      groups.putIfAbsent(key, () => []).add(t);
+    }
+    final dups = groups.values.where((g) => g.length > 1).toList();
+    if (!mounted) return;
+    if (dups.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('没有发现重复文件')));
+      return;
+    }
+    // 默认保留每组第一项，其余勾选待删。
+    final toRemove = <String>{};
+    for (final g in dups) {
+      for (var i = 1; i < g.length; i++) {
+        toRemove.add(g[i].key);
+      }
+    }
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: Text('发现 ${dups.length} 组重复'),
+          content: SizedBox(
+            width: 360,
+            height: 360,
+            child: ListView(
+              children: [
+                for (final g in dups) ...[
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8, bottom: 2),
+                    child: Text(
+                        g.first.name.split(Platform.pathSeparator).last,
+                        style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ),
+                  for (final t in g)
+                    CheckboxListTile(
+                      dense: true,
+                      value: toRemove.contains(t.key),
+                      title: Text(t.localPath ?? t.name,
+                          style: const TextStyle(fontSize: 11),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis),
+                      onChanged: (v) => setD(() => v == true
+                          ? toRemove.add(t.key)
+                          : toRemove.remove(t.key)),
+                    ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: Text('移除 ${toRemove.length} 项')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    setState(() {
+      _localTracks.removeWhere((t) => toRemove.contains(t.key));
+    });
+    await _saveLocal();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已移除 ${toRemove.length} 个重复项')));
+    }
+  }
+
   void _removeLocal(Track t) {
     setState(() {
       _localTracks.removeWhere((x) => x.localPath == t.localPath);
@@ -2966,7 +3383,8 @@ class _HomeShellState extends State<HomeShell> {
       onSecondaryTapDown: (d) => _showRowMenu(t, d.globalPosition),
       child: Container(
         color: selected ? cs.primary.withOpacity(0.12) : null,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        padding:
+            EdgeInsets.symmetric(horizontal: 20, vertical: 12 * _listDensity),
         child: Row(
           children: [
             SizedBox(
@@ -3139,7 +3557,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.35.0'),
+          title: Text('小李播放器 v2.36.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -3271,6 +3689,43 @@ class _HomeShellState extends State<HomeShell> {
           ),
         ),
         ListTile(
+          leading: const Icon(Icons.density_medium),
+          title: const Text('列表密度'),
+          subtitle: const Text('行高紧凑/标准/舒适', style: TextStyle(fontSize: 12)),
+          trailing: SegmentedButton<double>(
+            segments: const [
+              ButtonSegment(value: 0.75, label: Text('紧')),
+              ButtonSegment(value: 1.0, label: Text('标')),
+              ButtonSegment(value: 1.25, label: Text('舒')),
+            ],
+            selected: {_listDensity},
+            showSelectedIcon: false,
+            onSelectionChanged: (s) async {
+              setState(() => _listDensity = s.first);
+              final p = await SharedPreferences.getInstance();
+              await p.setDouble('list_density', s.first);
+            },
+          ),
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.palette),
+          title: const Text('封面取色'),
+          subtitle: const Text('播放时按封面主色临时改强调色，退出还原',
+              style: TextStyle(fontSize: 12)),
+          value: _autoPalette,
+          onChanged: (v) async {
+            setState(() => _autoPalette = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('auto_palette', v);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.auto_awesome),
+          title: const Text('快速主题包'),
+          subtitle: const Text('一键套用配色+深浅风格', style: TextStyle(fontSize: 12)),
+          onTap: _showThemePresets,
+        ),
+        ListTile(
           leading: const Icon(Icons.format_size),
           title: const Text('界面文字大小'),
           subtitle: Slider(
@@ -3393,16 +3848,88 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('检测并下载最新版本'),
           onTap: _checkUpdateManually,
         ),
+        ListTile(
+          leading: const Icon(Icons.playlist_play),
+          title: const Text('连播策略'),
+          subtitle: const Text('一首播完（未开单曲循环）后的行为'),
+        ),
+        for (final e in const [
+          ['recommend', 'B站推荐', '播完续播相关推荐视频'],
+          ['queue', '队列下一首', '按当前列表顺序播下一首'],
+          ['stop', '播完停止', '不自动连播'],
+        ])
+          RadioListTile<String>(
+            value: e[0],
+            groupValue: _playMode,
+            title: Text(e[1]),
+            subtitle: Text(e[2], style: const TextStyle(fontSize: 12)),
+            onChanged: (v) {
+              if (v == null) return;
+              setState(() => _playMode = v);
+              _savePlayMode(v);
+            },
+          ),
         SwitchListTile(
-          secondary: const Icon(Icons.playlist_play),
-          title: const Text('自动连播'),
-          subtitle: const Text('一首播完（未开单曲循环）自动播放推荐/下一首'),
-          value: _autoNext,
-          onChanged: (v) {
-            setState(() => _autoNext = v);
-            _saveAutoNext(v);
+          secondary: const Icon(Icons.visibility_off_outlined),
+          title: const Text('访客模式'),
+          subtitle: const Text('开启后不记录播放历史', style: TextStyle(fontSize: 12)),
+          value: _guestMode,
+          onChanged: (v) async {
+            setState(() => _guestMode = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('guest_mode', v);
           },
         ),
+        ListTile(
+          leading: const Icon(Icons.home_outlined),
+          title: const Text('启动进入'),
+          subtitle: const Text('打开应用时停留的页面', style: TextStyle(fontSize: 12)),
+          onTap: () async {
+            final p = await SharedPreferences.getInstance();
+            final cur = p.getInt('startup_nav') ?? -1;
+            if (!mounted) return;
+            final v = await showDialog<int>(
+              context: context,
+              builder: (ctx) => SimpleDialog(
+                title: const Text('启动进入'),
+                children: [
+                  for (final e in const [
+                    [-1, '记住上次'],
+                    [0, '媒体库'],
+                    [1, '收藏'],
+                    [2, '我的视频'],
+                    [4, '历史'],
+                  ])
+                    RadioListTile<int>(
+                      value: e[0] as int,
+                      groupValue: cur,
+                      title: Text(e[1] as String),
+                      onChanged: (x) => Navigator.pop(ctx, x),
+                    ),
+                ],
+              ),
+            );
+            if (v != null) await p.setInt('startup_nav', v);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.analytics_outlined),
+          title: const Text('观看统计'),
+          subtitle: const Text('累计观看时长 / 最近播放排行',
+              style: TextStyle(fontSize: 12)),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => StatsScreen(
+                history: _history, watchSec: _watchSec),
+          )),
+        ),
+        if (!Platform.isAndroid)
+          ListTile(
+            leading: const Icon(Icons.cleaning_services_outlined),
+            title: const Text('检测重复文件'),
+            subtitle: const Text('找出同名同大小的本地文件并清理',
+                style: TextStyle(fontSize: 12)),
+            onTap: _detectDuplicates,
+          ),
         const Divider(height: 32),
         Text('外观',
             style: TextStyle(
@@ -3739,6 +4266,7 @@ class _UserVideosPageState extends State<_UserVideosPage> {
   List<BiliTrack> _list = [];
   bool _loading = true;
   bool _followed = false;
+  String _sortOrder = 'pubdate'; // F7 投稿/播放/评论排序
 
   Future<void> _toggleFollow() async {
     final msg =
@@ -3756,7 +4284,7 @@ class _UserVideosPageState extends State<_UserVideosPage> {
   }
 
   Future<void> _load() async {
-    final l = await widget.bili.getUserVideos(widget.mid);
+    final l = await widget.bili.getUserVideos(widget.mid, order: _sortOrder);
     if (mounted) {
       setState(() {
         _list = l;
@@ -3772,6 +4300,31 @@ class _UserVideosPageState extends State<_UserVideosPage> {
       appBar: AppBar(
         title: Text('${widget.name} 的视频'),
         actions: [
+          PopupMenuButton<String>(
+            tooltip: '排序',
+            icon: const Icon(Icons.sort),
+            onSelected: (v) {
+              setState(() {
+                _sortOrder = v;
+                _loading = true;
+              });
+              _load();
+            },
+            itemBuilder: (_) => [
+              CheckedPopupMenuItem(
+                  value: 'pubdate',
+                  checked: _sortOrder == 'pubdate',
+                  child: const Text('最新投稿')),
+              CheckedPopupMenuItem(
+                  value: 'click',
+                  checked: _sortOrder == 'click',
+                  child: const Text('最多播放')),
+              CheckedPopupMenuItem(
+                  value: 'stow',
+                  checked: _sortOrder == 'stow',
+                  child: const Text('最多收藏')),
+            ],
+          ),
           TextButton.icon(
             onPressed: _toggleFollow,
             icon: Icon(_followed ? Icons.check : Icons.add, size: 18),
@@ -4112,22 +4665,53 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
         type: FileType.custom, allowedExtensions: ['m3u', 'm3u8', 'txt']);
     final path = res?.files.single.path;
     if (path == null) return;
-    final lines = (await File(path).readAsString())
-        .split('\n')
-        .map((e) => e.trim())
-        .where((e) => e.isNotEmpty && !e.startsWith('#'))
-        .toList();
+    final raw = (await File(path).readAsString()).split('\n');
+    final baseDir = File(path).parent.path;
     final name = path
         .split(Platform.pathSeparator)
         .last
         .replaceAll(RegExp(r'\.(m3u8?|txt)$'), '');
     final tracks = <Track>[];
-    for (final l in lines) {
-      if (l.startsWith('http')) {
-        tracks.add(Track.online(l.split('/').last, l));
-      } else if (File(l).existsSync()) {
-        tracks.add(Track.local(l));
+    final extRe = RegExp(r'#EXTINF:[-\d.]+,(.*)'); // F17: 读 EXTINF 标题
+    String? pendingTitle;
+    String resolve(String rel) {
+      // 相对路径转绝对，处理 ../ 段
+      if (rel.startsWith('/') || rel.contains(':\\')) return rel;
+      final parts = '$baseDir${Platform.pathSeparator}$rel'
+          .split(Platform.pathSeparator);
+      final out = <String>[];
+      for (final seg in parts) {
+        if (seg == '..') {
+          if (out.isNotEmpty) out.removeLast();
+        } else if (seg != '.' && seg.isNotEmpty) {
+          out.add(seg);
+        }
       }
+      return '${Platform.pathSeparator}${out.join(Platform.pathSeparator)}';
+    }
+
+    for (var line in raw) {
+      line = line.trim();
+      if (line.isEmpty) continue;
+      final m = extRe.firstMatch(line);
+      if (m != null) {
+        pendingTitle = m.group(1)?.trim();
+        continue;
+      }
+      if (line.startsWith('#')) continue;
+      if (line.startsWith('http')) {
+        tracks.add(Track.online(
+            pendingTitle?.isNotEmpty == true ? pendingTitle! : line.split('/').last,
+            line));
+      } else {
+        final abs = resolve(line);
+        if (File(abs).existsSync()) {
+          tracks.add(Track.local(abs));
+        } else if (File(line).existsSync()) {
+          tracks.add(Track.local(line));
+        }
+      }
+      pendingTitle = null;
     }
     if (tracks.isEmpty) return;
     widget.playlists[name] = tracks;
@@ -4199,11 +4783,131 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
     sm.showSnackBar(SnackBar(content: Text('提取完成：成功 $done，失败 $fail → $dir')));
   }
 
+  // F18: 把多个歌单合并成一个新歌单，按 track.key 去重。
+  Future<void> _mergePlaylists() async {
+    final names = widget.playlists.keys.toList();
+    if (names.length < 2) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('至少要有两个歌单才能合并')));
+      return;
+    }
+    final selected = <String>{};
+    final nameCtrl = TextEditingController(text: '合并歌单');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('合并歌单'),
+          content: SizedBox(
+            width: 320,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                    controller: nameCtrl,
+                    decoration: const InputDecoration(labelText: '新歌单名')),
+                const SizedBox(height: 8),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      children: [
+                        for (final n in names)
+                          CheckboxListTile(
+                            dense: true,
+                            value: selected.contains(n),
+                            title: Text('$n（${widget.playlists[n]!.length}）'),
+                            onChanged: (v) => setD(() => v == true
+                                ? selected.add(n)
+                                : selected.remove(n)),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('合并')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || selected.length < 2) return;
+    final newName = nameCtrl.text.trim().isEmpty ? '合并歌单' : nameCtrl.text.trim();
+    final seen = <String>{};
+    final merged = <Track>[];
+    for (final n in selected) {
+      for (final t in widget.playlists[n]!) {
+        if (seen.add(t.key)) merged.add(t);
+      }
+    }
+    widget.playlists[newName] = merged;
+    await widget.onSave();
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已合并为「$newName」（${merged.length} 首）')));
+  }
+
+  // F35: 把歌单里的平台视频导出成 aria2/wget 批量下载脚本。
+  Future<void> _exportScript(String name) async {
+    final ids = widget.playlists[name]!
+        .where((t) => t.tag == '平台' && t.url != null)
+        .map((t) => t.url!.split('/').last)
+        .toList();
+    if (ids.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('该歌单没有平台视频')));
+      return;
+    }
+    final fmt = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('选择脚本格式'),
+        children: [
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 'aria2'),
+              child: const Text('aria2c（aria2 输入文件）')),
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 'wget'),
+              child: const Text('wget（bash 脚本）')),
+        ],
+      ),
+    );
+    if (fmt == null) return;
+    final script = await PlatformService().exportScript(ids, fmt);
+    if (script == null || !mounted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('生成失败（平台不可达）')));
+      }
+      return;
+    }
+    final path = await FilePicker.platform.saveFile(
+        dialogTitle: '导出下载脚本', fileName: '$name.$fmt.txt');
+    if (path == null) return;
+    await File(path).writeAsString(script);
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已导出 $path')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final names = widget.playlists.keys.toList();
     return Scaffold(
       appBar: AppBar(title: const Text('歌单'), actions: [
+        IconButton(
+            icon: const Icon(Icons.merge_type),
+            tooltip: '合并歌单',
+            onPressed: _mergePlaylists),
         IconButton(
             icon: const Icon(Icons.cloud_download_outlined),
             tooltip: '导入分享码',
@@ -4245,6 +4949,12 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
                             tooltip: '批量提取音频(m4a)',
                             onPressed: () => _extractAudio(n),
                           ),
+                        IconButton(
+                          icon: const Icon(Icons.download_for_offline_outlined,
+                              size: 20),
+                          tooltip: '导出下载脚本(aria2/wget)',
+                          onPressed: () => _exportScript(n),
+                        ),
                         IconButton(
                           icon: const Icon(Icons.delete_outline),
                           onPressed: () async {
