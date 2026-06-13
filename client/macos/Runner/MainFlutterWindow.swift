@@ -90,6 +90,10 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         UserDefaults.standard.set(a?["on"] as? Bool ?? false, forKey: "quitNeedsPassword")
         UserDefaults.standard.set(a?["hash"] as? String ?? "", forKey: "appPwdHash")
         result(nil)
+      case "setAlwaysOnTop":
+        let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
+        self?.level = on ? .floating : .normal
+        result(nil)
       default:
         result(FlutterMethodNotImplemented)
       }

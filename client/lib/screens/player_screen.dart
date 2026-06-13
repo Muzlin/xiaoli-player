@@ -332,6 +332,13 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _dmSpeed = 9;
   int _dmMaxActive = 60;
   List<String> _dmBlock = const [];
+  Tracks? _tracks;
+  bool _onTop = false;
+  bool _stopAtEnd = false;
+  double _dim = 0.0;
+  double? _vw, _vh;
+  double _preLongRate = 1.0;
+  bool _longPressing = false;
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -530,6 +537,131 @@ class _PlayerScreenState extends State<PlayerScreen>
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('发送失败：$err')));
     }
+  }
+
+  void _longRate(bool on) {
+    if (on) {
+      _preLongRate = _speed;
+      _player.setRate(2.0);
+      setState(() => _longPressing = true);
+    } else {
+      _player.setRate(_preLongRate);
+      setState(() => _longPressing = false);
+    }
+  }
+
+  void _toggleOnTop() {
+    setState(() => _onTop = !_onTop);
+    _winChannel.invokeMethod('setAlwaysOnTop', {'on': _onTop});
+  }
+
+  void _showTracks() {
+    final t = _tracks;
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => SafeArea(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (t != null && t.audio.isNotEmpty) ...[
+                const ListTile(
+                    dense: true,
+                    title: Text('音轨',
+                        style: TextStyle(color: Colors.white54, fontSize: 12))),
+                for (final a in t.audio)
+                  ListTile(
+                    leading: const Icon(Icons.audiotrack, color: Colors.white70),
+                    title: Text(a.title ?? a.language ?? a.id,
+                        style: const TextStyle(color: Colors.white)),
+                    onTap: () {
+                      _player.setAudioTrack(a);
+                      Navigator.pop(context);
+                    },
+                  ),
+              ],
+              if (t != null && t.subtitle.isNotEmpty) ...[
+                const ListTile(
+                    dense: true,
+                    title: Text('内嵌字幕轨',
+                        style: TextStyle(color: Colors.white54, fontSize: 12))),
+                for (final sub in t.subtitle)
+                  ListTile(
+                    leading:
+                        const Icon(Icons.subtitles, color: Colors.white70),
+                    title: Text(sub.title ?? sub.language ?? sub.id,
+                        style: const TextStyle(color: Colors.white)),
+                    onTap: () {
+                      _player.setSubtitleTrack(sub);
+                      Navigator.pop(context);
+                    },
+                  ),
+              ],
+              if (t == null || (t.audio.isEmpty && t.subtitle.isEmpty))
+                const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('没有可选轨道',
+                      style: TextStyle(color: Colors.white54)),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showVideoInfo() {
+    final b = StringBuffer();
+    if ((_vw ?? 0) > 0) b.writeln('分辨率：${_vw!.toInt()} × ${_vh!.toInt()}');
+    b.writeln('时长：${_fmt(_duration)}');
+    final t = _tracks;
+    if (t != null) {
+      b.writeln('音轨：${t.audio.length} 条');
+      b.writeln('内嵌字幕轨：${t.subtitle.length} 条');
+    }
+    b.write('来源：${widget.source.resource}');
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('视频信息'),
+        content: SelectableText(b.toString()),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  void _showDimSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setS) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 16, 16, 28),
+          child: Row(
+            children: [
+              const Icon(Icons.nightlight_round, color: Colors.white70),
+              const SizedBox(width: 8),
+              const Text('画面调暗',
+                  style: TextStyle(color: Colors.white)),
+              Expanded(
+                child: Slider(
+                  value: _dim,
+                  max: 0.85,
+                  onChanged: (v) {
+                    setState(() => _dim = v);
+                    setS(() {});
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _bvAction(Future<String> Function()? fn) async {
@@ -853,7 +985,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _fav = widget.isFavorite;
     _subs.add(_player.stream.completed.listen((done) {
-      if (done && !_loop && mounted) widget.onCompleted?.call();
+      if (done && !_loop && !_stopAtEnd && mounted) widget.onCompleted?.call();
     }));
     _subs.add(_player.stream.position.listen((p) {
       if (!mounted) return;
@@ -894,7 +1026,16 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _subs.add(_player.stream.videoParams.listen((v) {
       final has = (v.w ?? 0) > 0 && (v.h ?? 0) > 0;
-      if (mounted && has != _hasVideo) setState(() => _hasVideo = has);
+      if (mounted) {
+        setState(() {
+          _hasVideo = has;
+          _vw = (v.w ?? 0).toDouble();
+          _vh = (v.h ?? 0).toDouble();
+        });
+      }
+    }));
+    _subs.add(_player.stream.tracks.listen((t) {
+      if (mounted) setState(() => _tracks = t);
     }));
     _subs.add(_player.stream.error.listen((e) {
       if (mounted) setState(() => _error = e);
@@ -1198,6 +1339,21 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'subfile':
                   _loadSubtitleFile();
                   break;
+                case 'tracks':
+                  _showTracks();
+                  break;
+                case 'vinfo':
+                  _showVideoInfo();
+                  break;
+                case 'dim':
+                  _showDimSheet();
+                  break;
+                case 'ontop':
+                  _toggleOnTop();
+                  break;
+                case 'stopend':
+                  setState(() => _stopAtEnd = !_stopAtEnd);
+                  break;
               }
             },
             itemBuilder: (_) => [
@@ -1224,6 +1380,28 @@ class _PlayerScreenState extends State<PlayerScreen>
               const PopupMenuItem(
                   value: 'subfile',
                   child: Text('加载外挂字幕',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'tracks',
+                  child: Text('音轨 / 内嵌字幕',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'vinfo',
+                  child: Text('视频信息', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'dim',
+                  child:
+                      Text('画面调暗', style: TextStyle(color: Colors.white))),
+              if (Platform.isMacOS)
+                CheckedPopupMenuItem(
+                    value: 'ontop',
+                    checked: _onTop,
+                    child: const Text('窗口置顶',
+                        style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'stopend',
+                  checked: _stopAtEnd,
+                  child: const Text('播完停止（不连播）',
                       style: TextStyle(color: Colors.white))),
               const PopupMenuDivider(),
               CheckedPopupMenuItem(
@@ -1303,7 +1481,54 @@ class _PlayerScreenState extends State<PlayerScreen>
                 Expanded(
                   // 关掉自带控件浮层（它会在角上显示流的 media-title，B站含 bilibili）。
                   // _videoView 内 _cropEdges 放大 1.22 倍裁掉溢出，把角落水印推出画面。
-                  child: showVideo ? _videoView() : Center(child: _cover(cs)),
+                  child: GestureDetector(
+                    onTap: () => _player.playOrPause(),
+                    onDoubleTap: showVideo && !_audioOnly
+                        ? _enterFullscreen
+                        : null,
+                    onLongPressStart: (_) => _longRate(true),
+                    onLongPressEnd: (_) => _longRate(false),
+                    onVerticalDragUpdate: (d) {
+                      final w = MediaQuery.of(context).size.width;
+                      if (d.globalPosition.dx > w / 2) {
+                        _setVolume((_volume - d.delta.dy).clamp(0, 200));
+                      } else {
+                        setState(() => _dim =
+                            (_dim + d.delta.dy / 300).clamp(0.0, 0.85));
+                      }
+                    },
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        showVideo
+                            ? _videoView()
+                            : Center(child: _cover(cs)),
+                        if (_dim > 0)
+                          IgnorePointer(
+                            child: Container(
+                                color:
+                                    Colors.black.withValues(alpha: _dim)),
+                          ),
+                        if (_longPressing)
+                          const Positioned(
+                            top: 12,
+                            left: 0,
+                            right: 0,
+                            child: Center(
+                              child: Text('2x ▶▶',
+                                  style: TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                      shadows: [
+                                        Shadow(
+                                            color: Colors.black, blurRadius: 4)
+                                      ])),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
                 ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 24),
