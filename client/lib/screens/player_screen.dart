@@ -29,6 +29,10 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function()? onLike; // B站点赞
   final Future<String> Function(int multiply)? onCoin; // B站投币
   final Future<String> Function()? onTriple; // B站一键三连
+  final String? bvid; // B站 bvid(分享链接)
+  final int seekStep; // 快进/快退步长
+  final List<int> bookmarks; // 时间戳书签(秒)
+  final void Function(List<int>)? onSaveBookmarks;
   const PlayerScreen({
     super.key,
     required this.source,
@@ -45,6 +49,10 @@ class PlayerScreen extends StatefulWidget {
     this.onLike,
     this.onCoin,
     this.onTriple,
+    this.bvid,
+    this.seekStep = 10,
+    this.bookmarks = const [],
+    this.onSaveBookmarks,
   });
 
   @override
@@ -339,6 +347,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   double? _vw, _vh;
   double _preLongRate = 1.0;
   bool _longPressing = false;
+  final List<int> _marks = [];
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -709,6 +718,110 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _addMark() {
+    setState(() {
+      _marks.add(_position.inSeconds);
+      _marks.sort();
+    });
+    widget.onSaveBookmarks?.call(_marks);
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('已加书签 ${_fmt(_position)}'),
+        duration: const Duration(milliseconds: 1000)));
+  }
+
+  void _showMarks() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setS) => SafeArea(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Padding(
+                    padding: EdgeInsets.all(12),
+                    child: Text('时间戳书签',
+                        style: TextStyle(color: Colors.white54, fontSize: 12))),
+                if (_marks.isEmpty)
+                  const Padding(
+                      padding: EdgeInsets.all(20),
+                      child: Text('还没有书签（点右上角书签按钮添加）',
+                          style: TextStyle(color: Colors.white54))),
+                for (final m in _marks)
+                  ListTile(
+                    leading:
+                        const Icon(Icons.bookmark, color: Colors.white70),
+                    title: Text(_fmt(Duration(seconds: m)),
+                        style: const TextStyle(color: Colors.white)),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline,
+                          color: Colors.white54),
+                      onPressed: () {
+                        setState(() => _marks.remove(m));
+                        widget.onSaveBookmarks?.call(_marks);
+                        setS(() {});
+                      },
+                    ),
+                    onTap: () {
+                      _player.seek(Duration(seconds: m));
+                      Navigator.pop(ctx);
+                    },
+                  ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _exportSubtitle() async {
+    if (_subtitle == null || _subtitle!.isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('当前没有字幕')));
+      return;
+    }
+    final path = await FilePicker.platform.saveFile(
+        dialogTitle: '导出字幕',
+        fileName: '字幕_${DateTime.now().millisecondsSinceEpoch}.srt');
+    if (path == null) return;
+    await File(path).writeAsString(_subtitle!);
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已导出 $path')));
+    }
+  }
+
+  Future<void> _exportDanmaku() async {
+    if (_danmaku.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('没有弹幕（先开弹幕加载）')));
+      return;
+    }
+    final b = StringBuffer();
+    for (final d in _danmaku) {
+      b.writeln('[${_fmt(Duration(seconds: d.time.toInt()))}] ${d.text}');
+    }
+    final path = await FilePicker.platform.saveFile(
+        dialogTitle: '导出弹幕',
+        fileName: '弹幕_${DateTime.now().millisecondsSinceEpoch}.txt');
+    if (path == null) return;
+    await File(path).writeAsString(b.toString());
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('已导出 ${_danmaku.length} 条弹幕')));
+    }
+  }
+
+  void _copyBiliLink() {
+    if (widget.bvid == null) return;
+    Clipboard.setData(ClipboardData(
+        text: 'https://www.bilibili.com/video/${widget.bvid}'));
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已复制 B站 视频链接')));
+  }
+
   Future<void> _bvAction(Future<String> Function()? fn) async {
     if (fn == null) return;
     final msg = await fn();
@@ -1029,6 +1142,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         widget.source.isVideo && widget.source.resource.startsWith('http');
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _fav = widget.isFavorite;
+    _marks.addAll(widget.bookmarks);
     _subs.add(_player.stream.completed.listen((done) {
       if (done && !_loop && !_stopAtEnd && mounted) widget.onCompleted?.call();
     }));
@@ -1292,6 +1406,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 onPressed: _sendDanmaku,
               ),
             IconButton(
+              tooltip: '加书签',
+              icon: const Icon(Icons.bookmark_add_outlined,
+                  color: Colors.white70),
+              onPressed: _addMark,
+            ),
+            IconButton(
               tooltip: 'A-B 循环（复读片段）',
               icon: Icon(Icons.repeat_on_rounded,
                   color: _bPoint != null
@@ -1349,10 +1469,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                   _jumpTo();
                   break;
                 case 'fwd10':
-                  _seekRel(10);
+                  _seekRel(widget.seekStep);
                   break;
                 case 'rwd10':
-                  _seekRel(-10);
+                  _seekRel(-widget.seekStep);
                   break;
                 case 'fb':
                   _frameStep(false);
@@ -1383,6 +1503,18 @@ class _PlayerScreenState extends State<PlayerScreen>
                   break;
                 case 'subfile':
                   _loadSubtitleFile();
+                  break;
+                case 'marks':
+                  _showMarks();
+                  break;
+                case 'exsub':
+                  _exportSubtitle();
+                  break;
+                case 'exdm':
+                  _exportDanmaku();
+                  break;
+                case 'bililink':
+                  _copyBiliLink();
                   break;
                 case 'tracks':
                   _showTracks();
@@ -1426,6 +1558,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                   value: 'subfile',
                   child: Text('加载外挂字幕',
                       style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'marks',
+                  child:
+                      Text('时间戳书签', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'exsub',
+                  child: Text('导出字幕', style: TextStyle(color: Colors.white))),
+              if (widget.onLoadDanmaku != null)
+                const PopupMenuItem(
+                    value: 'exdm',
+                    child:
+                        Text('导出弹幕', style: TextStyle(color: Colors.white))),
+              if (widget.bvid != null)
+                const PopupMenuItem(
+                    value: 'bililink',
+                    child: Text('复制 B站 链接',
+                        style: TextStyle(color: Colors.white))),
               const PopupMenuItem(
                   value: 'tracks',
                   child: Text('音轨 / 内嵌字幕',
@@ -1484,14 +1633,14 @@ class _PlayerScreenState extends State<PlayerScreen>
               const PopupMenuItem(
                   value: 'jump',
                   child: Text('跳转到…', style: TextStyle(color: Colors.white))),
-              const PopupMenuItem(
+              PopupMenuItem(
                   value: 'fwd10',
-                  child:
-                      Text('快进 10 秒', style: TextStyle(color: Colors.white))),
-              const PopupMenuItem(
+                  child: Text('快进 ${widget.seekStep} 秒',
+                      style: const TextStyle(color: Colors.white))),
+              PopupMenuItem(
                   value: 'rwd10',
-                  child:
-                      Text('快退 10 秒', style: TextStyle(color: Colors.white))),
+                  child: Text('快退 ${widget.seekStep} 秒',
+                      style: const TextStyle(color: Colors.white))),
               const PopupMenuItem(
                   value: 'fb',
                   child: Text('上一帧', style: TextStyle(color: Colors.white))),
