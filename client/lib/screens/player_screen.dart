@@ -38,6 +38,7 @@ class PlayerScreen extends StatefulWidget {
   final Future<void> Function()? onAddToFav; // 收藏到B站
   final Future<List<Map<String, dynamic>>> Function()? onLoadParts; // 分P列表
   final void Function(String cid, String name)? onPlayPart; // 播放某分P
+  final Future<void> Function(int score)? onRate; // 平台视频评分
   const PlayerScreen({
     super.key,
     required this.source,
@@ -63,6 +64,7 @@ class PlayerScreen extends StatefulWidget {
     this.onAddToFav,
     this.onLoadParts,
     this.onPlayPart,
+    this.onRate,
   });
 
   @override
@@ -236,6 +238,69 @@ class _PlayerScreenState extends State<PlayerScreen>
     _player.seek(Duration(seconds: sec));
   }
 
+  void _toggleSentenceRepeat() {
+    if (_dcues.isEmpty) _dcues = _parseSrt(_subtitle ?? '');
+    if (_dcues.isEmpty || !_subtitleOn) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('请先加载并开启字幕')));
+      return;
+    }
+    setState(() {
+      if (!_sentenceRepeat) {
+        _sentenceRepeat = true;
+        _repeatCount = 2;
+      } else if (_repeatCount == 2) {
+        _repeatCount = 3;
+      } else {
+        _sentenceRepeat = false;
+      }
+      _curCue = -1;
+      _repeated = 0;
+    });
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+            _sentenceRepeat ? '逐句复读 $_repeatCount 遍' : '逐句复读关闭'),
+        duration: const Duration(milliseconds: 1000)));
+  }
+
+  Future<void> _batchFrames() async {
+    final src = widget.source.resource;
+    if (src.startsWith('http')) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('批量截帧仅支持本地视频')));
+      return;
+    }
+    if (TranscribeService.ffmpeg == null) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('需要 ffmpeg')));
+      return;
+    }
+    final dir = await FilePicker.platform.getDirectoryPath();
+    if (dir == null) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('截帧中…（每 5 秒一帧）')));
+    try {
+      final r = await Process.run(TranscribeService.ffmpeg!, [
+        '-hide_banner',
+        '-i',
+        src,
+        '-vf',
+        'fps=1/5',
+        '$dir/frame_%04d.png',
+      ]);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(
+                r.exitCode == 0 ? '截帧完成 → $dir' : '截帧失败(ffmpeg)')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('出错：$e')));
+      }
+    }
+  }
+
   void _cycleAB() {
     setState(() {
       if (_aPoint == null) {
@@ -361,6 +426,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _subOffsetMs = 0; // 字幕延迟
   List<Map<String, dynamic>> _parts = const []; // 分P
   bool _fadeOut = false; // 结束淡出
+  bool _sentenceRepeat = false;
+  int _repeatCount = 2;
+  int _curCue = -1;
+  int _repeated = 0;
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -873,6 +942,27 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  Future<void> _showRate() async {
+    final score = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('给这个平台视频评分'),
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            for (var i = 1; i <= 5; i++)
+              IconButton(
+                icon: const Icon(Icons.star, color: Colors.amber),
+                onPressed: () => Navigator.pop(ctx, i),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (score == null) return;
+    await widget.onRate?.call(score);
+  }
+
   Future<void> _bvAction(Future<String> Function()? fn) async {
     if (fn == null) return;
     final msg = await fn();
@@ -1296,6 +1386,20 @@ class _PlayerScreenState extends State<PlayerScreen>
           _player.setVolume((_muted ? 0.0 : _volume) * (rem / 6000));
         }
       }
+      if (_sentenceRepeat && _dcues.isNotEmpty && _subtitleOn) {
+        final i = _dcues.indexWhere((c) => p >= c.start && p < c.end);
+        if (i >= 0 && i != _curCue) {
+          _curCue = i;
+          _repeated = 0;
+        } else if (_curCue >= 0 && p >= _dcues[_curCue].end) {
+          _repeated++;
+          if (_repeated < _repeatCount) {
+            _player.seek(_dcues[_curCue].start);
+          } else {
+            _curCue = -1;
+          }
+        }
+      }
       final sec = p.inSeconds;
       if (widget.onSavePos != null && sec > 0 && (sec - _lastSavedSec).abs() >= 5) {
         _lastSavedSec = sec;
@@ -1694,6 +1798,9 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'parts':
                   _showParts();
                   break;
+                case 'rate':
+                  _showRate();
+                  break;
                 case 'tracks':
                   _showTracks();
                   break;
@@ -1708,6 +1815,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                   break;
                 case 'stopend':
                   setState(() => _stopAtEnd = !_stopAtEnd);
+                  break;
+                case 'srepeat':
+                  _toggleSentenceRepeat();
+                  break;
+                case 'frames':
+                  _batchFrames();
                   break;
               }
             },
@@ -1766,6 +1879,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                     value: 'fav',
                     child: Text('收藏到 B站',
                         style: TextStyle(color: Colors.white))),
+              if (widget.onRate != null)
+                const PopupMenuItem(
+                    value: 'rate',
+                    child: Text('给视频评分',
+                        style: TextStyle(color: Colors.white))),
               if (_parts.length > 1)
                 PopupMenuItem(
                     value: 'parts',
@@ -1793,6 +1911,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                   checked: _stopAtEnd,
                   child: const Text('播完停止（不连播）',
                       style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'srepeat',
+                  checked: _sentenceRepeat,
+                  child: Text(
+                      _sentenceRepeat ? '逐句复读 $_repeatCount遍' : '逐句复读(字幕)',
+                      style: const TextStyle(color: Colors.white))),
+              if (!widget.source.resource.startsWith('http'))
+                const PopupMenuItem(
+                    value: 'frames',
+                    child: Text('批量截帧',
+                        style: TextStyle(color: Colors.white))),
               const PopupMenuDivider(),
               CheckedPopupMenuItem(
                 value: 'loop',

@@ -7,7 +7,14 @@ class PlatformVideo {
   final String id;
   final String title;
   final String uploader;
-  PlatformVideo({required this.id, required this.title, required this.uploader});
+  final double rating;
+  final int rcount;
+  PlatformVideo(
+      {required this.id,
+      required this.title,
+      required this.uploader,
+      this.rating = 0,
+      this.rcount = 0});
 }
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
@@ -46,6 +53,20 @@ class PlatformService {
       } catch (_) {}
     }
     return null;
+  }
+
+  /// 给平台视频评分(1-5)。
+  static Future<String?> rate(String id, int score) async {
+    try {
+      final r = await http
+          .get(Uri.parse('$current/rate?id=$id&score=$score'))
+          .timeout(const Duration(seconds: 10));
+      final d = jsonDecode(r.body);
+      if (d['ok'] == true) return '已评分 ★$score（平均 ${d['rating']}）';
+      return '评分失败';
+    } catch (e) {
+      return '评分出错：$e';
+    }
   }
 
   /// 用分享码取回歌单 JSON。
@@ -120,6 +141,8 @@ class PlatformService {
                 id: (e['id'] ?? '') as String,
                 title: (e['title'] ?? '') as String,
                 uploader: (e['uploader'] ?? '') as String,
+                rating: ((e['rating'] ?? 0) as num).toDouble(),
+                rcount: ((e['rcount'] ?? 0) as num).toInt(),
               ))
           .where((v) => v.id.isNotEmpty)
           .toList();

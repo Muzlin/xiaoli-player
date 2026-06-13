@@ -52,6 +52,18 @@ class Track {
     return src.contains('.') ? src.split('.').last.toUpperCase() : '';
   }
 
+  static const _audioExtSet = {
+    'mp3', 'flac', 'aac', 'wav', 'm4a', 'aiff', 'aif', 'ogg', 'opus',
+    'wma', 'ape', 'alac', 'mid', 'amr'
+  };
+
+  /// 是否视频(用于库筛选)。本地按后缀；B站=视频；在线按 _onlineIsVideo。
+  bool get isVideoTrack {
+    if (isLocal) return !_audioExtSet.contains(ext.toLowerCase());
+    if (bvid != null) return true;
+    return _onlineIsVideo();
+  }
+
   /// 仅本地/直链可用；B站曲目在播放前异步解析。
   PlaybackSource toSource() => isLocal
       ? PlaybackSource.local(localPath!)
@@ -149,6 +161,7 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, List<int>> _bookmarks = {}; // 书签 track key→秒列表
   int _seekStep = 10; // 快进/快退步长
   String _searchOrder = ''; // B站搜索排序
+  String _localFilter = 'all'; // 库类型筛选
   int _watchSec = 0; // 累计观看秒
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
@@ -1208,10 +1221,22 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   // ---- 共享视频平台 ----
-  Track _platTrack(PlatformVideo v) => Track.online(
-      v.uploader.isEmpty ? v.title : '${v.title} · ${v.uploader}',
-      PlatformService.videoUrl(v.id),
-      tag: '平台');
+  Track _platTrack(PlatformVideo v) {
+    final star = v.rating > 0 ? '★${v.rating} ' : '';
+    final base = v.uploader.isEmpty ? v.title : '${v.title} · ${v.uploader}';
+    return Track.online('$star$base', PlatformService.videoUrl(v.id),
+        tag: '平台');
+  }
+
+  Future<void> _ratePlat(String url, int score) async {
+    final id = url.split('/').last;
+    final msg = await PlatformService.rate(id, score);
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(msg ?? '评分失败')));
+      _loadPlatform();
+    }
+  }
 
   Future<void> _loadPlatform() async {
     await PlatformService.loadLocal();
@@ -1367,6 +1392,9 @@ class _HomeShellState extends State<HomeShell> {
         onPlayPart: t.bvid != null
             ? (cid, name) =>
                 _play(Track.bili(name, t.bvid!, cid: cid), replace: true)
+            : null,
+        onRate: t.tag == '平台' && t.url != null
+            ? (score) => _ratePlat(t.url!, score)
             : null,
       ),
     );
@@ -1901,6 +1929,8 @@ class _HomeShellState extends State<HomeShell> {
     _fadeIn = p.getBool('fade_in') ?? false;
     _fadeOut = p.getBool('fade_out') ?? false;
     textScaleNotifier.value = p.getDouble('text_scale') ?? 1.0;
+    final ac = p.getInt('accent_color');
+    if (ac != null) accentNotifier.value = Color(ac);
     try {
       final pl = p.getString('playlists_v1');
       if (pl != null) {
@@ -2633,11 +2663,83 @@ class _HomeShellState extends State<HomeShell> {
     );
   }
 
+  Widget _typeFilterBar(ColorScheme cs) {
+    return SizedBox(
+      height: 46,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        children: [
+          for (final e in const [
+            ['all', '全部'],
+            ['video', '视频'],
+            ['audio', '音乐'],
+          ])
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+              child: FilterChip(
+                label: Text(e[1]),
+                selected: _localFilter == e[0],
+                onSelected: (_) => setState(() => _localFilter = e[0]),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _pickAccent() async {
+    const colors = [
+      0xFFF26B21, 0xFFFF3B30, 0xFFFF2D55, 0xFF007AFF, 0xFF34C759,
+      0xFF00B0A0, 0xFF5856D6, 0xFFAF52DE, 0xFFFF9500, 0xFF8E8E93,
+    ];
+    final c = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('主题色'),
+        content: Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            for (final col in colors)
+              GestureDetector(
+                onTap: () => Navigator.pop(ctx, col),
+                child: Container(
+                  width: 38,
+                  height: 38,
+                  decoration: BoxDecoration(
+                    color: Color(col),
+                    shape: BoxShape.circle,
+                    border: Border.all(
+                        color: accentNotifier.value.value == col
+                            ? Colors.black
+                            : Colors.black12,
+                        width: accentNotifier.value.value == col ? 3 : 1),
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (c == null) return;
+    accentNotifier.value = Color(c);
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('accent_color', c);
+  }
+
   Widget _libraryView(ColorScheme cs) {
     final q = _query.toLowerCase();
-    final List<Track> items;
+    List<Track> items;
     if (q.isEmpty) {
       items = [..._platformTracks, ..._hotTracks, ..._localTracks];
+      if (_localFilter != 'all') {
+        items = items
+            .where((t) => _localFilter == 'video'
+                ? t.isVideoTrack
+                : !t.isVideoTrack)
+            .toList();
+      }
     } else {
       final local = [..._hotTracks, ..._localTracks]
           .where((t) => t.name.toLowerCase().contains(q))
@@ -2647,6 +2749,7 @@ class _HomeShellState extends State<HomeShell> {
     return Column(
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
+        if (_query.isEmpty) _typeFilterBar(cs),
         if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
         if (_query.isNotEmpty && _accountResults.isNotEmpty)
           _accountsBar(cs),
@@ -2904,7 +3007,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.33.1'),
+          title: Text('小李播放器 v2.34.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2998,6 +3101,16 @@ class _HomeShellState extends State<HomeShell> {
               style: const TextStyle(fontSize: 12)),
           onTap: () {
             if (_history.isNotEmpty) _play(_history.first);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.palette_outlined),
+          title: const Text('主题色'),
+          subtitle: const Text('换 app 强调色', style: TextStyle(fontSize: 12)),
+          trailing: CircleAvatar(radius: 12, backgroundColor: accentNotifier.value),
+          onTap: () async {
+            await _pickAccent();
+            setState(() {});
           },
         ),
         ListTile(
