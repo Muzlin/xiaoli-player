@@ -1323,6 +1323,10 @@ class _HomeShellState extends State<HomeShell> {
           _saveResume();
         },
         onLoadDanmaku: t.bvid != null ? () => _bili.getDanmaku(t.bvid!) : null,
+        onPostDanmaku: t.bvid != null
+            ? (msg, ms, color) =>
+                _bili.postDanmaku(t.bvid!, msg, ms, color: color)
+            : null,
       ),
     );
     if (replace) {
@@ -2243,7 +2247,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.22.2'),
+          title: Text('小李播放器 v2.23.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         SwitchListTile(

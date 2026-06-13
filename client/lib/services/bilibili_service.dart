@@ -521,6 +521,94 @@ class BilibiliService {
       .replaceAll('&#39;', "'")
       .replaceAll('&apos;', "'");
 
+  /// 发送弹幕。progressMs=弹幕出现时刻(毫秒)。成功返回''，失败返回原因。
+  Future<String> postDanmaku(String bvid, String message, int progressMs,
+      {int color = 16777215}) async {
+    if (_userCookie.isEmpty) return '请先登录 B站';
+    final jct = _biliJct;
+    if (jct.isEmpty) return '发弹幕需完整登录(bili_jct)，请扫码登录';
+    if (message.trim().isEmpty) return '弹幕不能为空';
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final cid = view['data']?['cid'];
+      if (cid == null) return '获取视频失败';
+      final r = await _http
+          .post(
+            Uri.parse('https://api.bilibili.com/x/v2/dm/post'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: {
+              'type': '1',
+              'oid': '$cid',
+              'msg': message,
+              'bvid': bvid,
+              'progress': '$progressMs',
+              'color': '$color',
+              'fontsize': '25',
+              'pool': '0',
+              'mode': '1',
+              'rnd': '${DateTime.now().millisecondsSinceEpoch}',
+              'csrf': jct,
+            },
+          )
+          .timeout(const Duration(seconds: 12));
+      final d = jsonDecode(r.body);
+      if (d['code'] == 0) return '';
+      return '${d['message'] ?? d['code']}';
+    } catch (e) {
+      return '发送出错：$e';
+    }
+  }
+
+  Future<String> _videoAction(String url, Map<String, String> body) async {
+    final jct = _biliJct;
+    if (jct.isEmpty) return '请先登录 B站';
+    try {
+      await _ensureInit();
+      final r = await _http
+          .post(Uri.parse(url),
+              headers: {
+                ..._headers,
+                'Content-Type': 'application/x-www-form-urlencoded',
+              },
+              body: {...body, 'csrf': jct})
+          .timeout(const Duration(seconds: 12));
+      return jsonDecode(r.body)['code'] == 0
+          ? ''
+          : (jsonDecode(r.body)['message']?.toString() ?? '失败');
+    } catch (e) {
+      return '出错：$e';
+    }
+  }
+
+  Future<String> likeVideo(String bvid) async {
+    final e = await _videoAction(
+        'https://api.bilibili.com/x/web-interface/archive/like',
+        {'bvid': bvid, 'like': '1'});
+    return e.isEmpty ? '已点赞 👍' : (e.contains('6500') ? '已经赞过了' : '点赞失败：$e');
+  }
+
+  Future<String> coinVideo(String bvid) async {
+    final e = await _videoAction(
+        'https://api.bilibili.com/x/web-interface/coin/add',
+        {'bvid': bvid, 'multiply': '1', 'select_like': '0'});
+    return e.isEmpty ? '已投币 🪙' : '投币失败：$e';
+  }
+
+  Future<String> tripleVideo(String bvid) async {
+    final e = await _videoAction(
+        'https://api.bilibili.com/x/web-interface/archive/like/triple',
+        {'bvid': bvid});
+    return e.isEmpty ? '一键三连成功 🎉' : '三连失败：$e';
+  }
+
   Future<List<BiliComment>> getComments(String bvid, {int pn = 1}) async {
     try {
       await _ensureInit();

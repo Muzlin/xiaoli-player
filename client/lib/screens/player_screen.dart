@@ -24,6 +24,8 @@ class PlayerScreen extends StatefulWidget {
   final Duration startAt; // 断点续播起点
   final void Function(int seconds)? onSavePos; // 保存播放进度
   final Future<List<Danmaku>> Function()? onLoadDanmaku; // 加载弹幕(仅B站)
+  final Future<String> Function(String msg, int progressMs, int color)?
+      onPostDanmaku;
   const PlayerScreen({
     super.key,
     required this.source,
@@ -36,6 +38,7 @@ class PlayerScreen extends StatefulWidget {
     this.startAt = Duration.zero,
     this.onSavePos,
     this.onLoadDanmaku,
+    this.onPostDanmaku,
   });
 
   @override
@@ -426,6 +429,89 @@ class _PlayerScreenState extends State<PlayerScreen>
       return;
     }
     setState(() => _danmakuOn = !_danmakuOn);
+  }
+
+  Future<void> _sendDanmaku() async {
+    final ctrl = TextEditingController();
+    var color = 0xFFFFFF;
+    const palette = [
+      0xFFFFFF, 0xFE0302, 0xFF7204, 0xFFD302, 0x00CD00,
+      0x00FFFF, 0x4266BE, 0xFF69B4, 0x9B9B9B, 0x222222,
+    ];
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('发弹幕'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                maxLength: 100,
+                decoration: InputDecoration(
+                  hintText: '在 ${_fmt(_position)} 处发一条',
+                  border: const OutlineInputBorder(),
+                ),
+                onSubmitted: (_) => Navigator.pop(ctx, true),
+              ),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final c in palette)
+                    GestureDetector(
+                      onTap: () => setD(() => color = c),
+                      child: Container(
+                        width: 26,
+                        height: 26,
+                        decoration: BoxDecoration(
+                          color: Color(0xFF000000 | c),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: color == c
+                                ? Colors.blueAccent
+                                : Colors.black26,
+                            width: color == c ? 3 : 1,
+                          ),
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('发送')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final msg = ctrl.text.trim();
+    if (msg.isEmpty || widget.onPostDanmaku == null) return;
+    final ms = _position.inMilliseconds;
+    final err = await widget.onPostDanmaku!(msg, ms, color);
+    if (!mounted) return;
+    if (err.isEmpty) {
+      setState(() {
+        _danmaku = [..._danmaku, Danmaku(ms / 1000.0, msg, color)]
+          ..sort((a, b) => a.time.compareTo(b.time));
+        _danmakuOn = true;
+      });
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('弹幕已发送')));
+    } else {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('发送失败：$err')));
+    }
   }
 
   Widget _fullscreenView(ColorScheme cs) {
@@ -897,6 +983,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ? Colors.lightBlueAccent
                         : Colors.white70),
                 onPressed: _danmakuLoading ? null : _toggleDanmaku,
+              ),
+            if (widget.onPostDanmaku != null)
+              IconButton(
+                tooltip: '发弹幕',
+                icon: const Icon(Icons.add_comment_outlined,
+                    color: Colors.white70),
+                onPressed: _sendDanmaku,
               ),
             IconButton(
               tooltip: 'A-B 循环（复读片段）',
