@@ -352,6 +352,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   double _preLongRate = 1.0;
   bool _longPressing = false;
   final List<int> _marks = [];
+  int _subOffsetMs = 0; // 字幕延迟
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -1039,8 +1040,39 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _applySubtitle() {
     final srt = _subtitle;
     if (srt == null) return;
-    _player.setSubtitleTrack(
-        _subtitleOn ? SubtitleTrack.data(srt) : SubtitleTrack.no());
+    _player.setSubtitleTrack(_subtitleOn
+        ? SubtitleTrack.data(
+            _subOffsetMs == 0 ? srt : _shiftSrt(srt, _subOffsetMs))
+        : SubtitleTrack.no());
+  }
+
+  String _shiftSrt(String srt, int offsetMs) {
+    final re = RegExp(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})');
+    return srt.replaceAllMapped(re, (m) {
+      var ms = int.parse(m[1]!) * 3600000 +
+          int.parse(m[2]!) * 60000 +
+          int.parse(m[3]!) * 1000 +
+          int.parse(m[4]!) +
+          offsetMs;
+      if (ms < 0) ms = 0;
+      final h = ms ~/ 3600000;
+      ms %= 3600000;
+      final mn = ms ~/ 60000;
+      ms %= 60000;
+      final sec = ms ~/ 1000;
+      final mmm = ms % 1000;
+      return '${h.toString().padLeft(2, '0')}:${mn.toString().padLeft(2, '0')}'
+          ':${sec.toString().padLeft(2, '0')},${mmm.toString().padLeft(3, '0')}';
+    });
+  }
+
+  void _adjustSubDelay(int deltaMs) {
+    setState(() => _subOffsetMs += deltaMs);
+    _applySubtitle();
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content:
+            Text('字幕延迟 ${(_subOffsetMs / 1000).toStringAsFixed(1)} 秒'),
+        duration: const Duration(milliseconds: 900)));
   }
 
   /// 本地 AI 生成字幕（用于 B站 也没字幕的视频/音频）。
@@ -1281,6 +1313,20 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (sp != null && sp != 1.0 && mounted) {
         setState(() => _speed = sp);
         _player.setRate(sp);
+      }
+      if ((p.getBool('fade_in') ?? false) && mounted) {
+        final target = _muted ? 0.0 : _volume;
+        _player.setVolume(0);
+        var cur = 0.0;
+        Timer.periodic(const Duration(milliseconds: 100), (tm) {
+          cur += target / 15;
+          if (cur >= target || !mounted) {
+            _player.setVolume(target);
+            tm.cancel();
+          } else {
+            _player.setVolume(cur);
+          }
+        });
       }
     });
   }
@@ -1576,6 +1622,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'exsub':
                   _exportSubtitle();
                   break;
+                case 'sub_plus':
+                  _adjustSubDelay(500);
+                  break;
+                case 'sub_minus':
+                  _adjustSubDelay(-500);
+                  break;
                 case 'exdm':
                   _exportDanmaku();
                   break;
@@ -1631,6 +1683,14 @@ class _PlayerScreenState extends State<PlayerScreen>
               const PopupMenuItem(
                   value: 'exsub',
                   child: Text('导出字幕', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'sub_plus',
+                  child: Text('字幕延迟 +0.5s',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'sub_minus',
+                  child: Text('字幕提前 0.5s',
+                      style: TextStyle(color: Colors.white))),
               if (widget.onLoadDanmaku != null)
                 const PopupMenuItem(
                     value: 'exdm',

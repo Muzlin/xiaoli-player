@@ -148,6 +148,7 @@ class _HomeShellState extends State<HomeShell> {
   int _watchSec = 0; // 累计观看秒
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
+  bool _fadeIn = false; // 起播音量淡入
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1870,6 +1871,7 @@ class _HomeShellState extends State<HomeShell> {
     _profileAvatar = p.getString('profile_avatar');
     _seekStep = p.getInt('seek_step') ?? 10;
     _watchSec = p.getInt('watch_sec') ?? 0;
+    _fadeIn = p.getBool('fade_in') ?? false;
     try {
       final pl = p.getString('playlists_v1');
       if (pl != null) {
@@ -1933,6 +1935,53 @@ class _HomeShellState extends State<HomeShell> {
     final p = await SharedPreferences.getInstance();
     await p.setStringList(
         _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  Future<void> _importFolder() async {
+    final dir = await FilePicker.platform.getDirectoryPath();
+    if (dir == null) return;
+    const exts = {
+      'mp4', 'mkv', 'mov', 'webm', 'avi', 'ts', 'flv', 'm4v', 'mp3', 'm4a',
+      'aac', 'flac', 'wav', 'ogg', 'opus', 'wma', 'aiff', 'ape'
+    };
+    var added = 0;
+    try {
+      await for (final e
+          in Directory(dir).list(recursive: true, followLinks: false)) {
+        if (e is File) {
+          final pth = e.path;
+          final ext = pth.contains('.') ? pth.split('.').last.toLowerCase() : '';
+          if (exts.contains(ext) &&
+              !_localTracks.any((t) => t.localPath == pth)) {
+            _localTracks.add(Track.local(pth));
+            added++;
+          }
+        }
+      }
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {});
+    await _saveLocalOrder();
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('已导入 $added 个媒体文件')));
+  }
+
+  Future<void> _cleanupLocal() async {
+    final before = _localTracks.length;
+    _localTracks.removeWhere(
+        (t) => t.localPath != null && !File(t.localPath!).existsSync());
+    final removed = before - _localTracks.length;
+    if (!mounted) return;
+    setState(() {});
+    await _saveLocalOrder();
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('清理了 $removed 个失效文件')));
+  }
+
+  Future<void> _setFadeIn(bool v) async {
+    setState(() => _fadeIn = v);
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('fade_in', v);
   }
 
   Future<void> _addToPlaylist(Track t) async {
@@ -2696,7 +2745,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.30.0'),
+          title: Text('小李播放器 v2.31.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2729,6 +2778,28 @@ class _HomeShellState extends State<HomeShell> {
                     onSave: _savePlaylists)));
             setState(() {});
           },
+        ),
+        ListTile(
+          leading: const Icon(Icons.create_new_folder_outlined),
+          title: const Text('扫描文件夹导入'),
+          subtitle: const Text('选文件夹，递归导入里面的音视频',
+              style: TextStyle(fontSize: 12)),
+          onTap: _importFolder,
+        ),
+        ListTile(
+          leading: const Icon(Icons.cleaning_services_outlined),
+          title: const Text('清理失效本地文件'),
+          subtitle: const Text('移除文件已被删除/移动的曲目',
+              style: TextStyle(fontSize: 12)),
+          onTap: _cleanupLocal,
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.volume_up_outlined),
+          title: const Text('起播音量淡入'),
+          subtitle: const Text('开始播放时音量从 0 渐入，护耳',
+              style: TextStyle(fontSize: 12)),
+          value: _fadeIn,
+          onChanged: _setFadeIn,
         ),
         ListTile(
           leading: const Icon(Icons.keyboard_alt_outlined),
@@ -3476,6 +3547,22 @@ class _PlaylistsPage extends StatefulWidget {
 }
 
 class _PlaylistsPageState extends State<_PlaylistsPage> {
+  Future<void> _exportPlaylist(String name) async {
+    final b = StringBuffer('#EXTM3U\n');
+    for (final t in widget.playlists[name]!) {
+      final src = t.localPath ?? t.url;
+      if (src != null) b.writeln(src);
+    }
+    final path = await FilePicker.platform
+        .saveFile(dialogTitle: '导出歌单', fileName: '$name.m3u');
+    if (path == null) return;
+    await File(path).writeAsString(b.toString());
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已导出 $path')));
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final names = widget.playlists.keys.toList();
@@ -3494,13 +3581,23 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
                   ExpansionTile(
                     leading: const Icon(Icons.queue_music),
                     title: Text('$n（${widget.playlists[n]!.length}）'),
-                    trailing: IconButton(
-                      icon: const Icon(Icons.delete_outline),
-                      onPressed: () async {
-                        widget.playlists.remove(n);
-                        await widget.onSave();
-                        setState(() {});
-                      },
+                    trailing: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        IconButton(
+                          icon: const Icon(Icons.ios_share, size: 20),
+                          tooltip: '导出 m3u',
+                          onPressed: () => _exportPlaylist(n),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.delete_outline),
+                          onPressed: () async {
+                            widget.playlists.remove(n);
+                            await widget.onSave();
+                            setState(() {});
+                          },
+                        ),
+                      ],
                     ),
                     children: [
                       for (final t in widget.playlists[n]!)
