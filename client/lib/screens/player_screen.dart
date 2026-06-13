@@ -8,6 +8,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../player/playback_source.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
+import 'package:path_provider/path_provider.dart';
 
 export '../player/playback_source.dart';
 
@@ -20,6 +21,8 @@ class PlayerScreen extends StatefulWidget {
   final VoidCallback? onFollow; // 关注当前 UP主（仅 B站）
   final Future<List<BiliComment>> Function(int pn)? onLoadComments; // 评论分页(仅 B站)
   final Future<String> Function(String message)? onPostComment; // 发评论(仅 B站)
+  final Duration startAt; // 断点续播起点
+  final void Function(int seconds)? onSavePos; // 保存播放进度
   const PlayerScreen({
     super.key,
     required this.source,
@@ -29,6 +32,8 @@ class PlayerScreen extends StatefulWidget {
     this.onFollow,
     this.onLoadComments,
     this.onPostComment,
+    this.startAt = Duration.zero,
+    this.onSavePos,
   });
 
   @override
@@ -56,6 +61,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _subtitleOn = false;
   bool _subApplied = false;
   bool _transcribing = false;
+  bool _resumed = false;
+  int _lastSavedSec = 0;
 
   // 桌面悬浮字幕（仅 macOS）
   static const _dsChannel = MethodChannel('xiaoli/desktop_subtitle');
@@ -143,6 +150,33 @@ class _PlayerScreenState extends State<PlayerScreen>
       builder: (_) => _CommentsSheet(load: load, post: widget.onPostComment),
     );
   }
+  Future<void> _screenshot() async {
+    try {
+      final bytes = await _player.screenshot(format: 'image/png');
+      if (bytes == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(const SnackBar(content: Text('截图失败')));
+        }
+        return;
+      }
+      final dir = (await getDownloadsDirectory()) ??
+          await getApplicationDocumentsDirectory();
+      final path =
+          '${dir.path}/小李播放器截图_${DateTime.now().millisecondsSinceEpoch}.png';
+      await File(path).writeAsBytes(bytes);
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('已截图到 $path')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('截图出错：$e')));
+      }
+    }
+  }
+
   void _toggleMini() {
     setState(() => _mini = !_mini);
     _winChannel.invokeMethod('setMini', {'on': _mini});
@@ -215,7 +249,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _nudgeVolume(double d) {
-    _setVolume((_volume + d).clamp(0, 100));
+    _setVolume((_volume + d).clamp(0, 200));
     _saveVolume();
   }
 
@@ -495,10 +529,22 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted) return;
       setState(() => _position = p);
       if (_desktopSub) _pushDesktopSub(p);
+      final sec = p.inSeconds;
+      if (widget.onSavePos != null && sec > 0 && (sec - _lastSavedSec).abs() >= 5) {
+        _lastSavedSec = sec;
+        widget.onSavePos!(sec);
+      }
     }));
     _subs.add(_player.stream.duration.listen((d) {
       if (!mounted) return;
       setState(() => _duration = d);
+      if (!_resumed &&
+          d > Duration.zero &&
+          widget.startAt > const Duration(seconds: 3) &&
+          widget.startAt < d - const Duration(seconds: 5)) {
+        _resumed = true;
+        _player.seek(widget.startAt);
+      }
       // 媒体已加载（有时长）后再贴字幕，避免过早设置不生效
       if (!_subApplied && _subtitle != null && d > Duration.zero) {
         _subApplied = true;
@@ -546,6 +592,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    if (_position > const Duration(seconds: 3)) {
+      widget.onSavePos?.call(_position.inSeconds);
+    }
     WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
     if (_desktopSub) _dsChannel.invokeMethod('hide');
@@ -696,6 +745,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                         : Icons.picture_in_picture_alt,
                     color: _mini ? cs.primary : Colors.white70),
                 onPressed: _toggleMini,
+              ),
+            if (!_audioOnly)
+              IconButton(
+                tooltip: '截图',
+                icon: const Icon(Icons.photo_camera_outlined,
+                    color: Colors.white70),
+                onPressed: _screenshot,
               ),
             if (!_audioOnly)
               IconButton(
@@ -899,7 +955,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
               child: Slider(
                 min: 0,
-                max: 100,
+                max: 200,
                 value: shown,
                 onChanged: _setVolume,
                 onChangeEnd: (_) => _saveVolume(),

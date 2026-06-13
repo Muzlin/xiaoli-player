@@ -121,6 +121,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _blockQuit = false;
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
+  final Map<String, int> _resume = {}; // 断点续播：track key→秒
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -189,6 +190,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadPlatform();
     _loadAppSettings();
     _loadProtection();
+    _loadResume();
     _loadAutoNext();
     if (Platform.isMacOS) {
       _urlTimer = Timer.periodic(
@@ -1283,13 +1285,22 @@ class _HomeShellState extends State<HomeShell> {
         source: src,
         isFavorite: _isFav(t),
         onToggleFavorite: () => _toggleFav(t),
-        onCompleted: () => _onTrackCompleted(),
+        onCompleted: () {
+          _resume.remove(t.key);
+          _saveResume();
+          _onTrackCompleted();
+        },
         onFollow: t.bvid != null ? () => _followUp(t.bvid!) : null,
         onLoadComments: t.bvid != null
             ? (pn) => _bili.getComments(t.bvid!, pn: pn)
             : null,
         onPostComment:
             t.bvid != null ? (msg) => _bili.postComment(t.bvid!, msg) : null,
+        startAt: Duration(seconds: _resume[t.key] ?? 0),
+        onSavePos: (sec) {
+          _resume[t.key] = sec;
+          _saveResume();
+        },
       ),
     );
     if (replace) {
@@ -1690,6 +1701,24 @@ class _HomeShellState extends State<HomeShell> {
     } catch (_) {}
   }
 
+  Future<void> _loadResume() async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString('resume_v1');
+    if (raw == null || !mounted) return;
+    try {
+      final m = (jsonDecode(raw) as Map)
+          .map((k, v) => MapEntry(k as String, (v as num).toInt()));
+      _resume
+        ..clear()
+        ..addAll(m);
+    } catch (_) {}
+  }
+
+  Future<void> _saveResume() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('resume_v1', jsonEncode(_resume));
+  }
+
   Future<void> _loadProtection() async {
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
@@ -2054,7 +2083,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.18.2'),
+          title: Text('小李播放器 v2.19.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
