@@ -150,6 +150,63 @@ class _PlayerScreenState extends State<PlayerScreen>
       builder: (_) => _CommentsSheet(load: load, post: widget.onPostComment),
     );
   }
+  void _seekRel(int seconds) {
+    var t = _position + Duration(seconds: seconds);
+    if (t < Duration.zero) t = Duration.zero;
+    if (_duration > Duration.zero && t > _duration) t = _duration;
+    _player.seek(t);
+  }
+
+  void _frameStep(bool forward) {
+    _player.pause();
+    var t = _position + Duration(milliseconds: forward ? 40 : -40);
+    if (t < Duration.zero) t = Duration.zero;
+    _player.seek(t);
+  }
+
+  void _rotateVideo() => setState(() => _rotation = (_rotation + 1) % 4);
+  void _flipVideo() => setState(() => _flipH = !_flipH);
+
+  void _copyLink() {
+    final r = widget.source.resource;
+    Clipboard.setData(ClipboardData(text: r));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(r.startsWith('http') ? '已复制播放链接' : '已复制路径'),
+        duration: const Duration(milliseconds: 1200)));
+  }
+
+  Future<void> _jumpTo() async {
+    final ctrl = TextEditingController(text: _fmt(_position));
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('跳转到'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration:
+              const InputDecoration(hintText: '分:秒 或 时:分:秒，如 1:23'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('跳转')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final parts =
+        ctrl.text.trim().split(':').map((e) => int.tryParse(e) ?? 0).toList();
+    var sec = 0;
+    for (final p in parts) {
+      sec = sec * 60 + p;
+    }
+    _player.seek(Duration(seconds: sec));
+  }
+
   void _cycleAB() {
     setState(() {
       if (_aPoint == null) {
@@ -255,6 +312,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _loop = false;
   Duration? _aPoint; // A-B 循环 A 点
   Duration? _bPoint; // A-B 循环 B 点
+  int _rotation = 0; // 旋转 0/1/2/3×90°
+  bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
 
@@ -319,9 +378,15 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Widget _videoView() {
     return ClipRect(
-      child: Transform.scale(
-        scale: _cropEdges ? 1.22 : 1.0,
-        child: Video(controller: _controller, controls: NoVideoControls),
+      child: Transform.rotate(
+        angle: _rotation * 1.5707963267948966,
+        child: Transform.scale(
+          scaleX: _flipH ? -1.0 : 1.0,
+          child: Transform.scale(
+            scale: _cropEdges ? 1.22 : 1.0,
+            child: Video(controller: _controller, controls: NoVideoControls),
+          ),
+        ),
       ),
     );
   }
@@ -463,6 +528,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (v < 0.1) v = 0.1; // 下限防止卡死；上限无限制
     setState(() => _speed = v);
     _player.setRate(v);
+    SharedPreferences.getInstance().then((p) => p.setDouble('player_speed', v));
   }
 
   void _showSpeedSheet() {
@@ -608,6 +674,11 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (v != null && mounted) {
         setState(() => _volume = v);
         _player.setVolume(v);
+      }
+      final sp = p.getDouble('player_speed');
+      if (sp != null && sp != 1.0 && mounted) {
+        setState(() => _speed = sp);
+        _player.setRate(sp);
       }
     });
   }
@@ -830,6 +901,30 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 's60':
                   _setSleep(60);
                   break;
+                case 'jump':
+                  _jumpTo();
+                  break;
+                case 'fwd10':
+                  _seekRel(10);
+                  break;
+                case 'rwd10':
+                  _seekRel(-10);
+                  break;
+                case 'fb':
+                  _frameStep(false);
+                  break;
+                case 'ff':
+                  _frameStep(true);
+                  break;
+                case 'rot':
+                  _rotateVideo();
+                  break;
+                case 'flip':
+                  _flipVideo();
+                  break;
+                case 'copy':
+                  _copyLink();
+                  break;
               }
             },
             itemBuilder: (_) => [
@@ -864,6 +959,34 @@ class _PlayerScreenState extends State<PlayerScreen>
                   checked: _sleepMin == 60,
                   child:
                       const Text('60 分钟', style: TextStyle(color: Colors.white))),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                  value: 'jump',
+                  child: Text('跳转到…', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'fwd10',
+                  child:
+                      Text('快进 10 秒', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'rwd10',
+                  child:
+                      Text('快退 10 秒', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'fb',
+                  child: Text('上一帧', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'ff',
+                  child: Text('下一帧', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'rot',
+                  child: Text('旋转 90°', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'flip',
+                  child: Text('水平镜像', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'copy',
+                  child:
+                      Text('复制播放链接', style: TextStyle(color: Colors.white))),
             ],
           ),
         ],

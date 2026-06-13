@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:crypto/crypto.dart';
+import 'dart:math';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -50,7 +51,19 @@ class Track {
   /// 仅本地/直链可用；B站曲目在播放前异步解析。
   PlaybackSource toSource() => isLocal
       ? PlaybackSource.local(localPath!)
-      : PlaybackSource.stream(url!, const {}, title: name);
+      : PlaybackSource.stream(url!, const {},
+          title: name, isVideo: _onlineIsVideo());
+
+  // 在线 URL 按扩展名判断音/视频：音频后缀→封面，其余(含无后缀/m3u8/mp4)→视频画面。
+  bool _onlineIsVideo() {
+    final u = (url ?? '').split('?').first.toLowerCase();
+    const audioExts = {
+      'mp3', 'flac', 'aac', 'wav', 'm4a', 'aiff', 'aif', 'ogg', 'opus',
+      'wma', 'ape', 'alac', 'mid', 'amr'
+    };
+    final ext = u.contains('.') ? u.split('.').last : '';
+    return !audioExts.contains(ext);
+  }
 
   /// 收藏去重/比较用的唯一键。
   String get key => localPath ?? bvid ?? url ?? name;
@@ -123,6 +136,7 @@ class _HomeShellState extends State<HomeShell> {
   final Set<String> _protectedKeys = {};
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
   final List<Track> _history = []; // 最近播放
+  bool _shuffle = false; // 随机播放
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1327,6 +1341,12 @@ class _HomeShellState extends State<HomeShell> {
     final list = _playQueue;
     if (_current == null || list.isEmpty) return;
     final i = list.indexWhere((t) => t.name == _current!.name);
+    if (_shuffle && list.length > 1) {
+      var j = Random().nextInt(list.length);
+      if (j == i) j = (j + 1) % list.length;
+      _play(list[j]);
+      return;
+    }
     if (i >= 0 && i < list.length - 1) _play(list[i + 1]);
   }
 
@@ -1829,10 +1849,30 @@ class _HomeShellState extends State<HomeShell> {
         ),
       );
     }
-    return ListView.separated(
-      itemCount: _history.length,
-      separatorBuilder: (_, _) => const Divider(height: 1),
-      itemBuilder: (context, i) => _trackRow(cs, _history[i], i),
+    return Column(
+      children: [
+        Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: TextButton.icon(
+              onPressed: () {
+                setState(() => _history.clear());
+                _savePlayHistory();
+              },
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+              label: const Text('清空'),
+            ),
+          ),
+        ),
+        Expanded(
+          child: ListView.separated(
+            itemCount: _history.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, i) => _trackRow(cs, _history[i], i),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2200,8 +2240,16 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.20.0'),
+          title: Text('小李播放器 v2.21.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.shuffle),
+          title: const Text('随机播放'),
+          subtitle: const Text('上一首/下一首随机选',
+              style: TextStyle(fontSize: 12)),
+          value: _shuffle,
+          onChanged: (v) => setState(() => _shuffle = v),
         ),
         ListTile(
           leading: const Icon(Icons.system_update),
