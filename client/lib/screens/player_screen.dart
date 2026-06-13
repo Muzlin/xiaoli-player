@@ -685,7 +685,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     }));
     _subs.add(_player.stream.playing.listen((p) {
-      if (mounted) setState(() => _playing = p);
+      if (mounted) {
+        setState(() {
+          _playing = p;
+          if (p) _error = null; // 成功起播 → 清残留错误，避免非致命错误误报“播放失败”
+        });
+      }
     }));
     _subs.add(_player.stream.videoParams.listen((v) {
       final has = (v.w ?? 0) > 0 && (v.h ?? 0) > 0;
