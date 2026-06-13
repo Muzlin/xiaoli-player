@@ -138,6 +138,15 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         let id = hk.id
         DispatchQueue.main.async {
           if id == 2 {
+            // 退出原生全屏（若有），再强制隐藏。orderOut 忽略 canHide，
+            // 修复播视频时 media_kit 把窗口设为不可隐藏导致 NSApp.hide 失效。
+            for w in NSApp.windows where w.styleMask.contains(.fullScreen) {
+              w.toggleFullScreen(nil)
+            }
+            for w in NSApp.windows {
+              w.canHide = true
+              w.orderOut(nil)
+            }
             NSApp.hide(nil)
           } else {
             NSApp.activate(ignoringOtherApps: true)
