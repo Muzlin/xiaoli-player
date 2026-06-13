@@ -666,23 +666,46 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Future<void> _coin() async {
     if (widget.onCoin == null) return;
-    final n = await showDialog<int>(
+    final ctrl = TextEditingController(text: '2');
+    final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Text('投币'),
-        content: const Text('给这个视频投几个币？（B站每视频上限 2 个）'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '投几个币'),
+              onSubmitted: (_) => Navigator.pop(ctx, true),
+            ),
+            const SizedBox(height: 6),
+            const Text('B站每视频上限 2 个，超出会按 2 个投',
+                style: TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, 1), child: const Text('1 个')),
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
           FilledButton(
-              onPressed: () => Navigator.pop(ctx, 2), child: const Text('2 个')),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('投币')),
         ],
       ),
     );
-    if (n == null) return;
-    final msg = await widget.onCoin!(n);
+    if (ok != true) return;
+    final want = int.tryParse(ctrl.text.trim()) ?? 0;
+    if (want <= 0) return;
+    final use = want > 2 ? 2 : want;
+    final msg = await widget.onCoin!(use);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      final extra = want > 2 ? '（你想投 $want 个，但 B站每视频上限 2 个）' : '';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('$msg$extra')));
     }
   }
 
