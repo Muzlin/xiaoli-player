@@ -1446,6 +1446,53 @@ class _HomeShellState extends State<HomeShell> {
     if (PlatformService.current != before) _loadPlatform();
   }
 
+  Future<void> _setLanIp() async {
+    final ctrl = TextEditingController(text: PlatformService.customLanIp ?? '');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('局域网服务器 IP'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: ctrl,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: '如 10.10.10.5（留空=自动探测）',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text('自动探测到：${PlatformService.detectedIp ?? "未探测到"}',
+                style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final ip = ctrl.text.trim();
+    PlatformService.customLanIp = ip.isEmpty ? null : ip;
+    final p = await SharedPreferences.getInstance();
+    if (ip.isEmpty) {
+      await p.remove('lan_ip');
+    } else {
+      await p.setString('lan_ip', ip);
+    }
+    if (!mounted) return;
+    setState(() {});
+    if (_useLan) _loadPlatform();
+  }
+
   Future<void> _loadAppSettings() async {
     if (!Platform.isMacOS) return;
     var login = false, bg = false, hk = false, hidehk = false, bq = false;
@@ -1471,6 +1518,7 @@ class _HomeShellState extends State<HomeShell> {
       _hideHotkeyCode = p.getInt('hide_hotkey_code') ?? _hideHotkeyCode;
       _hideHotkeyMods = p.getInt('hide_hotkey_mods') ?? _hideHotkeyMods;
       _hideHotkeyLabel = p.getString('hide_hotkey_label') ?? _hideHotkeyLabel;
+      PlatformService.customLanIp = p.getString('lan_ip');
     } catch (_) {}
     if (mounted) {
       setState(() {
@@ -2006,7 +2054,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.18.0'),
+          title: Text('小李播放器 v2.18.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2217,11 +2265,18 @@ class _HomeShellState extends State<HomeShell> {
             style: const TextStyle(fontSize: 12),
           ),
           value: _useLan,
-          onChanged: (v) {
+          onChanged: (v) => _guard('useLan', () {
             PlatformService.setUseLan(v);
             setState(() => _useLan = v);
             _loadPlatform();
-          },
+          }),
+        ),
+        ListTile(
+          leading: const Icon(Icons.router_outlined),
+          title: const Text('局域网服务器 IP'),
+          subtitle: Text('当前 ${PlatformService.lanBase}（点击修改，留空=自动探测）',
+              style: const TextStyle(fontSize: 12)),
+          onTap: () => _guard('useLan', _setLanIp),
         ),
         ListTile(
           leading: const Icon(Icons.description_outlined),
@@ -2438,6 +2493,7 @@ class _PasswordProtectPageState extends State<_PasswordProtectPage> {
     ['blockQuit', '禁止退出'],
     ['hotkey', '全局快捷键唤起'],
     ['hideHotkey', '全局快捷键隐藏'],
+    ['useLan', '切换到局域网服务器'],
   ];
   String? _hash;
   final Set<String> _protected = {};

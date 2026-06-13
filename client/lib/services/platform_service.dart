@@ -20,8 +20,16 @@ class PlatformService {
   static bool useLan = false; // 切到局域网服务器
   static String? _lanIp; // 本机局域网 IP
 
+  static String? customLanIp; // 用户自定义局域网 IP（优先于自动探测）
+  static String? get detectedIp => _lanIp; // 自动探测到的 IP
+
+  static String get _lanHost =>
+      (customLanIp != null && customLanIp!.trim().isNotEmpty)
+          ? customLanIp!.trim()
+          : (_lanIp ?? 'localhost');
+
   /// 局域网地址（同 WiFi 设备可访问，公网抽风时兜底）。
-  static String get lanBase => 'http://${_lanIp ?? 'localhost'}:8900';
+  static String get lanBase => 'http://$_lanHost:8900';
 
   /// 当前生效地址：局域网模式用 lanBase，否则公网 _base。
   static String get current => useLan ? lanBase : _base;
