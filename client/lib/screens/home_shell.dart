@@ -2204,6 +2204,45 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  Future<void> _changeBiliName() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修改 B站 昵称'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+                controller: ctrl,
+                autofocus: true,
+                decoration: const InputDecoration(labelText: '新昵称')),
+            const SizedBox(height: 10),
+            const Text(
+                '⚠️ 这会真改你的 B站 账号昵称！\nB站 规则：首次免费、之后需购买改名卡，有冷却期、需手机实名绑定。失败会显示 B站 的提示。',
+                style: TextStyle(fontSize: 12, color: Colors.orange)),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确认修改')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final name = ctrl.text.trim();
+    if (name.isEmpty) return;
+    final msg = await _bili.changeUname(name);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
   Map<String, dynamic> _trackToJson(Track t) =>
       {'n': t.name, 'l': t.localPath, 'u': t.url, 'b': t.bvid, 't': t.tag};
 
@@ -2745,7 +2784,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.31.0'),
+          title: Text('小李播放器 v2.31.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2764,6 +2803,13 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('修改显示名字 / 头像（上传到平台时用）',
               style: TextStyle(fontSize: 12)),
           onTap: _editProfile,
+        ),
+        ListTile(
+          leading: const Icon(Icons.badge_outlined),
+          title: const Text('修改 B站 昵称'),
+          subtitle: const Text('真改你的 B站 账号昵称（受 B站 规则/费用限制）',
+              style: TextStyle(fontSize: 12)),
+          onTap: _changeBiliName,
         ),
         ListTile(
           leading: const Icon(Icons.queue_music),

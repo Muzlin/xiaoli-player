@@ -604,6 +604,53 @@ class BilibiliService {
     return e.isEmpty ? '已投 $multiply 个币 🪙' : '投币失败：$e';
   }
 
+  /// 真改 B站 昵称（受 B站 规则限制：首次免费、之后需改名卡、有冷却、需实名）。
+  Future<String> changeUname(String newName) async {
+    final jct = _biliJct;
+    if (jct.isEmpty) return '需完整登录(bili_jct)，请扫码登录';
+    if (newName.trim().isEmpty) return '昵称不能为空';
+    try {
+      await _ensureInit();
+      // 取当前资料，避免一并清空签名/性别/生日
+      var sign = '';
+      var sex = '保密';
+      var birthday = '0000-00-00';
+      try {
+        final info = jsonDecode((await _http.get(
+                Uri.parse('https://api.bilibili.com/x/space/myinfo'),
+                headers: _headers))
+            .body)['data'];
+        if (info != null) {
+          sign = (info['sign'] ?? '') as String;
+          sex = (info['sex'] ?? '保密') as String;
+          birthday = (info['birthday'] ?? '0000-00-00').toString();
+        }
+      } catch (_) {}
+      final r = await _http
+          .post(
+            Uri.parse('https://api.bilibili.com/x/member/web/update'),
+            headers: {
+              ..._headers,
+              'Content-Type': 'application/x-www-form-urlencoded',
+              'Referer': 'https://account.bilibili.com/account/home',
+            },
+            body: {
+              'uname': newName,
+              'usersign': sign,
+              'sex': sex,
+              'birthday': birthday,
+              'csrf': jct,
+            },
+          )
+          .timeout(const Duration(seconds: 15));
+      final d = jsonDecode(r.body);
+      if (d['code'] == 0) return '昵称已改为「$newName」🎉';
+      return 'B站返回：${d['message'] ?? d['code']}';
+    } catch (e) {
+      return '出错：$e';
+    }
+  }
+
   Future<String> tripleVideo(String bvid) async {
     final e = await _videoAction(
         'https://api.bilibili.com/x/web-interface/archive/like/triple',
