@@ -140,6 +140,10 @@ class _HomeShellState extends State<HomeShell> {
   final List<Track> _history = []; // 最近播放
   bool _shuffle = false; // 随机播放
   int _skipIntro = 0; // 片头跳过秒数
+  String _profileName = ''; // 本机显示名
+  String? _profileAvatar; // 本机头像路径
+  final Map<String, List<int>> _bookmarks = {}; // 书签 track key→秒列表
+  int _seekStep = 10; // 快进/快退步长
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1265,7 +1269,9 @@ class _HomeShellState extends State<HomeShell> {
         ]),
       ),
     );
-    final uploader = _account?['uname']?.toString() ?? '匿名';
+    final uploader = _profileName.isNotEmpty
+        ? _profileName
+        : (_account?['uname']?.toString() ?? '匿名');
     final title = titleCtrl.text.trim().isEmpty ? fname : titleCtrl.text.trim();
     final msg = await _platform.upload(path, title, uploader);
     if (!mounted) return;
@@ -1332,6 +1338,13 @@ class _HomeShellState extends State<HomeShell> {
         onCoin:
             t.bvid != null ? (n) => _bili.coinVideo(t.bvid!, multiply: n) : null,
         onTriple: t.bvid != null ? () => _bili.tripleVideo(t.bvid!) : null,
+        bvid: t.bvid,
+        seekStep: _seekStep,
+        bookmarks: _bookmarks[t.key] ?? const [],
+        onSaveBookmarks: (list) {
+          _bookmarks[t.key] = list;
+          _saveBookmarks();
+        },
       ),
     );
     if (replace) {
@@ -1748,6 +1761,17 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _loadResume() async {
     final p = await SharedPreferences.getInstance();
     _skipIntro = p.getInt('skip_intro') ?? 0;
+    _profileName = p.getString('profile_name') ?? '';
+    _profileAvatar = p.getString('profile_avatar');
+    _seekStep = p.getInt('seek_step') ?? 10;
+    try {
+      final bm = p.getString('bookmarks_v1');
+      if (bm != null) {
+        (jsonDecode(bm) as Map).forEach((k, v) =>
+            _bookmarks[k as String] =
+                (v as List).map((e) => (e as num).toInt()).toList());
+      }
+    } catch (_) {}
     final raw = p.getString('resume_v1');
     if (raw == null || !mounted) return;
     try {
@@ -1762,6 +1786,11 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _saveResume() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('resume_v1', jsonEncode(_resume));
+  }
+
+  Future<void> _saveBookmarks() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('bookmarks_v1', jsonEncode(_bookmarks));
   }
 
   Future<void> _setSkipIntro() async {
@@ -1791,6 +1820,68 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _skipIntro = v < 0 ? 0 : v);
     final p = await SharedPreferences.getInstance();
     await p.setInt('skip_intro', _skipIntro);
+  }
+
+  Future<void> _editProfile() async {
+    final ctrl = TextEditingController(text: _profileName);
+    String? avatar = _profileAvatar;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('个人资料'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              GestureDetector(
+                onTap: () async {
+                  final res = await FilePicker.platform
+                      .pickFiles(type: FileType.image);
+                  final p = res?.files.single.path;
+                  if (p != null) setD(() => avatar = p);
+                },
+                child: CircleAvatar(
+                  radius: 38,
+                  backgroundColor: Colors.black12,
+                  backgroundImage:
+                      avatar != null ? FileImage(File(avatar!)) : null,
+                  child: avatar == null
+                      ? const Icon(Icons.add_a_photo, color: Colors.white70)
+                      : null,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text('点头像换图', style: TextStyle(fontSize: 11, color: Colors.black45)),
+              const SizedBox(height: 10),
+              TextField(
+                controller: ctrl,
+                decoration: const InputDecoration(labelText: '显示名字'),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    setState(() {
+      _profileName = ctrl.text.trim();
+      _profileAvatar = avatar;
+    });
+    final p = await SharedPreferences.getInstance();
+    await p.setString('profile_name', _profileName);
+    if (_profileAvatar != null) {
+      await p.setString('profile_avatar', _profileAvatar!);
+    } else {
+      await p.remove('profile_avatar');
+    }
   }
 
   Map<String, dynamic> _trackToJson(Track t) =>
@@ -2306,8 +2397,25 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.25.2'),
+          title: Text('小李播放器 v2.26.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+        ),
+        ListTile(
+          leading: CircleAvatar(
+            radius: 20,
+            backgroundColor: Colors.black12,
+            backgroundImage:
+                _profileAvatar != null ? FileImage(File(_profileAvatar!)) : null,
+            child: _profileAvatar == null
+                ? const Icon(Icons.person, color: Colors.white70)
+                : null,
+          ),
+          title: Text(_profileName.isNotEmpty
+              ? _profileName
+              : (_account?['uname']?.toString() ?? '点击设置个人资料')),
+          subtitle: const Text('修改显示名字 / 头像（上传到平台时用）',
+              style: TextStyle(fontSize: 12)),
+          onTap: _editProfile,
         ),
         SwitchListTile(
           secondary: const Icon(Icons.shuffle),
@@ -2324,6 +2432,38 @@ class _HomeShellState extends State<HomeShell> {
               _skipIntro > 0 ? '起播自动跳过 $_skipIntro 秒' : '关闭（点击设置）',
               style: const TextStyle(fontSize: 12)),
           onTap: _setSkipIntro,
+        ),
+        ListTile(
+          leading: const Icon(Icons.forward_10),
+          title: const Text('快进/快退步长'),
+          subtitle: Text('当前 $_seekStep 秒（点击修改）',
+              style: const TextStyle(fontSize: 12)),
+          onTap: () async {
+            final ctrl = TextEditingController(text: '$_seekStep');
+            final ok = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                title: const Text('快进/快退步长（秒）'),
+                content: TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    keyboardType: TextInputType.number),
+                actions: [
+                  TextButton(
+                      onPressed: () => Navigator.pop(ctx, false),
+                      child: const Text('取消')),
+                  FilledButton(
+                      onPressed: () => Navigator.pop(ctx, true),
+                      child: const Text('确定')),
+                ],
+              ),
+            );
+            if (ok != true) return;
+            final v = int.tryParse(ctrl.text.trim()) ?? 10;
+            setState(() => _seekStep = v < 1 ? 1 : v);
+            final p = await SharedPreferences.getInstance();
+            await p.setInt('seek_step', _seekStep);
+          },
         ),
         ListTile(
           leading: const Icon(Icons.system_update),
