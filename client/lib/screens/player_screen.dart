@@ -150,6 +150,30 @@ class _PlayerScreenState extends State<PlayerScreen>
       builder: (_) => _CommentsSheet(load: load, post: widget.onPostComment),
     );
   }
+  void _cycleAB() {
+    setState(() {
+      if (_aPoint == null) {
+        _aPoint = _position;
+      } else if (_bPoint == null) {
+        if (_position > _aPoint!) {
+          _bPoint = _position;
+        } else {
+          _aPoint = _position;
+        }
+      } else {
+        _aPoint = null;
+        _bPoint = null;
+      }
+    });
+    final msg = _bPoint != null
+        ? 'A-B 循环开启：${_fmt(_aPoint!)} → ${_fmt(_bPoint!)}'
+        : _aPoint != null
+            ? '已设 A 点 ${_fmt(_aPoint!)}，再点设 B 点'
+            : 'A-B 循环已清除';
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(msg), duration: const Duration(milliseconds: 1300)));
+  }
+
   Future<void> _screenshot() async {
     try {
       final bytes = await _player.screenshot(format: 'image/png');
@@ -229,6 +253,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   double _volume = 100;
   bool _muted = false;
   bool _loop = false;
+  Duration? _aPoint; // A-B 循环 A 点
+  Duration? _bPoint; // A-B 循环 B 点
   Timer? _sleepTimer;
   int? _sleepMin;
 
@@ -530,6 +556,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (!mounted) return;
       setState(() => _position = p);
       if (_desktopSub) _pushDesktopSub(p);
+      if (_aPoint != null && _bPoint != null && p >= _bPoint!) {
+        _player.seek(_aPoint!);
+      }
       final sec = p.inSeconds;
       if (widget.onSavePos != null && sec > 0 && (sec - _lastSavedSec).abs() >= 5) {
         _lastSavedSec = sec;
@@ -747,6 +776,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                     color: _mini ? cs.primary : Colors.white70),
                 onPressed: _toggleMini,
               ),
+            IconButton(
+              tooltip: 'A-B 循环（复读片段）',
+              icon: Icon(Icons.repeat_on_rounded,
+                  color: _bPoint != null
+                      ? Colors.greenAccent
+                      : (_aPoint != null
+                          ? Colors.orangeAccent
+                          : Colors.white70)),
+              onPressed: _cycleAB,
+            ),
             if (!_audioOnly)
               IconButton(
                 tooltip: '截图',

@@ -122,6 +122,7 @@ class _HomeShellState extends State<HomeShell> {
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
+  final List<Track> _history = []; // 最近播放
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -191,6 +192,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadAppSettings();
     _loadProtection();
     _loadResume();
+    _loadPlayHistory();
     _loadAutoNext();
     if (Platform.isMacOS) {
       _urlTimer = Timer.periodic(
@@ -859,7 +861,9 @@ class _HomeShellState extends State<HomeShell> {
             ? _favoritesView(cs)
             : _navIndex == 2
                 ? _myVideosView(cs)
-                : _settingsView(cs);
+                : _navIndex == 4
+                    ? _historyView(cs)
+                    : _settingsView(cs);
     if (!_hasCustomBg) return view;
     return ColoredBox(
       color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
@@ -1255,6 +1259,7 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _play(Track t, {bool replace = false}) async {
     setState(() => _current = t);
+    _pushPlayHistory(t);
     PlaybackSource src;
     if (t.bvid != null) {
       // B站：先弹 loading，异步取音频流
@@ -1369,6 +1374,7 @@ class _HomeShellState extends State<HomeShell> {
           _navIcon(Icons.library_music, 0, cs),
           _navIcon(Icons.favorite, 1, cs),
           _navIcon(Icons.video_library, 2, cs),
+          _navIcon(Icons.history, 4, cs),
           _navIcon(Icons.settings, 3, cs),
           const Spacer(),
         ],
@@ -1428,7 +1434,13 @@ class _HomeShellState extends State<HomeShell> {
               ),
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 8),
+          IconButton(
+            onPressed: _openUrl,
+            tooltip: '打开网址 / 直播流',
+            icon: const Icon(Icons.link, color: Colors.white70),
+          ),
+          const SizedBox(width: 4),
           FilledButton.icon(
             onPressed: _addFiles,
             icon: const Icon(Icons.add, size: 18),
@@ -1717,6 +1729,111 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _saveResume() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('resume_v1', jsonEncode(_resume));
+  }
+
+  Map<String, dynamic> _trackToJson(Track t) =>
+      {'n': t.name, 'l': t.localPath, 'u': t.url, 'b': t.bvid, 't': t.tag};
+
+  Track? _trackFromJson(Map m) {
+    if (m['l'] != null) return Track.local(m['l'] as String);
+    if (m['b'] != null) {
+      return Track.bili((m['n'] ?? '') as String, m['b'] as String,
+          tag: (m['t'] ?? '') as String);
+    }
+    if (m['u'] != null) {
+      return Track.online((m['n'] ?? '') as String, m['u'] as String,
+          tag: (m['t'] ?? '') as String);
+    }
+    return null;
+  }
+
+  Future<void> _loadPlayHistory() async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString('history_v1');
+    if (raw == null || !mounted) return;
+    try {
+      final list = (jsonDecode(raw) as List)
+          .map((e) => _trackFromJson(e as Map))
+          .whereType<Track>()
+          .toList();
+      setState(() => _history
+        ..clear()
+        ..addAll(list));
+    } catch (_) {}
+  }
+
+  Future<void> _savePlayHistory() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(
+        'history_v1', jsonEncode(_history.map(_trackToJson).toList()));
+  }
+
+  void _pushPlayHistory(Track t) {
+    _history.removeWhere((h) => h.key == t.key);
+    _history.insert(0, t);
+    if (_history.length > 40) _history.removeRange(40, _history.length);
+    _savePlayHistory();
+  }
+
+  Future<void> _openUrl() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('打开网址 / 直播流'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'https://… (mp4 / m3u8 / 直播流)',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('播放')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final url = ctrl.text.trim();
+    if (!url.startsWith('http')) return;
+    var name = '网络视频';
+    final segs = Uri.tryParse(url)?.pathSegments ?? const [];
+    for (final sg in segs.reversed) {
+      if (sg.isNotEmpty) {
+        name = sg;
+        break;
+      }
+    }
+    _play(Track.online(name, url, tag: '链接'));
+  }
+
+  Widget _historyView(ColorScheme cs) {
+    if (_history.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.history,
+                size: 64, color: cs.primary.withValues(alpha: 0.4)),
+            const SizedBox(height: 12),
+            const Text('还没有播放记录',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: Colors.black54)),
+          ],
+        ),
+      );
+    }
+    return ListView.separated(
+      itemCount: _history.length,
+      separatorBuilder: (_, _) => const Divider(height: 1),
+      itemBuilder: (context, i) => _trackRow(cs, _history[i], i),
+    );
   }
 
   Future<void> _loadProtection() async {
@@ -2083,7 +2200,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.19.1'),
+          title: Text('小李播放器 v2.20.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
