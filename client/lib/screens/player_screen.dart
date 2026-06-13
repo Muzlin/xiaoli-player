@@ -353,6 +353,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _longPressing = false;
   final List<int> _marks = [];
   int _subOffsetMs = 0; // 字幕延迟
+  bool _fadeOut = false; // 结束淡出
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -1243,6 +1244,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (_aPoint != null && _bPoint != null && p >= _bPoint!) {
         _player.seek(_aPoint!);
       }
+      if (_fadeOut && _playing && _duration > Duration.zero) {
+        final rem = (_duration - p).inMilliseconds;
+        if (rem > 0 && rem < 6000) {
+          _player.setVolume((_muted ? 0.0 : _volume) * (rem / 6000));
+        }
+      }
       final sec = p.inSeconds;
       if (widget.onSavePos != null && sec > 0 && (sec - _lastSavedSec).abs() >= 5) {
         _lastSavedSec = sec;
@@ -1314,6 +1321,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _speed = sp);
         _player.setRate(sp);
       }
+      _fadeOut = p.getBool('fade_out') ?? false;
       if ((p.getBool('fade_in') ?? false) && mounted) {
         final target = _muted ? 0.0 : _volume;
         _player.setVolume(0);

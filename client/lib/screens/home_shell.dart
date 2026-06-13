@@ -149,6 +149,7 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
   bool _fadeIn = false; // 起播音量淡入
+  bool _fadeOut = false; // 结束淡出
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1872,6 +1873,7 @@ class _HomeShellState extends State<HomeShell> {
     _seekStep = p.getInt('seek_step') ?? 10;
     _watchSec = p.getInt('watch_sec') ?? 0;
     _fadeIn = p.getBool('fade_in') ?? false;
+    _fadeOut = p.getBool('fade_out') ?? false;
     try {
       final pl = p.getString('playlists_v1');
       if (pl != null) {
@@ -2241,6 +2243,56 @@ class _HomeShellState extends State<HomeShell> {
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
+  }
+
+  Future<void> _changeBiliSign() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修改 B站 签名'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLines: 2,
+            decoration: const InputDecoration(labelText: '新个性签名')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确认')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = await _bili.changeSign(ctrl.text.trim());
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  Future<void> _showMyProfile() async {
+    final info = await _bili.getMyProfile();
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('我的 B站 资料'),
+        content: SelectableText(info),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _setFadeOut(bool v) async {
+    setState(() => _fadeOut = v);
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('fade_out', v);
   }
 
   Map<String, dynamic> _trackToJson(Track t) =>
@@ -2784,7 +2836,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.31.1'),
+          title: Text('小李播放器 v2.32.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2810,6 +2862,20 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('真改你的 B站 账号昵称（受 B站 规则/费用限制）',
               style: TextStyle(fontSize: 12)),
           onTap: _changeBiliName,
+        ),
+        ListTile(
+          leading: const Icon(Icons.edit_note),
+          title: const Text('修改 B站 签名'),
+          subtitle: const Text('改你的 B站 个性签名',
+              style: TextStyle(fontSize: 12)),
+          onTap: _changeBiliSign,
+        ),
+        ListTile(
+          leading: const Icon(Icons.account_box_outlined),
+          title: const Text('我的 B站 资料'),
+          subtitle: const Text('等级 / 硬币 / 关注 / 粉丝',
+              style: TextStyle(fontSize: 12)),
+          onTap: _showMyProfile,
         ),
         ListTile(
           leading: const Icon(Icons.queue_music),
@@ -2846,6 +2912,25 @@ class _HomeShellState extends State<HomeShell> {
               style: TextStyle(fontSize: 12)),
           value: _fadeIn,
           onChanged: _setFadeIn,
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.volume_down_outlined),
+          title: const Text('结束淡出'),
+          subtitle: const Text('接近结尾时音量渐弱',
+              style: TextStyle(fontSize: 12)),
+          value: _fadeOut,
+          onChanged: _setFadeOut,
+        ),
+        ListTile(
+          leading: const Icon(Icons.history_toggle_off),
+          title: const Text('继续上次播放'),
+          subtitle: Text(_history.isEmpty ? '暂无记录' : _history.first.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 12)),
+          onTap: () {
+            if (_history.isNotEmpty) _play(_history.first);
+          },
         ),
         ListTile(
           leading: const Icon(Icons.keyboard_alt_outlined),
@@ -3593,6 +3678,37 @@ class _PlaylistsPage extends StatefulWidget {
 }
 
 class _PlaylistsPageState extends State<_PlaylistsPage> {
+  Future<void> _importM3u() async {
+    final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom, allowedExtensions: ['m3u', 'm3u8', 'txt']);
+    final path = res?.files.single.path;
+    if (path == null) return;
+    final lines = (await File(path).readAsString())
+        .split('\n')
+        .map((e) => e.trim())
+        .where((e) => e.isNotEmpty && !e.startsWith('#'))
+        .toList();
+    final name = path
+        .split(Platform.pathSeparator)
+        .last
+        .replaceAll(RegExp(r'\.(m3u8?|txt)$'), '');
+    final tracks = <Track>[];
+    for (final l in lines) {
+      if (l.startsWith('http')) {
+        tracks.add(Track.online(l.split('/').last, l));
+      } else if (File(l).existsSync()) {
+        tracks.add(Track.local(l));
+      }
+    }
+    if (tracks.isEmpty) return;
+    widget.playlists[name] = tracks;
+    await widget.onSave();
+    if (!mounted) return;
+    setState(() {});
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已导入歌单「$name」（${tracks.length} 首）')));
+  }
+
   Future<void> _exportPlaylist(String name) async {
     final b = StringBuffer('#EXTM3U\n');
     for (final t in widget.playlists[name]!) {
@@ -3613,7 +3729,12 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
   Widget build(BuildContext context) {
     final names = widget.playlists.keys.toList();
     return Scaffold(
-      appBar: AppBar(title: const Text('歌单')),
+      appBar: AppBar(title: const Text('歌单'), actions: [
+        IconButton(
+            icon: const Icon(Icons.file_open_outlined),
+            tooltip: '导入 m3u',
+            onPressed: _importM3u),
+      ]),
       body: names.isEmpty
           ? const Center(
               child: Padding(

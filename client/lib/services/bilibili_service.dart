@@ -651,6 +651,82 @@ class BilibiliService {
     }
   }
 
+  /// 改 B站 个性签名（保留昵称/性别/生日）。
+  Future<String> changeSign(String newSign) async {
+    final jct = _biliJct;
+    if (jct.isEmpty) return '需完整登录(bili_jct)，请扫码登录';
+    try {
+      await _ensureInit();
+      var uname = '';
+      var sex = '保密';
+      var birthday = '0000-00-00';
+      try {
+        final info = jsonDecode((await _http.get(
+                Uri.parse('https://api.bilibili.com/x/space/myinfo'),
+                headers: _headers))
+            .body)['data'];
+        if (info != null) {
+          uname = (info['name'] ?? '') as String;
+          sex = (info['sex'] ?? '保密') as String;
+          birthday = (info['birthday'] ?? '0000-00-00').toString();
+        }
+      } catch (_) {}
+      if (uname.isEmpty) return '获取当前资料失败';
+      final r = await _http
+          .post(Uri.parse('https://api.bilibili.com/x/member/web/update'),
+              headers: {
+                ..._headers,
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Referer': 'https://account.bilibili.com/account/home',
+              },
+              body: {
+                'uname': uname,
+                'usersign': newSign,
+                'sex': sex,
+                'birthday': birthday,
+                'csrf': jct,
+              })
+          .timeout(const Duration(seconds: 15));
+      final d = jsonDecode(r.body);
+      if (d['code'] == 0) return '签名已更新 ✅';
+      return 'B站返回：${d['message'] ?? d['code']}';
+    } catch (e) {
+      return '出错：$e';
+    }
+  }
+
+  /// 我的 B站 资料卡（昵称/UID/等级/硬币/关注/粉丝）。
+  Future<String> getMyProfile() async {
+    try {
+      await _ensureInit();
+      final info = jsonDecode((await _http.get(
+              Uri.parse('https://api.bilibili.com/x/space/myinfo'),
+              headers: _headers))
+          .body)['data'];
+      if (info == null) return '获取失败（需登录）';
+      final mid = info['mid'];
+      var following = '?';
+      var follower = '?';
+      try {
+        final stat = jsonDecode((await _http.get(
+                Uri.parse(
+                    'https://api.bilibili.com/x/relation/stat?vmid=$mid'),
+                headers: _headers))
+            .body)['data'];
+        following = '${stat?['following'] ?? '?'}';
+        follower = '${stat?['follower'] ?? '?'}';
+      } catch (_) {}
+      return '昵称：${info['name'] ?? ''}\n'
+          'UID：$mid\n'
+          '等级：Lv${info['level_info']?['current_level'] ?? '?'}\n'
+          '硬币：${info['coins'] ?? 0}\n'
+          '关注 $following · 粉丝 $follower\n'
+          '签名：${info['sign'] ?? ''}';
+    } catch (e) {
+      return '出错：$e';
+    }
+  }
+
   Future<String> tripleVideo(String bvid) async {
     final e = await _videoAction(
         'https://api.bilibili.com/x/web-interface/archive/like/triple',
