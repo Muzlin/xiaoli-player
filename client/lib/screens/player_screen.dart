@@ -8,7 +8,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../player/playback_source.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
-import 'package:path_provider/path_provider.dart';
+import 'package:file_picker/file_picker.dart';
 
 export '../player/playback_source.dart';
 
@@ -160,14 +160,15 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         return;
       }
-      final dir = (await getDownloadsDirectory()) ??
-          await getApplicationDocumentsDirectory();
-      final path =
-          '${dir.path}/小李播放器截图_${DateTime.now().millisecondsSinceEpoch}.png';
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '保存截图到…',
+        fileName: '小李播放器截图_${DateTime.now().millisecondsSinceEpoch}.png',
+      );
+      if (path == null) return;
       await File(path).writeAsBytes(bytes);
       if (mounted) {
         ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text('已截图到 $path')));
+            .showSnackBar(SnackBar(content: Text('已保存截图：$path')));
       }
     } catch (e) {
       if (mounted) {
