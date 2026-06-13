@@ -26,6 +26,9 @@ class PlayerScreen extends StatefulWidget {
   final Future<List<Danmaku>> Function()? onLoadDanmaku; // 加载弹幕(仅B站)
   final Future<String> Function(String msg, int progressMs, int color)?
       onPostDanmaku;
+  final Future<String> Function()? onLike; // B站点赞
+  final Future<String> Function()? onCoin; // B站投币
+  final Future<String> Function()? onTriple; // B站一键三连
   const PlayerScreen({
     super.key,
     required this.source,
@@ -39,6 +42,9 @@ class PlayerScreen extends StatefulWidget {
     this.onSavePos,
     this.onLoadDanmaku,
     this.onPostDanmaku,
+    this.onLike,
+    this.onCoin,
+    this.onTriple,
   });
 
   @override
@@ -321,6 +327,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _danmakuOn = false;
   List<Danmaku> _danmaku = const [];
   bool _danmakuLoading = false;
+  double _dmOpacity = 1.0;
+  double _dmFontScale = 1.0;
+  int _dmSpeed = 9;
+  int _dmMaxActive = 60;
+  List<String> _dmBlock = const [];
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -405,7 +416,14 @@ class _PlayerScreenState extends State<PlayerScreen>
         Positioned.fill(
           child: IgnorePointer(
             child: _DanmakuLayer(
-                items: _danmaku, position: _position, playing: _playing),
+                items: _danmaku,
+                position: _position,
+                playing: _playing,
+                opacity: _dmOpacity,
+                fontScale: _dmFontScale,
+                speedSec: _dmSpeed,
+                maxActive: _dmMaxActive,
+                block: _dmBlock),
           ),
         ),
       ],
@@ -512,6 +530,102 @@ class _PlayerScreenState extends State<PlayerScreen>
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('发送失败：$err')));
     }
+  }
+
+  Future<void> _bvAction(Future<String> Function()? fn) async {
+    if (fn == null) return;
+    final msg = await fn();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+    }
+  }
+
+  Future<void> _loadSubtitleFile() async {
+    final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom, allowedExtensions: ['srt', 'ass', 'vtt', 'txt']);
+    final path = res?.files.single.path;
+    if (path == null) return;
+    try {
+      final content = await File(path).readAsString();
+      if (!mounted) return;
+      setState(() {
+        _subtitle = content;
+        _subtitleOn = true;
+        _subApplied = false;
+      });
+      _applySubtitle();
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('已加载外挂字幕')));
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('字幕加载失败：$e')));
+      }
+    }
+  }
+
+  Widget _dmSlider(String label, double v, double min, double max,
+      ValueChanged<double> onCh, StateSetter setS) {
+    return Row(children: [
+      SizedBox(
+          width: 110,
+          child: Text(label,
+              style: const TextStyle(color: Colors.white70, fontSize: 13))),
+      Expanded(
+        child: Slider(
+          value: v.clamp(min, max),
+          min: min,
+          max: max,
+          onChanged: (x) {
+            onCh(x);
+            setS(() {});
+          },
+        ),
+      ),
+    ]);
+  }
+
+  void _showDanmakuSettings() {
+    final blockCtrl = TextEditingController(text: _dmBlock.join(' '));
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setS) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 28),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('弹幕设置',
+                  style: TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+              _dmSlider('不透明度', _dmOpacity, 0.2, 1.0,
+                  (v) => setState(() => _dmOpacity = v), setS),
+              _dmSlider('字号', _dmFontScale, 0.6, 1.8,
+                  (v) => setState(() => _dmFontScale = v), setS),
+              _dmSlider('速度(大=慢)', _dmSpeed.toDouble(), 4, 16,
+                  (v) => setState(() => _dmSpeed = v.round()), setS),
+              _dmSlider('密度上限', _dmMaxActive.toDouble(), 10, 100,
+                  (v) => setState(() => _dmMaxActive = v.round()), setS),
+              const SizedBox(height: 6),
+              TextField(
+                controller: blockCtrl,
+                style: const TextStyle(color: Colors.white),
+                decoration: const InputDecoration(
+                  labelText: '屏蔽词（空格分隔）',
+                  labelStyle: TextStyle(color: Colors.white54),
+                ),
+                onChanged: (val) => setState(() => _dmBlock = val
+                    .split(RegExp(r'\s+'))
+                    .where((e) => e.isNotEmpty)
+                    .toList()),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _fullscreenView(ColorScheme cs) {
@@ -1069,9 +1183,49 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'copy':
                   _copyLink();
                   break;
+                case 'like':
+                  _bvAction(widget.onLike);
+                  break;
+                case 'coin':
+                  _bvAction(widget.onCoin);
+                  break;
+                case 'triple':
+                  _bvAction(widget.onTriple);
+                  break;
+                case 'dmset':
+                  _showDanmakuSettings();
+                  break;
+                case 'subfile':
+                  _loadSubtitleFile();
+                  break;
               }
             },
             itemBuilder: (_) => [
+              if (widget.onTriple != null) ...[
+                const PopupMenuItem(
+                    value: 'triple',
+                    child: Text('一键三连 🎉',
+                        style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'like',
+                    child:
+                        Text('点赞 👍', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'coin',
+                    child:
+                        Text('投币 🪙', style: TextStyle(color: Colors.white))),
+                const PopupMenuDivider(),
+              ],
+              if (widget.onLoadDanmaku != null)
+                const PopupMenuItem(
+                    value: 'dmset',
+                    child:
+                        Text('弹幕设置', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'subfile',
+                  child: Text('加载外挂字幕',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuDivider(),
               CheckedPopupMenuItem(
                 value: 'loop',
                 checked: _loop,
@@ -1519,8 +1673,20 @@ class _DanmakuLayer extends StatefulWidget {
   final List<Danmaku> items;
   final Duration position;
   final bool playing;
+  final double opacity;
+  final double fontScale;
+  final int speedSec;
+  final int maxActive;
+  final List<String> block;
   const _DanmakuLayer(
-      {required this.items, required this.position, required this.playing});
+      {required this.items,
+      required this.position,
+      required this.playing,
+      this.opacity = 1.0,
+      this.fontScale = 1.0,
+      this.speedSec = 9,
+      this.maxActive = 60,
+      this.block = const []});
   @override
   State<_DanmakuLayer> createState() => _DanmakuLayerState();
 }
@@ -1582,7 +1748,8 @@ class _DanmakuLayerState extends State<_DanmakuLayer> {
   }
 
   void _spawn(Danmaku d, double pos) {
-    if (_active.length > 60) return;
+    if (_active.length > widget.maxActive) return;
+    if (widget.block.any((w) => w.isNotEmpty && d.text.contains(w))) return;
     var track = 0;
     var best = double.infinity;
     for (var i = 0; i < _tracks; i++) {
@@ -1602,19 +1769,24 @@ class _DanmakuLayerState extends State<_DanmakuLayer> {
 
   @override
   Widget build(BuildContext context) {
-    return ClipRect(
-      child: Stack(
-        children: [
-          for (final d in _active)
-            _FlyingDanmaku(
-              key: d.key,
-              text: d.text,
-              color: d.color,
-              track: d.track,
-              playing: widget.playing,
-              onDone: () => _remove(d.key),
-            ),
-        ],
+    return Opacity(
+      opacity: widget.opacity,
+      child: ClipRect(
+        child: Stack(
+          children: [
+            for (final d in _active)
+              _FlyingDanmaku(
+                key: d.key,
+                text: d.text,
+                color: d.color,
+                track: d.track,
+                playing: widget.playing,
+                fontScale: widget.fontScale,
+                speedSec: widget.speedSec,
+                onDone: () => _remove(d.key),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1625,6 +1797,8 @@ class _FlyingDanmaku extends StatefulWidget {
   final Color color;
   final int track;
   final bool playing;
+  final double fontScale;
+  final int speedSec;
   final VoidCallback onDone;
   const _FlyingDanmaku(
       {super.key,
@@ -1632,7 +1806,9 @@ class _FlyingDanmaku extends StatefulWidget {
       required this.color,
       required this.track,
       required this.playing,
-      required this.onDone});
+      required this.onDone,
+      this.fontScale = 1.0,
+      this.speedSec = 9});
   @override
   State<_FlyingDanmaku> createState() => _FlyingDanmakuState();
 }
@@ -1644,7 +1820,8 @@ class _FlyingDanmakuState extends State<_FlyingDanmaku>
   @override
   void initState() {
     super.initState();
-    _c = AnimationController(vsync: this, duration: const Duration(seconds: 9))
+    _c = AnimationController(
+        vsync: this, duration: Duration(seconds: widget.speedSec))
       ..addStatusListener((st) {
         if (st == AnimationStatus.completed) widget.onDone();
       });
@@ -1677,14 +1854,14 @@ class _FlyingDanmakuState extends State<_FlyingDanmaku>
       builder: (ctx, _) {
         final x = w - _c.value * (w + 260);
         return Transform.translate(
-          offset: Offset(x, 6.0 + widget.track * 27.0),
+          offset: Offset(x, 6.0 + widget.track * 27.0 * widget.fontScale),
           child: Text(
             widget.text,
             maxLines: 1,
             softWrap: false,
             style: TextStyle(
               color: widget.color,
-              fontSize: 19,
+              fontSize: 19 * widget.fontScale,
               fontWeight: FontWeight.w500,
               shadows: const [
                 Shadow(color: Colors.black, blurRadius: 2),

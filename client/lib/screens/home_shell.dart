@@ -139,6 +139,7 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
   final List<Track> _history = []; // 最近播放
   bool _shuffle = false; // 随机播放
+  int _skipIntro = 0; // 片头跳过秒数
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1317,7 +1318,7 @@ class _HomeShellState extends State<HomeShell> {
             : null,
         onPostComment:
             t.bvid != null ? (msg) => _bili.postComment(t.bvid!, msg) : null,
-        startAt: Duration(seconds: _resume[t.key] ?? 0),
+        startAt: Duration(seconds: _resume[t.key] ?? _skipIntro),
         onSavePos: (sec) {
           _resume[t.key] = sec;
           _saveResume();
@@ -1327,6 +1328,9 @@ class _HomeShellState extends State<HomeShell> {
             ? (msg, ms, color) =>
                 _bili.postDanmaku(t.bvid!, msg, ms, color: color)
             : null,
+        onLike: t.bvid != null ? () => _bili.likeVideo(t.bvid!) : null,
+        onCoin: t.bvid != null ? () => _bili.coinVideo(t.bvid!) : null,
+        onTriple: t.bvid != null ? () => _bili.tripleVideo(t.bvid!) : null,
       ),
     );
     if (replace) {
@@ -1742,6 +1746,7 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _loadResume() async {
     final p = await SharedPreferences.getInstance();
+    _skipIntro = p.getInt('skip_intro') ?? 0;
     final raw = p.getString('resume_v1');
     if (raw == null || !mounted) return;
     try {
@@ -1756,6 +1761,35 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _saveResume() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('resume_v1', jsonEncode(_resume));
+  }
+
+  Future<void> _setSkipIntro() async {
+    final ctrl = TextEditingController(text: '$_skipIntro');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('片头跳过秒数'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(hintText: '0 = 关闭'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final v = int.tryParse(ctrl.text.trim()) ?? 0;
+    setState(() => _skipIntro = v < 0 ? 0 : v);
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('skip_intro', _skipIntro);
   }
 
   Map<String, dynamic> _trackToJson(Track t) =>
@@ -2247,7 +2281,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.23.0'),
+          title: Text('小李播放器 v2.24.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         SwitchListTile(
@@ -2257,6 +2291,14 @@ class _HomeShellState extends State<HomeShell> {
               style: TextStyle(fontSize: 12)),
           value: _shuffle,
           onChanged: (v) => setState(() => _shuffle = v),
+        ),
+        ListTile(
+          leading: const Icon(Icons.fast_forward),
+          title: const Text('片头跳过'),
+          subtitle: Text(
+              _skipIntro > 0 ? '起播自动跳过 $_skipIntro 秒' : '关闭（点击设置）',
+              style: const TextStyle(fontSize: 12)),
+          onTap: _setSkipIntro,
         ),
         ListTile(
           leading: const Icon(Icons.system_update),
