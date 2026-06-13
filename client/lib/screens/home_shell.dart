@@ -146,6 +146,7 @@ class _HomeShellState extends State<HomeShell> {
   int _seekStep = 10; // 快进/快退步长
   String _searchOrder = ''; // B站搜索排序
   int _watchSec = 0; // 累计观看秒
+  final Map<String, double> _speeds = {}; // 倍速按视频记忆
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1348,6 +1349,11 @@ class _HomeShellState extends State<HomeShell> {
           _bookmarks[t.key] = list;
           _saveBookmarks();
         },
+        initialSpeed: _speeds[t.key] ?? 0,
+        onSaveSpeed: (sp) {
+          _speeds[t.key] = sp;
+          _saveSpeeds();
+        },
       ),
     );
     if (replace) {
@@ -1520,6 +1526,44 @@ class _HomeShellState extends State<HomeShell> {
                   value: 'l_name',
                   child: Text('本地按名称排序',
                       style: TextStyle(color: Colors.white))),
+            ],
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'B站发现',
+            icon: const Icon(Icons.explore_outlined, color: Colors.white70),
+            color: const Color(0xFF2B2B33),
+            onSelected: (v) {
+              Future<List<BiliTrack>> Function() fn;
+              String title;
+              if (v == 'popular') {
+                fn = () => _bili.getPopular();
+                title = 'B站 热门';
+              } else if (v == 'toview') {
+                fn = () => _bili.getToView();
+                title = '稍后再看';
+              } else {
+                fn = () => _bili.getHistory();
+                title = '观看历史';
+              }
+              Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => _BiliListPage(
+                      title: title,
+                      fetch: fn,
+                      onPlay: (bvid, t) => _play(Track.bili(t, bvid)))));
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                  value: 'popular',
+                  child:
+                      Text('🔥 B站热门', style: TextStyle(color: Colors.white))),
+              PopupMenuItem(
+                  value: 'toview',
+                  child:
+                      Text('⏰ 稍后再看', style: TextStyle(color: Colors.white))),
+              PopupMenuItem(
+                  value: 'history',
+                  child:
+                      Text('🕐 观看历史', style: TextStyle(color: Colors.white))),
             ],
           ),
           const SizedBox(width: 8),
@@ -1809,6 +1853,13 @@ class _HomeShellState extends State<HomeShell> {
     _seekStep = p.getInt('seek_step') ?? 10;
     _watchSec = p.getInt('watch_sec') ?? 0;
     try {
+      final sm = p.getString('speeds_v1');
+      if (sm != null) {
+        (jsonDecode(sm) as Map)
+            .forEach((k, v) => _speeds[k as String] = (v as num).toDouble());
+      }
+    } catch (_) {}
+    try {
       final bm = p.getString('bookmarks_v1');
       if (bm != null) {
         (jsonDecode(bm) as Map).forEach((k, v) =>
@@ -1836,6 +1887,11 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _saveBookmarks() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('bookmarks_v1', jsonEncode(_bookmarks));
+  }
+
+  Future<void> _saveSpeeds() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('speeds_v1', jsonEncode(_speeds));
   }
 
   Future<void> _setSkipIntro() async {
@@ -2543,7 +2599,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.28.0'),
+          title: Text('小李播放器 v2.29.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -3201,6 +3257,67 @@ class _PasswordProtectPageState extends State<_PasswordProtectPage> {
             ),
         ],
       ),
+    );
+  }
+}
+
+class _BiliListPage extends StatefulWidget {
+  final String title;
+  final Future<List<BiliTrack>> Function() fetch;
+  final void Function(String bvid, String title) onPlay;
+  const _BiliListPage(
+      {required this.title, required this.fetch, required this.onPlay});
+  @override
+  State<_BiliListPage> createState() => _BiliListPageState();
+}
+
+class _BiliListPageState extends State<_BiliListPage> {
+  List<BiliTrack> _list = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final l = await widget.fetch();
+    if (mounted) {
+      setState(() {
+        _list = l;
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.title)),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _list.isEmpty
+              ? const Center(
+                  child: Padding(
+                      padding: EdgeInsets.all(24),
+                      child: Text('没有内容（可能需要登录或接口受限）',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Colors.black54))))
+              : ListView.separated(
+                  itemCount: _list.length,
+                  separatorBuilder: (_, _) => const Divider(height: 1),
+                  itemBuilder: (ctx, i) => ListTile(
+                    leading: const Icon(Icons.play_circle_outline),
+                    title: Text(_list[i].title,
+                        maxLines: 2, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(_list[i].author,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    onTap: () {
+                      widget.onPlay(_list[i].bvid, _list[i].title);
+                    },
+                  ),
+                ),
     );
   }
 }

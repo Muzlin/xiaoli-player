@@ -33,6 +33,8 @@ class PlayerScreen extends StatefulWidget {
   final int seekStep; // 快进/快退步长
   final List<int> bookmarks; // 时间戳书签(秒)
   final void Function(List<int>)? onSaveBookmarks;
+  final double initialSpeed; // 该视频上次倍速
+  final void Function(double)? onSaveSpeed;
   const PlayerScreen({
     super.key,
     required this.source,
@@ -53,6 +55,8 @@ class PlayerScreen extends StatefulWidget {
     this.seekStep = 10,
     this.bookmarks = const [],
     this.onSaveBookmarks,
+    this.initialSpeed = 0,
+    this.onSaveSpeed,
   });
 
   @override
@@ -830,6 +834,26 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _autoLoadSidecarSub(String videoPath) {
+    final dot = videoPath.lastIndexOf('.');
+    if (dot < 0) return;
+    final base = videoPath.substring(0, dot);
+    for (final ext in ['.srt', '.ass', '.vtt']) {
+      final fs = File('$base$ext');
+      if (fs.existsSync()) {
+        try {
+          final content = fs.readAsStringSync();
+          if (content.isNotEmpty) {
+            _subtitle = content;
+            _subtitleOn = true;
+            _subApplied = false;
+          }
+        } catch (_) {}
+        break;
+      }
+    }
+  }
+
   Future<void> _loadSubtitleFile() async {
     final res = await FilePicker.platform.pickFiles(
         type: FileType.custom, allowedExtensions: ['srt', 'ass', 'vtt', 'txt']);
@@ -1056,6 +1080,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     setState(() => _speed = v);
     _player.setRate(v);
     SharedPreferences.getInstance().then((p) => p.setDouble('player_speed', v));
+    widget.onSaveSpeed?.call(v);
   }
 
   void _showSpeedSheet() {
@@ -1143,6 +1168,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _fav = widget.isFavorite;
     _marks.addAll(widget.bookmarks);
+    if (!widget.source.resource.startsWith('http')) {
+      _autoLoadSidecarSub(widget.source.resource);
+    }
     _subs.add(_player.stream.completed.listen((done) {
       if (done && !_loop && !_stopAtEnd && mounted) widget.onCompleted?.call();
     }));
@@ -1217,7 +1245,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() => _volume = v);
         _player.setVolume(v);
       }
-      final sp = p.getDouble('player_speed');
+      final sp = widget.initialSpeed > 0
+          ? widget.initialSpeed
+          : p.getDouble('player_speed');
       if (sp != null && sp != 1.0 && mounted) {
         setState(() => _speed = sp);
         _player.setRate(sp);

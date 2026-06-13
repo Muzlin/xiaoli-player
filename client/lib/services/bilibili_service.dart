@@ -762,6 +762,73 @@ class BilibiliService {
     }
   }
 
+  Future<List<BiliTrack>> getPopular({int pn = 1}) async {
+    try {
+      await _ensureInit();
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/popular?ps=30&pn=$pn'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 12));
+      final list = (jsonDecode(r.body)['data']?['list'] as List?) ?? [];
+      return list
+          .map((e) => BiliTrack(
+                bvid: (e['bvid'] ?? '') as String,
+                title: cleanTitle((e['title'] ?? '') as String),
+                author: (e['owner']?['name'] ?? '') as String,
+              ))
+          .where((t) => t.bvid.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<List<BiliTrack>> getToView() async {
+    try {
+      await _ensureInit();
+      final r = await _http
+          .get(Uri.parse('https://api.bilibili.com/x/v2/history/toview'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 12));
+      final list = (jsonDecode(r.body)['data']?['list'] as List?) ?? [];
+      return list
+          .map((e) => BiliTrack(
+                bvid: (e['bvid'] ?? '') as String,
+                title: cleanTitle((e['title'] ?? '') as String),
+                author: (e['owner']?['name'] ?? '') as String,
+              ))
+          .where((t) => t.bvid.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  Future<List<BiliTrack>> getHistory() async {
+    try {
+      await _ensureInit();
+      final r = await _http
+          .get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/history/cursor?ps=30'),
+              headers: _headers)
+          .timeout(const Duration(seconds: 12));
+      final list = (jsonDecode(r.body)['data']?['list'] as List?) ?? [];
+      return list
+          .map((e) => BiliTrack(
+                bvid: (e['history']?['bvid'] ?? '') as String,
+                title: cleanTitle((e['title'] ?? '') as String),
+                author: (e['author_name'] ?? '') as String,
+              ))
+          .where((t) => t.bvid.isNotEmpty)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
   /// 取某视频的相关推荐（用于自动连播）。失败返回空。
   Future<List<BiliTrack>> getRelated(String bvid) async {
     try {
