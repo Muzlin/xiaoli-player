@@ -355,6 +355,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
+  bool _sleepExit = false; // 到点退出app(否则暂停)
 
   bool _fav = false; // 播放页内收藏态
   bool _fullscreen = false;
@@ -394,6 +395,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (min != null) {
       _sleepTimer = Timer(Duration(minutes: min), () {
         if (!mounted) return;
+        if (_sleepExit) {
+          exit(0);
+        }
         _player.pause();
         setState(() => _sleepMin = null);
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1083,6 +1087,32 @@ class _PlayerScreenState extends State<PlayerScreen>
     widget.onSaveSpeed?.call(v);
   }
 
+  Future<void> _customSleep() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('自定义睡眠分钟'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            keyboardType: TextInputType.number,
+            decoration: const InputDecoration(hintText: '分钟')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确定')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final m = int.tryParse(ctrl.text.trim()) ?? 0;
+    if (m > 0) _setSleep(m);
+  }
+
   void _showSpeedSheet() {
     final cs = Theme.of(context).colorScheme;
     showModalBottomSheet<void>(
@@ -1495,6 +1525,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 's60':
                   _setSleep(60);
                   break;
+                case 's_custom':
+                  _customSleep();
+                  break;
+                case 'sleep_exit':
+                  setState(() => _sleepExit = !_sleepExit);
+                  break;
                 case 'jump':
                   _jumpTo();
                   break;
@@ -1659,6 +1695,15 @@ class _PlayerScreenState extends State<PlayerScreen>
                   checked: _sleepMin == 60,
                   child:
                       const Text('60 分钟', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 's_custom',
+                  child:
+                      Text('自定义…', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'sleep_exit',
+                  checked: _sleepExit,
+                  child: const Text('到点退出App（否则暂停）',
+                      style: TextStyle(color: Colors.white))),
               const PopupMenuDivider(),
               const PopupMenuItem(
                   value: 'jump',

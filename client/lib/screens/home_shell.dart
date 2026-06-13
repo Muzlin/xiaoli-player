@@ -147,6 +147,7 @@ class _HomeShellState extends State<HomeShell> {
   String _searchOrder = ''; // B站搜索排序
   int _watchSec = 0; // 累计观看秒
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
+  final Map<String, List<Track>> _playlists = {}; // 本地歌单
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1499,6 +1500,15 @@ class _HomeShellState extends State<HomeShell> {
                 if (_query.trim().isNotEmpty) _searchOnline(_query);
               } else if (v == 'l_name') {
                 _sortLocal();
+              } else if (v == 'l_recent') {
+                final r = _localTracks.reversed.toList();
+                setState(() => _localTracks
+                  ..clear()
+                  ..addAll(r));
+                _saveLocalOrder();
+              } else if (v == 'l_shuffle') {
+                setState(() => _localTracks.shuffle());
+                _saveLocalOrder();
               }
             },
             itemBuilder: (_) => [
@@ -1525,6 +1535,14 @@ class _HomeShellState extends State<HomeShell> {
               const PopupMenuItem(
                   value: 'l_name',
                   child: Text('本地按名称排序',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'l_recent',
+                  child: Text('本地最近添加在前',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'l_shuffle',
+                  child: Text('本地随机打乱',
                       style: TextStyle(color: Colors.white))),
             ],
           ),
@@ -1853,6 +1871,16 @@ class _HomeShellState extends State<HomeShell> {
     _seekStep = p.getInt('seek_step') ?? 10;
     _watchSec = p.getInt('watch_sec') ?? 0;
     try {
+      final pl = p.getString('playlists_v1');
+      if (pl != null) {
+        (jsonDecode(pl) as Map).forEach((k, v) => _playlists[k as String] =
+            (v as List)
+                .map((e) => Track.fromJson(e as Map<String, dynamic>))
+                .where((t) => t.isValid)
+                .toList());
+      }
+    } catch (_) {}
+    try {
       final sm = p.getString('speeds_v1');
       if (sm != null) {
         (jsonDecode(sm) as Map)
@@ -1892,6 +1920,67 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _saveSpeeds() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('speeds_v1', jsonEncode(_speeds));
+  }
+
+  Future<void> _savePlaylists() async {
+    final p = await SharedPreferences.getInstance();
+    final m = _playlists.map(
+        (k, v) => MapEntry(k, v.map((t) => t.toJson()).toList()));
+    await p.setString('playlists_v1', jsonEncode(m));
+  }
+
+  Future<void> _saveLocalOrder() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList(
+        _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  Future<void> _addToPlaylist(Track t) async {
+    final names = _playlists.keys.toList();
+    final choice = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('加入歌单'),
+        children: [
+          for (final n in names)
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, n),
+                child: Text('$n（${_playlists[n]!.length}）')),
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, '__new__'),
+              child: const Text('＋ 新建歌单')),
+        ],
+      ),
+    );
+    if (choice == null) return;
+    var name = choice;
+    if (choice == '__new__') {
+      final ctrl = TextEditingController();
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('新建歌单'),
+          content: TextField(controller: ctrl, autofocus: true),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('创建')),
+          ],
+        ),
+      );
+      if (ok != true || ctrl.text.trim().isEmpty) return;
+      name = ctrl.text.trim();
+    }
+    final list = _playlists[name] ??= [];
+    if (!list.any((x) => x.key == t.key)) list.add(t);
+    await _savePlaylists();
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已加入歌单「$name」')));
+    }
   }
 
   Future<void> _setSkipIntro() async {
@@ -2386,6 +2475,8 @@ class _HomeShellState extends State<HomeShell> {
   void _showRowMenu(Track t, Offset pos) {
     final items = <PopupMenuEntry<String>>[
       PopupMenuItem(value: 'fav', child: Text(_isFav(t) ? '取消收藏' : '收藏')),
+      const PopupMenuItem(value: 'playlist', child: Text('加入歌单')),
+      const PopupMenuItem(value: 'copyname', child: Text('复制名称')),
     ];
     if (t.isLocal) {
       items.add(const PopupMenuItem(value: 'remove', child: Text('从列表移除')));
@@ -2400,6 +2491,12 @@ class _HomeShellState extends State<HomeShell> {
         _toggleFav(t);
       } else if (v == 'remove') {
         _removeLocal(t);
+      } else if (v == 'playlist') {
+        _addToPlaylist(t);
+      } else if (v == 'copyname') {
+        Clipboard.setData(ClipboardData(text: t.name));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已复制名称')));
       }
     });
   }
@@ -2599,7 +2696,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.29.0'),
+          title: Text('小李播放器 v2.30.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2618,6 +2715,52 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('修改显示名字 / 头像（上传到平台时用）',
               style: TextStyle(fontSize: 12)),
           onTap: _editProfile,
+        ),
+        ListTile(
+          leading: const Icon(Icons.queue_music),
+          title: const Text('歌单'),
+          subtitle: Text('${_playlists.length} 个歌单（右键曲目可加入）',
+              style: const TextStyle(fontSize: 12)),
+          onTap: () async {
+            await Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => _PlaylistsPage(
+                    playlists: _playlists,
+                    onPlay: _play,
+                    onSave: _savePlaylists)));
+            setState(() {});
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.keyboard_alt_outlined),
+          title: const Text('快捷键 / 手势速查'),
+          subtitle: const Text('查看播放器快捷键与手势',
+              style: TextStyle(fontSize: 12)),
+          onTap: () => showDialog<void>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: const Text('快捷键 / 手势'),
+              content: const SingleChildScrollView(
+                child: Text(
+                    '播放页手势：\n'
+                    '· 单击画面：播放 / 暂停\n'
+                    '· 双击画面：进全屏\n'
+                    '· 长按画面：2 倍速快进\n'
+                    '· 上下滑动：右半调音量 / 左半调亮度\n\n'
+                    '播放页按钮：\n'
+                    '· 🔖 加书签，⋮ 菜单可跳转/导出/音轨/弹幕设置等\n'
+                    '· A-B 图标：复读片段\n'
+                    '· 截图、倍速、全屏、迷你窗（mac）\n\n'
+                    '全局（mac）：\n'
+                    '· 设置里可设「唤起 / 隐藏」全局快捷键\n'
+                    '· ⌘Q 退出（可设确认 / 密码 / 禁止退出）'),
+              ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('好')),
+              ],
+            ),
+          ),
         ),
         ListTile(
           leading: const Icon(Icons.timelapse),
@@ -3318,6 +3461,68 @@ class _BiliListPageState extends State<_BiliListPage> {
                     },
                   ),
                 ),
+    );
+  }
+}
+
+class _PlaylistsPage extends StatefulWidget {
+  final Map<String, List<Track>> playlists;
+  final void Function(Track) onPlay;
+  final Future<void> Function() onSave;
+  const _PlaylistsPage(
+      {required this.playlists, required this.onPlay, required this.onSave});
+  @override
+  State<_PlaylistsPage> createState() => _PlaylistsPageState();
+}
+
+class _PlaylistsPageState extends State<_PlaylistsPage> {
+  @override
+  Widget build(BuildContext context) {
+    final names = widget.playlists.keys.toList();
+    return Scaffold(
+      appBar: AppBar(title: const Text('歌单')),
+      body: names.isEmpty
+          ? const Center(
+              child: Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text('还没有歌单\n右键任意曲目 →「加入歌单」即可创建',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.black54))))
+          : ListView(
+              children: [
+                for (final n in names)
+                  ExpansionTile(
+                    leading: const Icon(Icons.queue_music),
+                    title: Text('$n（${widget.playlists[n]!.length}）'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      onPressed: () async {
+                        widget.playlists.remove(n);
+                        await widget.onSave();
+                        setState(() {});
+                      },
+                    ),
+                    children: [
+                      for (final t in widget.playlists[n]!)
+                        ListTile(
+                          leading: const Icon(Icons.play_arrow),
+                          title: Text(t.name,
+                              maxLines: 1, overflow: TextOverflow.ellipsis),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.close, size: 18),
+                            onPressed: () async {
+                              widget.playlists[n]!
+                                  .removeWhere((x) => x.key == t.key);
+                              await widget.onSave();
+                              setState(() {});
+                            },
+                          ),
+                          onTap: () => widget.onPlay(t),
+                        ),
+                    ],
+                  ),
+              ],
+            ),
     );
   }
 }
