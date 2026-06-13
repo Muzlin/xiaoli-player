@@ -23,6 +23,7 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function(String message)? onPostComment; // 发评论(仅 B站)
   final Duration startAt; // 断点续播起点
   final void Function(int seconds)? onSavePos; // 保存播放进度
+  final Future<List<Danmaku>> Function()? onLoadDanmaku; // 加载弹幕(仅B站)
   const PlayerScreen({
     super.key,
     required this.source,
@@ -34,6 +35,7 @@ class PlayerScreen extends StatefulWidget {
     this.onPostComment,
     this.startAt = Duration.zero,
     this.onSavePos,
+    this.onLoadDanmaku,
   });
 
   @override
@@ -313,6 +315,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   Duration? _aPoint; // A-B 循环 A 点
   Duration? _bPoint; // A-B 循环 B 点
   int _rotation = 0; // 旋转 0/1/2/3×90°
+  bool _danmakuOn = false;
+  List<Danmaku> _danmaku = const [];
+  bool _danmakuLoading = false;
   bool _flipH = false; // 水平镜像
   Timer? _sleepTimer;
   int? _sleepMin;
@@ -377,7 +382,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _videoView() {
-    return ClipRect(
+    final video = ClipRect(
       child: Transform.rotate(
         angle: _rotation * 1.5707963267948966,
         child: Transform.scale(
@@ -389,6 +394,38 @@ class _PlayerScreenState extends State<PlayerScreen>
         ),
       ),
     );
+    if (!_danmakuOn) return video;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        video,
+        Positioned.fill(
+          child: IgnorePointer(
+            child: _DanmakuLayer(
+                items: _danmaku, position: _position, playing: _playing),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _toggleDanmaku() async {
+    if (!_danmakuOn && _danmaku.isEmpty && widget.onLoadDanmaku != null) {
+      setState(() => _danmakuLoading = true);
+      final list = await widget.onLoadDanmaku!();
+      if (!mounted) return;
+      setState(() {
+        _danmaku = list;
+        _danmakuLoading = false;
+        _danmakuOn = list.isNotEmpty;
+      });
+      if (list.isEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('没有获取到弹幕')));
+      }
+      return;
+    }
+    setState(() => _danmakuOn = !_danmakuOn);
   }
 
   Widget _fullscreenView(ColorScheme cs) {
@@ -846,6 +883,15 @@ class _PlayerScreenState extends State<PlayerScreen>
                         : Icons.picture_in_picture_alt,
                     color: _mini ? cs.primary : Colors.white70),
                 onPressed: _toggleMini,
+              ),
+            if (widget.onLoadDanmaku != null)
+              IconButton(
+                tooltip: _danmakuOn ? '关闭弹幕' : '弹幕',
+                icon: Icon(_danmakuOn ? Icons.forum : Icons.forum_outlined,
+                    color: _danmakuOn
+                        ? Colors.lightBlueAccent
+                        : Colors.white70),
+                onPressed: _danmakuLoading ? null : _toggleDanmaku,
               ),
             IconButton(
               tooltip: 'A-B 循环（复读片段）',
@@ -1366,6 +1412,190 @@ class _CommentsSheetState extends State<_CommentsSheet> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 弹幕图层：按播放进度发射弹幕，每条独立动画从右向左滚动；暂停/跳转同步。
+class _DanmakuLayer extends StatefulWidget {
+  final List<Danmaku> items;
+  final Duration position;
+  final bool playing;
+  const _DanmakuLayer(
+      {required this.items, required this.position, required this.playing});
+  @override
+  State<_DanmakuLayer> createState() => _DanmakuLayerState();
+}
+
+class _DmItem {
+  final Key key;
+  final String text;
+  final Color color;
+  final int track;
+  _DmItem(this.key, this.text, this.color, this.track);
+}
+
+class _DanmakuLayerState extends State<_DanmakuLayer> {
+  static const _tracks = 8;
+  final List<_DmItem> _active = [];
+  final List<double> _trackFreeAt = List.filled(_tracks, 0);
+  double _lastSec = -2;
+  int _idx = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _resync();
+  }
+
+  void _resync() {
+    final pos = widget.position.inMilliseconds / 1000.0;
+    _active.clear();
+    for (var i = 0; i < _tracks; i++) {
+      _trackFreeAt[i] = 0;
+    }
+    _idx = 0;
+    while (_idx < widget.items.length && widget.items[_idx].time < pos) {
+      _idx++;
+    }
+    _lastSec = pos;
+  }
+
+  @override
+  void didUpdateWidget(_DanmakuLayer old) {
+    super.didUpdateWidget(old);
+    if (!identical(old.items, widget.items)) {
+      setState(_resync);
+      return;
+    }
+    final pos = widget.position.inMilliseconds / 1000.0;
+    if ((pos - _lastSec).abs() > 1.5) {
+      setState(_resync);
+      return;
+    }
+    var fired = false;
+    while (_idx < widget.items.length && widget.items[_idx].time <= pos) {
+      _spawn(widget.items[_idx], pos);
+      _idx++;
+      fired = true;
+    }
+    _lastSec = pos;
+    if (fired) setState(() {});
+  }
+
+  void _spawn(Danmaku d, double pos) {
+    if (_active.length > 60) return;
+    var track = 0;
+    var best = double.infinity;
+    for (var i = 0; i < _tracks; i++) {
+      if (_trackFreeAt[i] < best) {
+        best = _trackFreeAt[i];
+        track = i;
+      }
+    }
+    _trackFreeAt[track] = pos + 0.9;
+    _active.add(_DmItem(
+        UniqueKey(), d.text, Color(0xFF000000 | (d.color & 0xFFFFFF)), track));
+  }
+
+  void _remove(Key k) {
+    if (mounted) setState(() => _active.removeWhere((d) => d.key == k));
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: Stack(
+        children: [
+          for (final d in _active)
+            _FlyingDanmaku(
+              key: d.key,
+              text: d.text,
+              color: d.color,
+              track: d.track,
+              playing: widget.playing,
+              onDone: () => _remove(d.key),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FlyingDanmaku extends StatefulWidget {
+  final String text;
+  final Color color;
+  final int track;
+  final bool playing;
+  final VoidCallback onDone;
+  const _FlyingDanmaku(
+      {super.key,
+      required this.text,
+      required this.color,
+      required this.track,
+      required this.playing,
+      required this.onDone});
+  @override
+  State<_FlyingDanmaku> createState() => _FlyingDanmakuState();
+}
+
+class _FlyingDanmakuState extends State<_FlyingDanmaku>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c;
+
+  @override
+  void initState() {
+    super.initState();
+    _c = AnimationController(vsync: this, duration: const Duration(seconds: 9))
+      ..addStatusListener((st) {
+        if (st == AnimationStatus.completed) widget.onDone();
+      });
+    if (widget.playing) _c.forward();
+  }
+
+  @override
+  void didUpdateWidget(_FlyingDanmaku old) {
+    super.didUpdateWidget(old);
+    if (widget.playing &&
+        !_c.isAnimating &&
+        _c.status != AnimationStatus.completed) {
+      _c.forward();
+    } else if (!widget.playing && _c.isAnimating) {
+      _c.stop();
+    }
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final w = MediaQuery.of(context).size.width;
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (ctx, _) {
+        final x = w - _c.value * (w + 260);
+        return Transform.translate(
+          offset: Offset(x, 6.0 + widget.track * 27.0),
+          child: Text(
+            widget.text,
+            maxLines: 1,
+            softWrap: false,
+            style: TextStyle(
+              color: widget.color,
+              fontSize: 19,
+              fontWeight: FontWeight.w500,
+              shadows: const [
+                Shadow(color: Colors.black, blurRadius: 2),
+                Shadow(color: Colors.black, blurRadius: 3),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 }

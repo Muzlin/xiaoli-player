@@ -51,8 +51,10 @@ class Track {
   /// 仅本地/直链可用；B站曲目在播放前异步解析。
   PlaybackSource toSource() => isLocal
       ? PlaybackSource.local(localPath!)
-      : PlaybackSource.stream(url!, const {},
-          title: name, isVideo: _onlineIsVideo());
+      : PlaybackSource.stream(url!, const {
+          'User-Agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        }, title: name, isVideo: _onlineIsVideo());
 
   // 在线 URL 按扩展名判断音/视频：音频后缀→封面，其余(含无后缀/m3u8/mp4)→视频画面。
   bool _onlineIsVideo() {
@@ -1320,6 +1322,7 @@ class _HomeShellState extends State<HomeShell> {
           _resume[t.key] = sec;
           _saveResume();
         },
+        onLoadDanmaku: t.bvid != null ? () => _bili.getDanmaku(t.bvid!) : null,
       ),
     );
     if (replace) {
@@ -2240,7 +2243,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.21.0'),
+          title: Text('小李播放器 v2.22.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         SwitchListTile(

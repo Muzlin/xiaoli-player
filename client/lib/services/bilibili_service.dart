@@ -40,6 +40,13 @@ class BiliComment {
 }
 
 /// 联网搜索中文音乐内容并取可播放地址（搜索/取流需 wbi 签名，播放需 Referer）。
+class Danmaku {
+  final double time; // 出现时间(秒)
+  final String text;
+  final int color; // RGB
+  const Danmaku(this.time, this.text, this.color);
+}
+
 class BilibiliService {
   static const _ua =
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
@@ -467,6 +474,46 @@ class BilibiliService {
   }
 
   /// 取视频热门评论（type=1, oid=aid）。失败/受限返回空。
+  /// 拉取弹幕：view 取 cid → comment.bilibili.com/<cid>.xml 解析。
+  Future<List<Danmaku>> getDanmaku(String bvid) async {
+    try {
+      await _ensureInit();
+      final view = jsonDecode((await _http.get(
+              Uri.parse(
+                  'https://api.bilibili.com/x/web-interface/view?bvid=$bvid'),
+              headers: _headers))
+          .body);
+      final cid = view['data']?['cid'];
+      if (cid == null) return [];
+      final r = await _http.get(
+          Uri.parse('https://comment.bilibili.com/$cid.xml'),
+          headers: _headers);
+      final body = utf8.decode(r.bodyBytes, allowMalformed: true);
+      final re = RegExp(r'<d p="([^"]*)"[^>]*>([^<]*)</d>');
+      final out = <Danmaku>[];
+      for (final m in re.allMatches(body)) {
+        final p = (m.group(1) ?? '').split(',');
+        if (p.isEmpty) continue;
+        final t = double.tryParse(p[0]) ?? 0;
+        final color = p.length > 3 ? (int.tryParse(p[3]) ?? 0xFFFFFF) : 0xFFFFFF;
+        final text = _unescapeXml(m.group(2) ?? '');
+        if (text.isNotEmpty) out.add(Danmaku(t, text, color));
+      }
+      out.sort((a, b) => a.time.compareTo(b.time));
+      return out;
+    } catch (_) {
+      return [];
+    }
+  }
+
+  String _unescapeXml(String s) => s
+      .replaceAll('&amp;', '&')
+      .replaceAll('&lt;', '<')
+      .replaceAll('&gt;', '>')
+      .replaceAll('&quot;', '"')
+      .replaceAll('&#39;', "'")
+      .replaceAll('&apos;', "'");
+
   Future<List<BiliComment>> getComments(String bvid, {int pn = 1}) async {
     try {
       await _ensureInit();
