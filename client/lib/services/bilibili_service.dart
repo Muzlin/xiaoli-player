@@ -174,7 +174,8 @@ class BilibiliService {
   }
 
   /// 联网搜索（单次请求，靠完整 cookie 降低风控）。失败/被限流返回空列表。
-  Future<List<BiliTrack>> search(String keyword, {int pages = 4}) async {
+  Future<List<BiliTrack>> search(String keyword,
+      {int pages = 4, String order = ''}) async {
     if (keyword.trim().isEmpty) return [];
     try {
       await _ensureInit();
@@ -189,6 +190,7 @@ class BilibiliService {
           'search_type': 'video',
           'keyword': keyword,
           'page': '$pn',
+          if (order.isNotEmpty) 'order': order,
         });
         final r = await _http
             .get(

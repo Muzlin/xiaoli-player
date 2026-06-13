@@ -144,6 +144,8 @@ class _HomeShellState extends State<HomeShell> {
   String? _profileAvatar; // 本机头像路径
   final Map<String, List<int>> _bookmarks = {}; // 书签 track key→秒列表
   int _seekStep = 10; // 快进/快退步长
+  String _searchOrder = ''; // B站搜索排序
+  int _watchSec = 0; // 累计观看秒
   Timer? _urlTimer; // 定时重读本机平台地址
   bool _publicHealthy = true;
   bool _useLan = false;
@@ -1177,7 +1179,7 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _searchOnline(String q) async {
     setState(() => _searchingOnline = true);
-    final results = await _bili.search(q);
+    final results = await _bili.search(q, order: _searchOrder);
     final plat = await _platform.search(q);
     final users = await _bili.searchUsers(q);
     if (!mounted) return;
@@ -1327,6 +1329,7 @@ class _HomeShellState extends State<HomeShell> {
         startAt: Duration(seconds: _resume[t.key] ?? _skipIntro),
         onSavePos: (sec) {
           _resume[t.key] = sec;
+          _watchSec += 5;
           _saveResume();
         },
         onLoadDanmaku: t.bvid != null ? () => _bili.getDanmaku(t.bvid!) : null,
@@ -1478,6 +1481,46 @@ class _HomeShellState extends State<HomeShell> {
                 ),
               ),
             ),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '排序',
+            icon: const Icon(Icons.sort, color: Colors.white70),
+            color: const Color(0xFF2B2B33),
+            onSelected: (v) {
+              if (v.startsWith('o_')) {
+                setState(() =>
+                    _searchOrder = v == 'o_default' ? '' : v.substring(2));
+                if (_query.trim().isNotEmpty) _searchOnline(_query);
+              } else if (v == 'l_name') {
+                _sortLocal();
+              }
+            },
+            itemBuilder: (_) => [
+              const PopupMenuItem(
+                  enabled: false,
+                  child: Text('B站搜索排序',
+                      style: TextStyle(color: Colors.white38, fontSize: 12))),
+              CheckedPopupMenuItem(
+                  value: 'o_default',
+                  checked: _searchOrder == '',
+                  child:
+                      const Text('综合', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'o_click',
+                  checked: _searchOrder == 'click',
+                  child: const Text('最多播放',
+                      style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'o_pubdate',
+                  checked: _searchOrder == 'pubdate',
+                  child: const Text('最新发布',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                  value: 'l_name',
+                  child: Text('本地按名称排序',
+                      style: TextStyle(color: Colors.white))),
+            ],
           ),
           const SizedBox(width: 8),
           IconButton(
@@ -1764,6 +1807,7 @@ class _HomeShellState extends State<HomeShell> {
     _profileName = p.getString('profile_name') ?? '';
     _profileAvatar = p.getString('profile_avatar');
     _seekStep = p.getInt('seek_step') ?? 10;
+    _watchSec = p.getInt('watch_sec') ?? 0;
     try {
       final bm = p.getString('bookmarks_v1');
       if (bm != null) {
@@ -1786,6 +1830,7 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _saveResume() async {
     final p = await SharedPreferences.getInstance();
     await p.setString('resume_v1', jsonEncode(_resume));
+    await p.setInt('watch_sec', _watchSec);
   }
 
   Future<void> _saveBookmarks() async {
@@ -1820,6 +1865,87 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _skipIntro = v < 0 ? 0 : v);
     final p = await SharedPreferences.getInstance();
     await p.setInt('skip_intro', _skipIntro);
+  }
+
+  Future<void> _sortLocal() async {
+    setState(() => _localTracks.sort((a, b) => a.name.compareTo(b.name)));
+    final p = await SharedPreferences.getInstance();
+    await p.setStringList(
+        _prefsKey, _localTracks.map((t) => t.localPath!).toList());
+  }
+
+  Future<void> _backup() async {
+    final data = {
+      'favorites': _favorites.map((t) => t.toJson()).toList(),
+      'history': _history.map((t) => t.toJson()).toList(),
+      'resume': _resume,
+      'bookmarks': _bookmarks,
+      'profile_name': _profileName,
+    };
+    final path = await FilePicker.platform.saveFile(
+        dialogTitle: '备份数据', fileName: '小李播放器备份.json');
+    if (path == null) return;
+    await File(path).writeAsString(jsonEncode(data));
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已备份到 $path')));
+    }
+  }
+
+  Future<void> _restore() async {
+    final res = await FilePicker.platform
+        .pickFiles(type: FileType.custom, allowedExtensions: ['json']);
+    final path = res?.files.single.path;
+    if (path == null) return;
+    try {
+      final data = jsonDecode(await File(path).readAsString()) as Map;
+      if (data['favorites'] is List) {
+        _favorites
+          ..clear()
+          ..addAll((data['favorites'] as List)
+              .map((e) => Track.fromJson(e as Map<String, dynamic>))
+              .where((t) => t.isValid));
+        await _saveFavorites();
+      }
+      if (data['history'] is List) {
+        _history
+          ..clear()
+          ..addAll((data['history'] as List)
+              .map((e) => Track.fromJson(e as Map<String, dynamic>))
+              .where((t) => t.isValid));
+        await _savePlayHistory();
+      }
+      if (data['resume'] is Map) {
+        _resume
+          ..clear()
+          ..addAll((data['resume'] as Map)
+              .map((k, v) => MapEntry(k as String, (v as num).toInt())));
+        await _saveResume();
+      }
+      if (data['bookmarks'] is Map) {
+        _bookmarks
+          ..clear()
+          ..addAll((data['bookmarks'] as Map).map((k, v) => MapEntry(
+              k as String,
+              (v as List).map((e) => (e as num).toInt()).toList())));
+        await _saveBookmarks();
+      }
+      if (data['profile_name'] is String) {
+        _profileName = data['profile_name'] as String;
+        final p = await SharedPreferences.getInstance();
+        await p.setString('profile_name', _profileName);
+      }
+      if (mounted) {
+        setState(() {});
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('已恢复备份')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text('恢复失败：$e')));
+      }
+    }
   }
 
   Future<void> _editProfile() async {
@@ -2354,10 +2480,30 @@ class _HomeShellState extends State<HomeShell> {
         ),
       );
     }
-    return ListView.separated(
-      itemCount: _favorites.length,
-      separatorBuilder: (_, _) => const Divider(height: 1),
-      itemBuilder: (context, i) => _trackRow(cs, _favorites[i], i),
+    return Column(
+      children: [
+        Align(
+          alignment: Alignment.centerRight,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: TextButton.icon(
+              onPressed: () {
+                setState(() => _favorites.clear());
+                _saveFavorites();
+              },
+              icon: const Icon(Icons.delete_sweep_outlined, size: 18),
+              label: const Text('清空'),
+            ),
+          ),
+        ),
+        Expanded(
+          child: ListView.separated(
+            itemCount: _favorites.length,
+            separatorBuilder: (_, _) => const Divider(height: 1),
+            itemBuilder: (context, i) => _trackRow(cs, _favorites[i], i),
+          ),
+        ),
+      ],
     );
   }
 
@@ -2397,7 +2543,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.27.0'),
+          title: Text('小李播放器 v2.28.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2416,6 +2562,27 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('修改显示名字 / 头像（上传到平台时用）',
               style: TextStyle(fontSize: 12)),
           onTap: _editProfile,
+        ),
+        ListTile(
+          leading: const Icon(Icons.timelapse),
+          title: const Text('累计观看时长'),
+          subtitle: Text(
+              '约 ${_watchSec ~/ 3600} 小时 ${(_watchSec % 3600) ~/ 60} 分钟',
+              style: const TextStyle(fontSize: 12)),
+        ),
+        ListTile(
+          leading: const Icon(Icons.backup_outlined),
+          title: const Text('备份数据'),
+          subtitle: const Text('导出 收藏/历史/书签/资料 到文件',
+              style: TextStyle(fontSize: 12)),
+          onTap: _backup,
+        ),
+        ListTile(
+          leading: const Icon(Icons.restore),
+          title: const Text('恢复备份'),
+          subtitle: const Text('从备份文件导入',
+              style: TextStyle(fontSize: 12)),
+          onTap: _restore,
         ),
         SwitchListTile(
           secondary: const Icon(Icons.shuffle),
