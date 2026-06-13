@@ -488,7 +488,14 @@ class BilibiliService {
       final r = await _http.get(
           Uri.parse('https://comment.bilibili.com/$cid.xml'),
           headers: _headers);
-      final body = utf8.decode(r.bodyBytes, allowMalformed: true);
+      // B站弹幕 XML 是 raw deflate 压缩，需手动解压。
+      String body;
+      try {
+        body = utf8.decode(ZLibCodec(raw: true).decode(r.bodyBytes),
+            allowMalformed: true);
+      } catch (_) {
+        body = utf8.decode(r.bodyBytes, allowMalformed: true);
+      }
       final re = RegExp(r'<d p="([^"]*)"[^>]*>([^<]*)</d>');
       final out = <Danmaku>[];
       for (final m in re.allMatches(body)) {
