@@ -175,7 +175,7 @@ class BilibiliService {
 
   /// 联网搜索（单次请求，靠完整 cookie 降低风控）。失败/被限流返回空列表。
   Future<List<BiliTrack>> search(String keyword,
-      {int pages = 4, String order = ''}) async {
+      {int pages = 2, String order = ''}) async {
     if (keyword.trim().isEmpty) return [];
     try {
       await _ensureInit();
@@ -265,6 +265,20 @@ class BilibiliService {
   }
 
   /// 从登录 cookie 里取 bili_jct（CSRF，关注等写操作需要）。
+  Map<String, dynamic>? _myInfoCache;
+  /// myinfo 缓存复用（减少风控）。
+  Future<Map<String, dynamic>?> _getMyInfo() async {
+    if (_myInfoCache != null) return _myInfoCache;
+    try {
+      final d = jsonDecode((await _http.get(
+              Uri.parse('https://api.bilibili.com/x/space/myinfo'),
+              headers: _headers))
+          .body)['data'];
+      if (d is Map) _myInfoCache = Map<String, dynamic>.from(d);
+    } catch (_) {}
+    return _myInfoCache;
+  }
+
   String get _biliJct {
     final m = RegExp(r'bili_jct=([^;]+)').firstMatch(_userCookie);
     return m?.group(1) ?? '';
@@ -699,10 +713,7 @@ class BilibiliService {
   Future<String> getMyProfile() async {
     try {
       await _ensureInit();
-      final info = jsonDecode((await _http.get(
-              Uri.parse('https://api.bilibili.com/x/space/myinfo'),
-              headers: _headers))
-          .body)['data'];
+      final info = (await _getMyInfo());
       if (info == null) return '获取失败（需登录）';
       final mid = info['mid'];
       var following = '?';
@@ -732,10 +743,7 @@ class BilibiliService {
     if (_userCookie.isEmpty) return [];
     try {
       await _ensureInit();
-      final mid = jsonDecode((await _http.get(
-              Uri.parse('https://api.bilibili.com/x/space/myinfo'),
-              headers: _headers))
-          .body)['data']?['mid'];
+      final mid = (await _getMyInfo())?['mid'];
       if (mid == null) return [];
       final r = await _http
           .get(
