@@ -122,6 +122,8 @@ class _HomeShellState extends State<HomeShell> {
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
   Timer? _urlTimer; // 定时重读本机平台地址
+  bool _publicHealthy = true;
+  bool _useLan = false;
   final UpdateService _update = UpdateService();
   Track? _current;
   String _query = '';
@@ -191,6 +193,7 @@ class _HomeShellState extends State<HomeShell> {
     if (Platform.isMacOS) {
       _urlTimer = Timer.periodic(
           const Duration(seconds: 30), (_) => _refreshPlatformUrl());
+      _refreshPlatformUrl();
     }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
@@ -1437,11 +1440,10 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _refreshPlatformUrl() async {
     final before = PlatformService.current;
     await PlatformService.loadLocal();
+    final healthy = await _platform.publicHealthy();
     if (!mounted) return;
-    if (PlatformService.current != before) {
-      setState(() {});
-      _loadPlatform();
-    }
+    setState(() => _publicHealthy = healthy);
+    if (PlatformService.current != before) _loadPlatform();
   }
 
   Future<void> _loadAppSettings() async {
@@ -2004,7 +2006,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.17.1'),
+          title: Text('小李播放器 v2.18.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -2175,8 +2177,16 @@ class _HomeShellState extends State<HomeShell> {
         ListTile(
           leading: const Icon(Icons.cloud_download_outlined),
           title: const Text('官方下载网址'),
-          subtitle: Text(PlatformService.downloadUrl,
-              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          isThreeLine: true,
+          subtitle: Text(
+            '${PlatformService.downloadUrl}\n'
+            '${PlatformService.useLan ? "● 局域网模式" : (_publicHealthy ? "● 公网正常" : "⚠ 公网限流/抽风中，建议切局域网")}',
+            style: TextStyle(
+                fontSize: 12,
+                color: (!_publicHealthy && !PlatformService.useLan)
+                    ? Colors.orange
+                    : Colors.black54),
+          ),
           trailing: IconButton(
             icon: const Icon(Icons.copy, size: 18),
             tooltip: '复制',
@@ -2194,6 +2204,23 @@ class _HomeShellState extends State<HomeShell> {
             if (await canLaunchUrl(uri)) {
               await launchUrl(uri, mode: LaunchMode.externalApplication);
             }
+          },
+        ),
+        SwitchListTile(
+          secondary: Icon(Icons.lan_outlined,
+              color: (!_publicHealthy && !_useLan) ? Colors.orange : null),
+          title: const Text('切换到局域网服务器'),
+          subtitle: Text(
+            _publicHealthy
+                ? '公网正常时无需开启；同 WiFi 设备可用 ${PlatformService.lanBase}'
+                : '公网正在限流/抽风，开启即用局域网（同 WiFi 内秒开）',
+            style: const TextStyle(fontSize: 12),
+          ),
+          value: _useLan,
+          onChanged: (v) {
+            PlatformService.setUseLan(v);
+            setState(() => _useLan = v);
+            _loadPlatform();
           },
         ),
         ListTile(

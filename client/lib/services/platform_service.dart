@@ -16,10 +16,17 @@ class PlatformService {
   /// 兜底地址（隧道默认值）。生效地址 [_base] 启动时可被本机 public_url.txt 覆盖。
   static const baseUrl =
       'https://translator-themes-activated-column.trycloudflare.com';
-  static String _base = baseUrl;
+  static String _base = baseUrl; // 公网地址
+  static bool useLan = false; // 切到局域网服务器
+  static String? _lanIp; // 本机局域网 IP
 
-  /// macOS 上读本机 ~/xiaoli-platform/public_url.txt（看门狗维护的当前隧道地址），
-  /// 地址变了也不用重打包。其它平台用兜底地址。
+  /// 局域网地址（同 WiFi 设备可访问，公网抽风时兜底）。
+  static String get lanBase => 'http://${_lanIp ?? 'localhost'}:8900';
+
+  /// 当前生效地址：局域网模式用 lanBase，否则公网 _base。
+  static String get current => useLan ? lanBase : _base;
+
+  /// 读公网地址(public_url.txt) + 探测局域网 IP。
   static Future<void> loadLocal() async {
     if (!Platform.isMacOS) return;
     try {
@@ -30,22 +37,47 @@ class PlatformService {
         if (u.startsWith('https://')) _base = u;
       }
     } catch (_) {}
+    try {
+      for (final ni
+          in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
+        for (final a in ni.addresses) {
+          if (!a.isLoopback &&
+              (a.address.startsWith('10.') ||
+                  a.address.startsWith('192.168.') ||
+                  a.address.startsWith('172.'))) {
+            _lanIp = a.address;
+          }
+        }
+      }
+    } catch (_) {}
   }
 
-  static String get current => _base;
+  static void setUseLan(bool v) => useLan = v;
 
-  /// 官方下载页（公网，发给别人装 app）。
-  static String get downloadUrl => '$_base/download';
+  /// 官方下载页地址（随 current 变）。
+  static String get downloadUrl => '$current/download';
 
   final http.Client _http;
   PlatformService([http.Client? c]) : _http = c ?? http.Client();
 
-  static String videoUrl(String id) => '$_base/video/$id';
+  /// 公网当前是否健康（限流/抽风时 false）。
+  Future<bool> publicHealthy() async {
+    try {
+      final r = await _http
+          .get(Uri.parse('$_base/health'))
+          .timeout(const Duration(seconds: 8));
+      return r.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static String videoUrl(String id) => '$current/video/$id';
 
   Future<List<PlatformVideo>> search(String q) async {
     try {
       final r = await _http
-          .get(Uri.parse('$_base/search?q=${Uri.encodeComponent(q)}'))
+          .get(Uri.parse('$current/search?q=${Uri.encodeComponent(q)}'))
           .timeout(const Duration(seconds: 15));
       final list = (jsonDecode(r.body) as List?) ?? [];
       return list
