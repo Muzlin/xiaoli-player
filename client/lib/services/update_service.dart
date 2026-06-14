@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
+import 'platform_service.dart';
 
 /// 一次可用更新的信息。
 class UpdateInfo {
@@ -9,28 +10,52 @@ class UpdateInfo {
   UpdateInfo({required this.version, required this.url, required this.notes});
 }
 
-/// 检查更新：从 GitHub Releases 拉取最新版本，与当前版本比较。
+/// 检查更新：优先问自建平台 /version（国内直连稳），拿不到再退 GitHub Releases。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
   static const currentVersion = '2.36.0';
 
-  /// GitHub 仓库（永久托管，发版即更新）。
+  /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';
-
-  /// 最新 Release 的 API 地址。
-  static const manifestUrl =
-      'https://api.github.com/repos/$repo/releases/latest';
-
-  /// 下载页（永久地址，给用户跳转）。
   static const releasePage = 'https://github.com/$repo/releases/latest';
+  static const githubApi =
+      'https://api.github.com/repos/$repo/releases/latest';
 
   final http.Client _http;
   UpdateService([http.Client? client]) : _http = client ?? http.Client();
 
   /// 有新版返回更新信息；无更新或失败返回 null（不打扰用户）。
   Future<UpdateInfo?> check() async {
+    // 1) 先问平台 /version（可达），下载跳平台页（页内含 GitHub 永久链接）。
+    final viaPlatform = await _checkPlatform();
+    if (viaPlatform != null) return viaPlatform;
+    // 2) 退而求其次：问 GitHub（需代理可达）。
+    return _checkGithub();
+  }
+
+  Future<UpdateInfo?> _checkPlatform() async {
     try {
-      final r = await _http.get(Uri.parse(manifestUrl), headers: {
+      final base = PlatformService.current;
+      final r = await _http
+          .get(Uri.parse('$base/version'))
+          .timeout(const Duration(seconds: 6));
+      if (r.statusCode != 200) return null;
+      final m = jsonDecode(r.body) as Map<String, dynamic>;
+      final latest = (m['version'] ?? '') as String;
+      if (latest.isEmpty || !isNewer(latest, currentVersion)) return null;
+      return UpdateInfo(
+        version: latest,
+        url: '$base/download', // 平台下载页（含直接下载 + GitHub 永久链接）
+        notes: (m['notes'] ?? '') as String,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<UpdateInfo?> _checkGithub() async {
+    try {
+      final r = await _http.get(Uri.parse(githubApi), headers: {
         'Accept': 'application/vnd.github+json',
         'User-Agent': 'xiaoli-player',
       }).timeout(const Duration(seconds: 8));
