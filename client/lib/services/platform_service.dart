@@ -113,8 +113,11 @@ class PlatformService {
 
   static void setUseLan(bool v) => useLan = v;
 
-  /// 官方下载页：永久 GitHub Releases（地址固定不变）。
-  static const downloadUrl =
+  /// 官方下载页：自建平台页（国内直连稳，随 current 变；页内含 GitHub 永久链接）。
+  static String get downloadUrl => '$current/download';
+
+  /// GitHub Releases 永久地址（备份/永久链接）。
+  static const githubReleases =
       'https://github.com/Muzlin/xiaoli-player/releases/latest';
 
   final http.Client _http;
