@@ -113,8 +113,9 @@ class PlatformService {
 
   static void setUseLan(bool v) => useLan = v;
 
-  /// 官方下载页地址（随 current 变）。
-  static String get downloadUrl => '$current/download';
+  /// 官方下载页：永久 GitHub Releases（地址固定不变）。
+  static const downloadUrl =
+      'https://github.com/Muzlin/xiaoli-player/releases/latest';
 
   final http.Client _http;
   PlatformService([http.Client? c]) : _http = c ?? http.Client();
