@@ -1,0 +1,107 @@
+name: 构建并发布（Windows / macOS / Android）
+
+# 触发方式：
+#  1) 推一个 v 开头的 tag（如 v2.36.0）→ 自动编译三端并发到 Releases
+#  2) 在 Actions 页面手动点 "Run workflow"
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+env:
+  FLUTTER_VERSION: '3.44.0'
+
+jobs:
+  # ---------------- Windows（免安装 zip）----------------
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+      - run: flutter pub get
+      - run: flutter build windows --release
+      - name: 打包 Release 文件夹
+        run: Compress-Archive -Path build\windows\x64\runner\Release\* -DestinationPath xiaoli-player-windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: client/xiaoli-player-windows.zip
+
+  # ---------------- macOS（.app zip）----------------
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+      - run: flutter pub get
+      - run: flutter build macos --release
+      - name: 打包 .app
+        run: |
+          cd build/macos/Build/Products/Release
+          # 重命名为中文显示名后压缩（ditto 保留 .app 结构与权限）
+          ditto -c -k --sequesterRsrc --keepParent media_client.app "$GITHUB_WORKSPACE/client/xiaoli-player-macos.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: client/xiaoli-player-macos.zip
+
+  # ---------------- Android（APK）----------------
+  android:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - name: 重命名 APK
+        run: cp build/app/outputs/flutter-apk/app-release.apk xiaoli-player-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: client/xiaoli-player-android.apk
+
+  # ---------------- 汇总发布到 Releases ----------------
+  release:
+    needs: [windows, macos, android]
+    runs-on: ubuntu-latest
+    # tag 触发才建 Release；手动触发只产出 artifacts（可在 run 页面下载）
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: 列出产物
+        run: find dist -type f
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: 小李播放器 ${{ github.ref_name }}
+          body: |
+            小李播放器 ${{ github.ref_name }} — 三端自动构建。
+            - Windows：下载 `xiaoli-player-windows.zip`，解压后双击 `media_client.exe`（整个文件夹一起解压）。
+            - macOS：下载 `xiaoli-player-macos.zip`，解压后右键 .app →「打开」。
+            - Android：下载 `xiaoli-player-android.apk`，允许未知来源安装。
+          files: dist/**/*
