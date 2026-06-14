@@ -25,7 +25,7 @@ class PlatformService {
   /// 平台公网地址（cloudflared 隧道）。隧道重启会变，届时需更新。
   /// 兜底地址（隧道默认值）。生效地址 [_base] 启动时可被本机 public_url.txt 覆盖。
   static const baseUrl =
-      'https://translator-themes-activated-column.trycloudflare.com';
+      'https://shapes-cups-hospital-respected.trycloudflare.com';
   static String _base = baseUrl; // 公网地址
   static bool useLan = false; // 切到局域网服务器
   static String? _lanIp; // 本机局域网 IP
