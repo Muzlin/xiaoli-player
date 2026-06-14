@@ -60,6 +60,19 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  # Windows MSIX 安装包打包工具（仅 Windows 上构建时联网拉取）
+  msix: ^3.16.7
+
+# MSIX 安装包配置（dart run msix:create 用）。
+msix_config:
+  display_name: 小李播放器
+  publisher_display_name: 小李
+  identity_name: com.xiaoli.player
+  publisher: CN=XiaoliPlayer
+  msix_version: 2.36.0.0
+  logo_path: windows/packaging/app_icon.png
+  capabilities: internetClient
+  store: false
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
