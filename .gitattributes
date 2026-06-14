@@ -1,0 +1,2 @@
+# Windows 批处理必须 CRLF，否则双击闪退
+*.bat text eol=crlf
