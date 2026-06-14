@@ -1865,22 +1865,26 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _loadAppSettings() async {
-    if (!Platform.isMacOS) return;
+    if (!Platform.isMacOS && !Platform.isWindows) return;
     var login = false, bg = false, hk = false, hidehk = false, bq = false;
-    try {
-      final home = Platform.environment['HOME'] ?? '';
-      login = File('$home/Library/LaunchAgents/$_loginPlist').existsSync();
-    } catch (_) {}
+    if (Platform.isMacOS) {
+      try {
+        final home = Platform.environment['HOME'] ?? '';
+        login = File('$home/Library/LaunchAgents/$_loginPlist').existsSync();
+      } catch (_) {}
+    }
     try {
       bg = (await _winChannel.invokeMethod<bool>('backgroundRunEnabled')) ??
           false;
-    } catch (_) {}
-    try {
-      hk = (await _winChannel.invokeMethod<bool>('hotkeyEnabled')) ?? false;
-      hidehk =
-          (await _winChannel.invokeMethod<bool>('hideHotkeyEnabled')) ?? false;
       bq = (await _winChannel.invokeMethod<bool>('blockQuitEnabled')) ?? false;
     } catch (_) {}
+    if (Platform.isMacOS) {
+      try {
+        hk = (await _winChannel.invokeMethod<bool>('hotkeyEnabled')) ?? false;
+        hidehk =
+            (await _winChannel.invokeMethod<bool>('hideHotkeyEnabled')) ?? false;
+      } catch (_) {}
+    }
     try {
       final p = await SharedPreferences.getInstance();
       _hotkeyCode = p.getInt('hotkey_code') ?? _hotkeyCode;
@@ -4019,7 +4023,7 @@ class _HomeShellState extends State<HomeShell> {
             subtitle: const Text('查看并管理你关注的 UP主（可取关）'),
             onTap: _showFollowings,
           ),
-        if (Platform.isMacOS) ...[
+        if (Platform.isMacOS)
           SwitchListTile(
             secondary: const Icon(Icons.power_settings_new),
             title: const Text('开机自动启动'),
@@ -4027,11 +4031,13 @@ class _HomeShellState extends State<HomeShell> {
             onChanged: (v) =>
                 _guard('launchAtLogin', () => _setLaunchAtLogin(v)),
           ),
+        if (Platform.isMacOS || Platform.isWindows) ...[
           SwitchListTile(
             secondary: const Icon(Icons.dark_mode_outlined),
             title: const Text('后台运行'),
-            subtitle: const Text('关窗口不退出，点 Dock 图标重新打开',
-                style: TextStyle(fontSize: 12)),
+            subtitle: Text(
+                Platform.isWindows ? '关窗口只最小化到任务栏，不退出' : '关窗口不退出，点 Dock 图标重新打开',
+                style: const TextStyle(fontSize: 12)),
             value: _backgroundRun,
             onChanged: (v) =>
                 _guard('backgroundRun', () => _setBackgroundRun(v)),
@@ -4039,12 +4045,15 @@ class _HomeShellState extends State<HomeShell> {
           SwitchListTile(
             secondary: const Icon(Icons.block),
             title: const Text('禁止退出'),
-            subtitle: const Text('开启后 ⌘Q 也退不出，需在此关闭',
-                style: TextStyle(fontSize: 12)),
+            subtitle: Text(
+                Platform.isWindows ? '开启后点关闭也退不出，需在此关闭' : '开启后 ⌘Q 也退不出，需在此关闭',
+                style: const TextStyle(fontSize: 12)),
             value: _blockQuit,
             onChanged: (v) =>
                 _guard('blockQuit', () => _setBlockQuit(v)),
           ),
+        ],
+        if (Platform.isMacOS) ...[
           ListTile(
             leading: const Icon(Icons.keyboard_outlined),
             title: const Text('全局快捷键唤起'),

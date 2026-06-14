@@ -41,6 +41,9 @@ function(APPLY_STANDARD_SETTINGS TARGET)
   target_compile_features(${TARGET} PUBLIC cxx_std_17)
   target_compile_options(${TARGET} PRIVATE /W4 /WX /wd"4100")
   target_compile_options(${TARGET} PRIVATE /EHsc)
+  # 源文件按 UTF-8 解析，让中文宽字符串字面量(窗口标题/弹窗)正确编码，
+  # 否则在 /WX 下会因 C4566 把构建当错误中断。
+  target_compile_options(${TARGET} PRIVATE /utf-8)
   target_compile_definitions(${TARGET} PRIVATE "_HAS_EXCEPTIONS=0")
   target_compile_definitions(${TARGET} PRIVATE "$<$<CONFIG:Debug>:_DEBUG>")
 endfunction()

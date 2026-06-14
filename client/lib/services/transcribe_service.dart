@@ -10,10 +10,35 @@ class TranscribeService {
     return null;
   }
 
-  static final String? whisper =
-      _find(['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli']);
-  static final String? ffmpeg =
-      _find(['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg']);
+  // Windows 常见安装位置 + PATH 内的 ffmpeg（Process.run 会按 PATH 查找裸命令）。
+  static String? _findWin(String exe, List<String> dirs) {
+    for (final d in dirs) {
+      final p = '$d\\$exe.exe';
+      if (File(p).existsSync()) return p;
+    }
+    // 回退：交给 PATH 解析（用户把 ffmpeg 加进环境变量即可）。
+    try {
+      final r = Process.runSync('where', [exe]);
+      if (r.exitCode == 0) {
+        final line = (r.stdout as String).trim().split('\n').first.trim();
+        if (line.isNotEmpty && File(line).existsSync()) return line;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  static final String? whisper = Platform.isWindows
+      ? _findWin('whisper-cli', [
+          r'C:\Program Files\whisper',
+          r'C:\whisper',
+        ])
+      : _find(['/opt/homebrew/bin/whisper-cli', '/usr/local/bin/whisper-cli']);
+  static final String? ffmpeg = Platform.isWindows
+      ? _findWin('ffmpeg', [
+          r'C:\ffmpeg\bin',
+          r'C:\Program Files\ffmpeg\bin',
+        ])
+      : _find(['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg']);
   static final String model =
       '${Platform.environment['HOME'] ?? ''}/小李播放器/whisper/ggml-small.bin';
 

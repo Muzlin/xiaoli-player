@@ -2236,7 +2236,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       content: Text('画面比例：${_aspectNames[_aspectMode]}')));
                 },
               ),
-            if (!_audioOnly && Platform.isMacOS)
+            if (!_audioOnly && (Platform.isMacOS || Platform.isWindows))
               IconButton(
                 tooltip: '小窗播放',
                 icon: Icon(
@@ -2512,7 +2512,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   value: 'dim',
                   child:
                       Text('画面调暗', style: TextStyle(color: Colors.white))),
-              if (Platform.isMacOS)
+              if (Platform.isMacOS || Platform.isWindows)
                 CheckedPopupMenuItem(
                     value: 'ontop',
                     checked: _onTop,
@@ -2534,7 +2534,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     value: 'frames',
                     child: Text('批量截帧',
                         style: TextStyle(color: Colors.white))),
-              if (Platform.isMacOS &&
+              if ((Platform.isMacOS || Platform.isWindows) &&
                   TranscribeService.ffmpeg != null &&
                   !widget.source.resource.startsWith('http'))
                 const PopupMenuItem(
