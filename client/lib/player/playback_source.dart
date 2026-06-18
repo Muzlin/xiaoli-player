@@ -19,7 +19,7 @@ class PlaybackSource {
           String? coverUrl}) =>
       PlaybackSource._(url, headers, title, isVideo, subtitleFuture, coverUrl);
 
-  factory PlaybackSource.local(String path) {
+  factory PlaybackSource.local(String path, {String? title}) {
     final ext = path.contains('.') ? path.split('.').last.toLowerCase() : '';
     const audioExts = {
       'mp3', 'flac', 'aac', 'wav', 'm4a', 'aiff', 'aif', 'ogg', 'opus',
@@ -28,7 +28,7 @@ class PlaybackSource {
     return PlaybackSource._(
       path,
       null,
-      path.split(Platform.pathSeparator).last,
+      title ?? path.split(Platform.pathSeparator).last,
       !audioExts.contains(ext), // 音频后缀→封面，其余→视频画面
     );
   }
