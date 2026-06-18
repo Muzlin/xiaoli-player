@@ -206,7 +206,9 @@ class BilibiliService {
     for (final i in _mixinTab) {
       if (i < orig.length) sb.write(orig[i]);
     }
-    _mixinKey = sb.toString().substring(0, 32);
+    final mixed = sb.toString();
+    // B站 token 长度异常时 substring(0,32) 会 RangeError，取较短者兜底。
+    _mixinKey = mixed.length >= 32 ? mixed.substring(0, 32) : mixed;
   }
 
   /// 清洗 B站标题：去掉搜索高亮 <em> 等 HTML 标签、解码常见实体。保留正文。
