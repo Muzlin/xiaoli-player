@@ -230,16 +230,24 @@ class PlatformService {
         req.contentLength = total;
         final respFuture = _http.send(req);
         // 分块喂数据，边喂边报进度；喂完关闭进度流。
+        // 读文件出错也要关闭进度流，否则下面 yield* 会一直挂到 20 分钟超时。
         () async {
-          await for (final chunk in file.openRead()) {
-            req.sink.add(chunk);
-            sent += chunk.length;
-            if (!controller.isClosed) {
-              controller.add(total == 0 ? 0 : sent / total);
+          try {
+            await for (final chunk in file.openRead()) {
+              req.sink.add(chunk);
+              sent += chunk.length;
+              if (!controller.isClosed) {
+                controller.add(total == 0 ? 0 : sent / total);
+              }
             }
+          } catch (e) {
+            if (!controller.isClosed) controller.addError(e);
+          } finally {
+            try {
+              req.sink.close();
+            } catch (_) {}
+            if (!controller.isClosed) await controller.close();
           }
-          req.sink.close();
-          if (!controller.isClosed) await controller.close();
         }();
         yield* controller.stream;
         final streamed = await respFuture.timeout(const Duration(minutes: 20));
