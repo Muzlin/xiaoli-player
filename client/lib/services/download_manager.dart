@@ -48,6 +48,8 @@ class DownloadManager extends ChangeNotifier {
   final List<DownloadTask> tasks = []; // 最新在前
   // 已缓存：key -> {name, path}
   final Map<String, Map<String, String>> cached = {};
+  // 任务结束(成功/失败)时回调，供 UI 弹提示。
+  void Function(DownloadTask task)? onComplete;
   int _running = 0;
   static const _maxConcurrent = 2;
   static const _cacheKey = 'cached_videos_v1';
@@ -88,10 +90,21 @@ class DownloadManager extends ChangeNotifier {
   Future<void> cacheVideo(String key, String name,
       Future<String?> Function() resolveUrl,
       {Map<String, String> headers = const {}, String ext = 'mp4'}) async {
+    // 已缓存、或仍在排队/下载中→忽略；失败/取消的旧任务不算（允许重试）。
     if (cached.containsKey(key) ||
-        tasks.any((t) => t.id == key && t.state != DlState.failed)) {
+        tasks.any((t) =>
+            t.id == key &&
+            (t.state == DlState.queued || t.state == DlState.running))) {
+      // 清掉同 key 的失败/取消残留，避免列表堆积。
+      tasks.removeWhere((t) =>
+          t.id == key &&
+          (t.state == DlState.failed || t.state == DlState.canceled));
       return;
     }
+    // 移除同 key 的失败/取消旧任务，重新排队。
+    tasks.removeWhere((t) =>
+        t.id == key &&
+        (t.state == DlState.failed || t.state == DlState.canceled));
     final dir = await _cacheDir();
     final safe = key.replaceAll(RegExp(r'[^\w]'), '_');
     final dest = '${dir.path}/$safe.$ext';
@@ -178,6 +191,7 @@ class DownloadManager extends ChangeNotifier {
     t.state = DlState.running;
     notifyListeners();
     final tmp = '${t.destPath}.part';
+    final client = http.Client();
     try {
       final url = await t.resolveUrl();
       if (t._cancel) {
@@ -192,7 +206,7 @@ class DownloadManager extends ChangeNotifier {
       final req = http.Request('GET', Uri.parse(url));
       req.headers.addAll(t.headers);
       final resp =
-          await http.Client().send(req).timeout(const Duration(seconds: 30));
+          await client.send(req).timeout(const Duration(seconds: 30));
       if (resp.statusCode >= 400) {
         t.state = DlState.failed;
         t.error = 'HTTP ${resp.statusCode}';
@@ -201,18 +215,21 @@ class DownloadManager extends ChangeNotifier {
       t.total = resp.contentLength ?? 0;
       final sink = File(tmp).openWrite();
       var lastNotify = 0;
-      await for (final chunk in resp.stream) {
-        if (t._cancel) break;
-        sink.add(chunk);
-        t.received += chunk.length;
-        // 限频通知，避免刷爆 UI
-        final now = t.received ~/ 524288; // 每 0.5MB
-        if (now != lastNotify) {
-          lastNotify = now;
-          notifyListeners();
+      try {
+        await for (final chunk in resp.stream) {
+          if (t._cancel) break;
+          sink.add(chunk);
+          t.received += chunk.length;
+          // 限频通知，避免刷爆 UI
+          final now = t.received ~/ 524288; // 每 0.5MB
+          if (now != lastNotify) {
+            lastNotify = now;
+            notifyListeners();
+          }
         }
+      } finally {
+        await sink.close(); // 异常/取消路径也要关
       }
-      await sink.close();
       if (t._cancel) {
         _safeDelete(tmp);
         t.state = DlState.canceled;
@@ -231,10 +248,41 @@ class DownloadManager extends ChangeNotifier {
       t.state = DlState.failed;
       t.error = '$e';
     } finally {
+      client.close();
       _running--;
+      if (t.state == DlState.done || t.state == DlState.failed) {
+        try {
+          onComplete?.call(t);
+        } catch (_) {}
+      }
       notifyListeners();
       _pump();
     }
+  }
+
+  /// 已缓存文件占用总字节数。
+  Future<int> totalCacheBytes() async {
+    var sum = 0;
+    for (final m in cached.values) {
+      try {
+        final f = File(m['path'] ?? '');
+        if (f.existsSync()) sum += f.lengthSync();
+      } catch (_) {}
+    }
+    return sum;
+  }
+
+  /// 清空所有离线缓存（删文件 + 清索引）。
+  Future<void> clearAllCache() async {
+    for (final m in cached.values.toList()) {
+      try {
+        final f = File(m['path'] ?? '');
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
+    }
+    cached.clear();
+    await _saveCacheIndex();
+    notifyListeners();
   }
 
   void _safeDelete(String path) {
