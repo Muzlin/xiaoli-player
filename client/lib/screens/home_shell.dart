@@ -99,13 +99,14 @@ class Track {
         'url': url,
         'bvid': bvid,
         'tag': tag,
+        if (cid != null) 'cid': cid, // 多 P 视频要记住具体分 P
       };
 
   static Track fromJson(Map<String, dynamic> j) {
     if (j['localPath'] != null) return Track.local(j['localPath'] as String);
     if (j['bvid'] != null) {
       return Track.bili(j['name'] as String, j['bvid'] as String,
-          tag: (j['tag'] as String?) ?? '');
+          tag: (j['tag'] as String?) ?? '', cid: j['cid'] as String?);
     }
     return Track.online(j['name'] as String, j['url'] as String?,
         tag: (j['tag'] as String?) ?? '');
@@ -256,6 +257,14 @@ class _HomeShellState extends State<HomeShell> {
     _loadPlayHistory();
     _loadAutoNext();
     DownloadManager.instance.loadCache(); // 加载离线缓存索引
+    DownloadManager.instance.onComplete = (t) {
+      if (!mounted) return;
+      if (t.state == DlState.done) {
+        _snack(t.cache ? '已缓存：${t.name}' : '已下载：${t.name}');
+      } else {
+        _snack('下载失败：${t.name}');
+      }
+    };
     if (Platform.isMacOS) {
       _urlTimer = Timer.periodic(
           const Duration(seconds: 30), (_) => _refreshPlatformUrl());
@@ -474,12 +483,13 @@ class _HomeShellState extends State<HomeShell> {
     }
     final tmp =
         '${Directory.systemTemp.path}/xldl_${DateTime.now().millisecondsSinceEpoch}.src';
+    final client = http.Client();
     try {
       progress.value = '连接中…';
       final req = http.Request('GET', Uri.parse(url));
       req.headers.addAll(headers);
       final resp =
-          await http.Client().send(req).timeout(const Duration(seconds: 30));
+          await client.send(req).timeout(const Duration(seconds: 30));
       if (resp.statusCode >= 400) {
         closeDialog();
         _snack('下载失败 ${resp.statusCode}');
@@ -488,16 +498,19 @@ class _HomeShellState extends State<HomeShell> {
       final total = resp.contentLength ?? 0;
       var received = 0;
       final sink = File(tmp).openWrite();
-      await for (final chunk in resp.stream) {
-        if (cancelled) break;
-        sink.add(chunk);
-        received += chunk.length;
-        final mb = (received / 1048576).toStringAsFixed(1);
-        progress.value = total > 0
-            ? '下载 $mb / ${(total / 1048576).toStringAsFixed(1)} MB'
-            : '下载 $mb MB';
+      try {
+        await for (final chunk in resp.stream) {
+          if (cancelled) break;
+          sink.add(chunk);
+          received += chunk.length;
+          final mb = (received / 1048576).toStringAsFixed(1);
+          progress.value = total > 0
+              ? '下载 $mb / ${(total / 1048576).toStringAsFixed(1)} MB'
+              : '下载 $mb MB';
+        }
+      } finally {
+        await sink.close(); // 异常/取消也要关
       }
-      await sink.close();
       if (cancelled) {
         try {
           File(tmp).deleteSync();
@@ -529,6 +542,8 @@ class _HomeShellState extends State<HomeShell> {
       } catch (_) {}
       closeDialog();
       _snack('下载出错：$e');
+    } finally {
+      client.close();
     }
   }
 
@@ -547,8 +562,17 @@ class _HomeShellState extends State<HomeShell> {
   void _cacheVideo(Track t) {
     if (t.isLocal) return;
     final (resolve, headers) = _resolveFor(t);
+    // 用真实后缀命名，离线播放才能正确判定音/视频（音频→封面，视频→画面）。
+    var ext = 'mp4';
+    if (t.bvid == null && t.url != null) {
+      final u = t.url!.split('?').first.toLowerCase();
+      if (u.contains('.')) {
+        final e = u.split('.').last;
+        if (e.isNotEmpty && e.length <= 4) ext = e;
+      }
+    }
     DownloadManager.instance
-        .cacheVideo(t.key, t.name, resolve, headers: headers);
+        .cacheVideo(t.key, t.name, resolve, headers: headers, ext: ext);
     _snack('已加入缓存，后台下载中…');
   }
 
@@ -1427,12 +1451,13 @@ class _HomeShellState extends State<HomeShell> {
       _speedTesting = true;
       _speedResult = '测速中…';
     });
+    final client = http.Client();
     try {
       final sw = Stopwatch()..start();
       final url = '${PlatformService.current}/speedtest?mb=15';
       final req = http.Request('GET', Uri.parse(url));
       final resp =
-          await http.Client().send(req).timeout(const Duration(seconds: 30));
+          await client.send(req).timeout(const Duration(seconds: 30));
       if (resp.statusCode != 200) {
         if (mounted) {
           setState(() => _speedResult = '测速失败：HTTP ${resp.statusCode}');
@@ -1456,7 +1481,34 @@ class _HomeShellState extends State<HomeShell> {
     } catch (_) {
       if (mounted) setState(() => _speedResult = '测速失败：网络异常或服务器未开');
     } finally {
+      client.close();
       if (mounted) setState(() => _speedTesting = false);
+    }
+  }
+
+  /// 清空全部离线缓存（先确认，告知释放多少空间）。
+  Future<void> _clearCacheConfirm() async {
+    final bytes = await DownloadManager.instance.totalCacheBytes();
+    if (!mounted) return;
+    final mb = (bytes / 1048576).toStringAsFixed(1);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空离线缓存'),
+        content: Text('将删除全部已缓存视频，释放约 $mb MB 空间。确定？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await DownloadManager.instance.clearAllCache();
+      if (mounted) _snack('已清空离线缓存，释放 $mb MB');
     }
   }
 
@@ -1512,29 +1564,36 @@ class _HomeShellState extends State<HomeShell> {
   /// 带进度对话框下载文件到 [dest]。成功 true。[status]/[progress] 实时更新弹窗。
   Future<bool> _downloadInto(String url, String dest,
       ValueNotifier<double> progress, ValueNotifier<String> status) async {
+    final client = http.Client();
     final req = http.Request('GET', Uri.parse(url));
-    final resp =
-        await http.Client().send(req).timeout(const Duration(seconds: 30));
-    if (resp.statusCode != 200) {
-      status.value = '下载失败：HTTP ${resp.statusCode}';
-      return false;
-    }
-    final total = resp.contentLength ?? 0;
-    final sink = File(dest).openWrite();
-    var recv = 0;
-    await for (final c in resp.stream) {
-      sink.add(c);
-      recv += c.length;
-      if (total > 0) {
-        progress.value = recv / total;
-        status.value =
-            '下载中 ${(recv / 1048576).toStringAsFixed(1)} / ${(total / 1048576).toStringAsFixed(1)} MB';
-      } else {
-        status.value = '下载中 ${(recv / 1048576).toStringAsFixed(1)} MB';
+    try {
+      final resp = await client.send(req).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        status.value = '下载失败：HTTP ${resp.statusCode}';
+        return false;
       }
+      final total = resp.contentLength ?? 0;
+      final sink = File(dest).openWrite();
+      var recv = 0;
+      try {
+        await for (final c in resp.stream) {
+          sink.add(c);
+          recv += c.length;
+          if (total > 0) {
+            progress.value = recv / total;
+            status.value =
+                '下载中 ${(recv / 1048576).toStringAsFixed(1)} / ${(total / 1048576).toStringAsFixed(1)} MB';
+          } else {
+            status.value = '下载中 ${(recv / 1048576).toStringAsFixed(1)} MB';
+          }
+        }
+      } finally {
+        await sink.close(); // 异常路径也要关，避免句柄泄漏
+      }
+      return true;
+    } finally {
+      client.close();
     }
-    await sink.close();
-    return true;
   }
 
   /// macOS：下载 zip→解压→替换 .app→重启（写一个待我退出后执行的脚本）。
@@ -1610,15 +1669,24 @@ class _HomeShellState extends State<HomeShell> {
       final destApp = File(exe).parent.parent.parent.path;
       status.value = '安装中…即将自动重启';
       final scriptPath = '$tmp/xiaoli_update.sh';
-      // 等本进程退出后再替换，避免“文件占用”。
+      // 等本进程退出后再替换：先拷到 .new 验证完整，再原子替换，
+      // 旧 app 只有在新 app 就位后才删除——任何一步失败都回滚并重开旧版，绝不把用户搞到没 app。
       final script = '#!/bin/bash\n'
           'PID="\$1"\n'
+          'DEST="$destApp"\n'
+          'NEW="$newApp"\n'
+          'STAGE="\$DEST.new"\n'
+          'BAK="\$DEST.bak"\n'
           'for i in \$(seq 1 60); do kill -0 "\$PID" 2>/dev/null || break; sleep 0.2; done\n'
           'sleep 0.4\n'
-          'rm -rf "$destApp"\n'
-          'cp -R "$newApp" "$destApp"\n'
-          'xattr -dr com.apple.quarantine "$destApp" 2>/dev/null\n'
-          'open "$destApp"\n';
+          'rm -rf "\$STAGE" "\$BAK"\n'
+          'cp -R "\$NEW" "\$STAGE" || { open "\$DEST"; exit 1; }\n'
+          'if [ ! -d "\$STAGE/Contents/MacOS" ]; then rm -rf "\$STAGE"; open "\$DEST"; exit 1; fi\n'
+          'xattr -dr com.apple.quarantine "\$STAGE" 2>/dev/null\n'
+          'mv "\$DEST" "\$BAK" 2>/dev/null\n'
+          'mv "\$STAGE" "\$DEST" || { mv "\$BAK" "\$DEST"; open "\$DEST"; exit 1; }\n'
+          'rm -rf "\$BAK"\n'
+          'open "\$DEST"\n';
       File(scriptPath).writeAsStringSync(script);
       await Process.run('/bin/chmod', ['+x', scriptPath]);
       await Process.start('/bin/bash', [scriptPath, '$pid'],
@@ -1944,6 +2012,10 @@ class _HomeShellState extends State<HomeShell> {
             t.bvid != null ? () => _bili.getSubtitleOptions(t.bvid!) : null,
         onLoadMultiSubtitles:
             t.bvid != null ? () => _bili.getMultiSubtitles(t.bvid!) : null,
+        // 本地/已缓存无需再缓存；其余在线视频可一键缓存离线看
+        onCache: (t.isLocal || cachedFile != null)
+            ? null
+            : () => _cacheVideo(t),
       ),
     );
     if (replace) {
@@ -1989,14 +2061,14 @@ class _HomeShellState extends State<HomeShell> {
   void _prev() {
     final list = _playQueue;
     if (_current == null || list.isEmpty) return;
-    final i = list.indexWhere((t) => t.name == _current!.name);
+    final i = list.indexWhere((t) => t.key == _current!.key);
     if (i > 0) _play(list[i - 1]);
   }
 
   void _next() {
     final list = _playQueue;
     if (_current == null || list.isEmpty) return;
-    final i = list.indexWhere((t) => t.name == _current!.name);
+    final i = list.indexWhere((t) => t.key == _current!.key);
     if (_shuffle && list.length > 1) {
       var j = Random().nextInt(list.length);
       if (j == i) j = (j + 1) % list.length;
@@ -4071,7 +4143,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.38.0'),
+          title: Text('小李播放器 v2.39.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -4122,7 +4194,8 @@ class _HomeShellState extends State<HomeShell> {
                 builder: (_) => _PlaylistsPage(
                     playlists: _playlists,
                     onPlay: _play,
-                    onSave: _savePlaylists)));
+                    onSave: _savePlaylists,
+                    onCacheTrack: _cacheVideo)));
             setState(() {});
           },
         ),
@@ -4373,6 +4446,27 @@ class _HomeShellState extends State<HomeShell> {
                   child: CircularProgressIndicator(strokeWidth: 2))
               : const Icon(Icons.chevron_right),
           onTap: _speedTesting ? null : _runSpeedTest,
+        ),
+        AnimatedBuilder(
+          animation: DownloadManager.instance,
+          builder: (_, __) {
+            final n = DownloadManager.instance.cached.length;
+            final active = DownloadManager.instance.activeCount;
+            return ListTile(
+              leading: const Icon(Icons.sd_storage_outlined),
+              title: const Text('离线缓存'),
+              subtitle: Text(active > 0
+                  ? '$n 个已缓存 · $active 个下载中'
+                  : (n == 0 ? '长按曲目可缓存视频，离线也能看' : '$n 个视频已缓存，可离线播放')),
+              trailing: n == 0
+                  ? const Icon(Icons.chevron_right)
+                  : TextButton(
+                      onPressed: _clearCacheConfirm,
+                      child: const Text('清空'),
+                    ),
+              onTap: _showDownloadsPanel,
+            );
+          },
         ),
         ListTile(
           leading: const Icon(Icons.playlist_play),
@@ -5109,13 +5203,33 @@ class _PlaylistsPage extends StatefulWidget {
   final Map<String, List<Track>> playlists;
   final void Function(Track) onPlay;
   final Future<void> Function() onSave;
+  final void Function(Track) onCacheTrack; // 批量缓存单曲（离线）
   const _PlaylistsPage(
-      {required this.playlists, required this.onPlay, required this.onSave});
+      {required this.playlists,
+      required this.onPlay,
+      required this.onSave,
+      required this.onCacheTrack});
   @override
   State<_PlaylistsPage> createState() => _PlaylistsPageState();
 }
 
 class _PlaylistsPageState extends State<_PlaylistsPage> {
+  // 把整个歌单里的在线曲目排队缓存（本地文件跳过），后台陆续下载。
+  void _cacheAll(String name) {
+    final tracks = widget.playlists[name] ?? [];
+    final online = tracks.where((t) => !t.isLocal).toList();
+    if (online.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('该歌单没有可缓存的在线视频')));
+      return;
+    }
+    for (final t in online) {
+      widget.onCacheTrack(t);
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已加入缓存队列：${online.length} 个，后台下载中')));
+  }
+
   Future<void> _sharePlaylist(String name) async {
     final body = jsonEncode({
       'title': name,
@@ -5485,6 +5599,11 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
                               size: 20),
                           tooltip: '导出下载脚本(aria2/wget)',
                           onPressed: () => _exportScript(n),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.offline_pin_outlined, size: 20),
+                          tooltip: '全部缓存(离线可看)',
+                          onPressed: () => _cacheAll(n),
                         ),
                         IconButton(
                           icon: const Icon(Icons.delete_outline),
