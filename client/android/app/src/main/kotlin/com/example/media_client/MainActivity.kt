@@ -5,16 +5,21 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.media.AudioManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
+import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
+import java.io.File
 
 class MainActivity : FlutterActivity() {
     private var volumeChannel: MethodChannel? = null
     private var shareChannel: MethodChannel? = null
     private var screenChannel: MethodChannel? = null
+    private var installerChannel: MethodChannel? = null
     private var sharedUrl: String? = null
 
     // F46: 记录音量键按下时刻，区分长按(换曲)/短按(调音量)。
@@ -44,6 +49,25 @@ class MainActivity : FlutterActivity() {
                 result.notImplemented()
             }
         }
+        // 自动更新：调起系统安装器装新版 apk。
+        installerChannel = MethodChannel(messenger, "xiaoli/installer")
+        installerChannel?.setMethodCallHandler { call, result ->
+            if (call.method == "install") {
+                val path = call.argument<String>("path")
+                if (path == null) {
+                    result.error("no_path", "缺少 apk 路径", null)
+                } else {
+                    try {
+                        installApk(path)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("install_failed", e.message, null)
+                    }
+                }
+            } else {
+                result.notImplemented()
+            }
+        }
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -59,6 +83,31 @@ class MainActivity : FlutterActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+    }
+
+    // 自动更新：用 FileProvider 把 apk 交给系统安装器（Android 7+ 必须用 content:// URI）。
+    private fun installApk(path: String) {
+        val file = File(path)
+        val uri = FileProvider.getUriForFile(
+            this, "$packageName.fileprovider", file
+        )
+        val intent = Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "application/vnd.android.package-archive")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+        // Android 8+ 需「安装未知应用」权限，系统会自动引导用户去授权。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            startActivity(
+                Intent(
+                    android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                    Uri.parse("package:$packageName")
+                )
+            )
+        }
+        startActivity(intent)
     }
 
     // F47: 从系统分享接收 URL。
