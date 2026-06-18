@@ -16,6 +16,7 @@ import '../services/bilibili_service.dart';
 import '../services/transcribe_service.dart';
 import '../services/platform_service.dart';
 import '../services/update_service.dart';
+import '../services/download_manager.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
 import 'stats_screen.dart';
@@ -185,6 +186,8 @@ class _HomeShellState extends State<HomeShell> {
   bool _publicHealthy = true;
   bool _useLan = false;
   final UpdateService _update = UpdateService();
+  bool _speedTesting = false; // 测网速进行中
+  String? _speedResult; // 测速结果文案
   Track? _current;
   String _query = '';
   int _navIndex = 0;
@@ -252,6 +255,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadResume();
     _loadPlayHistory();
     _loadAutoNext();
+    DownloadManager.instance.loadCache(); // 加载离线缓存索引
     if (Platform.isMacOS) {
       _urlTimer = Timer.periodic(
           const Duration(seconds: 30), (_) => _refreshPlatformUrl());
@@ -526,6 +530,251 @@ class _HomeShellState extends State<HomeShell> {
       closeDialog();
       _snack('下载出错：$e');
     }
+  }
+
+  /// 给一个在线曲目生成「解析真实流地址」的回调 + 请求头（B站异步取流，平台/直链直接给）。
+  (Future<String?> Function(), Map<String, String>) _resolveFor(Track t) {
+    if (t.bvid != null) {
+      return (() => _bili.getMediaUrl(t.bvid!, cid: t.cid), _bili.playHeaders);
+    }
+    return (() async => t.url, const {
+          'User-Agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        });
+  }
+
+  /// 缓存到本地（离线可播），后台进行，不阻塞。
+  void _cacheVideo(Track t) {
+    if (t.isLocal) return;
+    final (resolve, headers) = _resolveFor(t);
+    DownloadManager.instance
+        .cacheVideo(t.key, t.name, resolve, headers: headers);
+    _snack('已加入缓存，后台下载中…');
+  }
+
+  /// 后台下载到用户选定路径，不阻塞（可去看别的视频）。
+  Future<void> _bgDownload(Track t) async {
+    if (t.isLocal || !mounted) return;
+    final safe = t.name.replaceAll(RegExp(r'[^\w一-龥 .-]'), '_');
+    final dest = await FilePicker.platform.saveFile(
+      dialogTitle: '后台下载到…',
+      fileName: '$safe.mp4',
+    );
+    if (dest == null || !mounted) return;
+    final (resolve, headers) = _resolveFor(t);
+    DownloadManager.instance
+        .saveVideo(t.key, t.name, dest, resolve, headers: headers);
+    _snack('已在后台下载，可去看别的视频');
+  }
+
+  /// 下载/缓存面板入口按钮（带活动任务角标），监听 DownloadManager 变化。
+  Widget _downloadsButton() {
+    return AnimatedBuilder(
+      animation: DownloadManager.instance,
+      builder: (_, __) {
+        final n = DownloadManager.instance.activeCount;
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              onPressed: _showDownloadsPanel,
+              tooltip: '下载 / 离线缓存',
+              icon: const Icon(Icons.download_outlined, color: Colors.white70),
+            ),
+            if (n > 0)
+              Positioned(
+                right: 4,
+                top: 4,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: accentNotifier.value,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text('$n',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold)),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 下载任务 + 已缓存列表面板（底部弹层，实时刷新）。
+  void _showDownloadsPanel() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF22222A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => AnimatedBuilder(
+        animation: DownloadManager.instance,
+        builder: (ctx, __) {
+          final dm = DownloadManager.instance;
+          final tasks = dm.tasks;
+          final cached = dm.cached.entries.toList();
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.6,
+            maxChildSize: 0.92,
+            builder: (_, scroll) => Column(
+              children: [
+                const SizedBox(height: 10),
+                Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2))),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                  child: Row(
+                    children: [
+                      const Text('下载 / 离线缓存',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                      const Spacer(),
+                      if (tasks.any((t) =>
+                          t.state == DlState.done ||
+                          t.state == DlState.failed ||
+                          t.state == DlState.canceled))
+                        TextButton(
+                            onPressed: dm.clearFinished,
+                            child: const Text('清除已完成')),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView(
+                    controller: scroll,
+                    children: [
+                      if (tasks.isEmpty && cached.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.all(40),
+                          child: Center(
+                              child: Text('暂无下载任务\n长按曲目可「缓存(离线)」或「后台下载」',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: Colors.white38))),
+                        ),
+                      for (final t in tasks) _taskTile(t),
+                      if (cached.isNotEmpty)
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(16, 14, 16, 6),
+                          child: Text('已缓存（离线可看）',
+                              style: TextStyle(
+                                  color: Colors.white54, fontSize: 13)),
+                        ),
+                      for (final e in cached)
+                        ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.offline_pin,
+                              color: Colors.greenAccent),
+                          title: Text(e.value['name'] ?? e.key,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.white)),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline,
+                                color: Colors.white38),
+                            tooltip: '删除缓存',
+                            onPressed: () => dm.deleteCached(e.key),
+                          ),
+                          onTap: () {
+                            final p = e.value['path'];
+                            if (p == null || !File(p).existsSync()) {
+                              dm.deleteCached(e.key);
+                              return;
+                            }
+                            Navigator.pop(ctx);
+                            _play(Track.local(p));
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _taskTile(DownloadTask t) {
+    final dm = DownloadManager.instance;
+    IconData icon;
+    Color color;
+    String sub;
+    switch (t.state) {
+      case DlState.done:
+        icon = Icons.check_circle;
+        color = Colors.greenAccent;
+        sub = t.cache ? '已缓存 · ${t.sizeText}' : '已保存 · ${t.sizeText}';
+        break;
+      case DlState.failed:
+        icon = Icons.error_outline;
+        color = Colors.redAccent;
+        sub = '失败：${t.error ?? ''}';
+        break;
+      case DlState.canceled:
+        icon = Icons.cancel_outlined;
+        color = Colors.white38;
+        sub = '已取消';
+        break;
+      case DlState.running:
+        icon = Icons.downloading;
+        color = accentNotifier.value;
+        sub =
+            '${(t.progress * 100).toStringAsFixed(0)}% · ${t.sizeText}';
+        break;
+      default:
+        icon = Icons.schedule;
+        color = Colors.white54;
+        sub = '排队中…';
+    }
+    return ListTile(
+      dense: true,
+      leading: Icon(icon, color: color),
+      title: Text(t.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.white)),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(sub, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+          if (t.state == DlState.running)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: LinearProgressIndicator(
+                value: t.total > 0 ? t.progress : null,
+                minHeight: 3,
+                backgroundColor: Colors.white12,
+              ),
+            ),
+        ],
+      ),
+      trailing: (t.state == DlState.running || t.state == DlState.queued)
+          ? IconButton(
+              icon: const Icon(Icons.close, color: Colors.white38),
+              tooltip: '取消',
+              onPressed: () => dm.cancel(t),
+            )
+          : IconButton(
+              icon: const Icon(Icons.clear, color: Colors.white24),
+              tooltip: '移除',
+              onPressed: () => dm.removeTask(t),
+            ),
+    );
   }
   // ---- 我的视频（本地收录 / 发布到B站） ----
   Future<void> _loadMyVideos() async {
@@ -1172,7 +1421,48 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  /// 测到平台服务器的下载速度（拉一段固定大小数据，算 MB/s）。
+  Future<void> _runSpeedTest() async {
+    setState(() {
+      _speedTesting = true;
+      _speedResult = '测速中…';
+    });
+    try {
+      final sw = Stopwatch()..start();
+      final url = '${PlatformService.current}/speedtest?mb=15';
+      final req = http.Request('GET', Uri.parse(url));
+      final resp =
+          await http.Client().send(req).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        if (mounted) {
+          setState(() => _speedResult = '测速失败：HTTP ${resp.statusCode}');
+        }
+        return;
+      }
+      var bytes = 0;
+      await for (final c in resp.stream) {
+        bytes += c.length;
+      }
+      sw.stop();
+      final secs = sw.elapsedMilliseconds / 1000.0;
+      final mb = bytes / 1048576;
+      final speed = secs > 0 ? mb / secs : 0; // MB/s
+      final mbps = speed * 8; // Mbps
+      final where = PlatformService.useLan ? '局域网' : '公网';
+      if (mounted) {
+        setState(() => _speedResult =
+            '${speed.toStringAsFixed(1)} MB/s · ${mbps.toStringAsFixed(0)} Mbps · $where');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _speedResult = '测速失败：网络异常或服务器未开');
+    } finally {
+      if (mounted) setState(() => _speedTesting = false);
+    }
+  }
+
   void _showUpdateDialog(UpdateInfo info) {
+    // macOS/Android 支持一键自动更新（下载→替换→重启，全程不用手动）。
+    final canAuto = Platform.isMacOS || Platform.isAndroid;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
@@ -1185,7 +1475,7 @@ class _HomeShellState extends State<HomeShell> {
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('稍后'),
           ),
-          FilledButton(
+          TextButton(
             onPressed: () async {
               Navigator.of(context).pop();
               final uri = Uri.tryParse(info.url);
@@ -1195,9 +1485,207 @@ class _HomeShellState extends State<HomeShell> {
             },
             child: const Text('前往下载'),
           ),
+          if (canAuto)
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _autoUpdate(info);
+              },
+              icon: const Icon(Icons.bolt, size: 18),
+              label: const Text('自动更新'),
+            ),
         ],
       ),
     );
+  }
+
+  /// 一键自动更新：下载对应平台安装包→替换→重启，全程无需手动。
+  Future<void> _autoUpdate(UpdateInfo info) async {
+    final base = PlatformService.current;
+    if (Platform.isMacOS) {
+      await _autoUpdateMac('$base/dl/xiaoli-mac.zip', info.version);
+    } else if (Platform.isAndroid) {
+      await _autoUpdateAndroid('$base/dl/xiaoli-android.apk', info.version);
+    }
+  }
+
+  /// 带进度对话框下载文件到 [dest]。成功 true。[status]/[progress] 实时更新弹窗。
+  Future<bool> _downloadInto(String url, String dest,
+      ValueNotifier<double> progress, ValueNotifier<String> status) async {
+    final req = http.Request('GET', Uri.parse(url));
+    final resp =
+        await http.Client().send(req).timeout(const Duration(seconds: 30));
+    if (resp.statusCode != 200) {
+      status.value = '下载失败：HTTP ${resp.statusCode}';
+      return false;
+    }
+    final total = resp.contentLength ?? 0;
+    final sink = File(dest).openWrite();
+    var recv = 0;
+    await for (final c in resp.stream) {
+      sink.add(c);
+      recv += c.length;
+      if (total > 0) {
+        progress.value = recv / total;
+        status.value =
+            '下载中 ${(recv / 1048576).toStringAsFixed(1)} / ${(total / 1048576).toStringAsFixed(1)} MB';
+      } else {
+        status.value = '下载中 ${(recv / 1048576).toStringAsFixed(1)} MB';
+      }
+    }
+    await sink.close();
+    return true;
+  }
+
+  /// macOS：下载 zip→解压→替换 .app→重启（写一个待我退出后执行的脚本）。
+  Future<void> _autoUpdateMac(String url, String version) async {
+    final tmp = Directory.systemTemp.path;
+    final zipPath = '$tmp/xiaoli_update_$version.zip';
+    final extractDir = '$tmp/xiaoli_update_$version';
+    final progress = ValueNotifier<double>(0);
+    final status = ValueNotifier<String>('准备下载…');
+    var dialogOpen = true;
+    void close() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('自动更新中'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<double>(
+              valueListenable: progress,
+              builder: (_, v, __) => LinearProgressIndicator(value: v > 0 ? v : null),
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, s, __) => Text(s, textAlign: TextAlign.center),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      if (!await _downloadInto(url, zipPath, progress, status)) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      status.value = '解压中…';
+      final ed = Directory(extractDir);
+      if (ed.existsSync()) ed.deleteSync(recursive: true);
+      ed.createSync(recursive: true);
+      final unzip =
+          await Process.run('/usr/bin/unzip', ['-o', zipPath, '-d', extractDir]);
+      if (unzip.exitCode != 0) {
+        status.value = '解压失败';
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      // 找到解压出的 .app（可能在子目录里）
+      String? newApp;
+      for (final e in ed.listSync(recursive: true)) {
+        if (e is Directory && e.path.endsWith('.app')) {
+          newApp = e.path;
+          break;
+        }
+      }
+      if (newApp == null) {
+        status.value = '安装包格式异常（未找到 .app）';
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      // 当前 .app = 可执行文件往上三层
+      final exe = Platform.resolvedExecutable;
+      final destApp = File(exe).parent.parent.parent.path;
+      status.value = '安装中…即将自动重启';
+      final scriptPath = '$tmp/xiaoli_update.sh';
+      // 等本进程退出后再替换，避免“文件占用”。
+      final script = '#!/bin/bash\n'
+          'PID="\$1"\n'
+          'for i in \$(seq 1 60); do kill -0 "\$PID" 2>/dev/null || break; sleep 0.2; done\n'
+          'sleep 0.4\n'
+          'rm -rf "$destApp"\n'
+          'cp -R "$newApp" "$destApp"\n'
+          'xattr -dr com.apple.quarantine "$destApp" 2>/dev/null\n'
+          'open "$destApp"\n';
+      File(scriptPath).writeAsStringSync(script);
+      await Process.run('/bin/chmod', ['+x', scriptPath]);
+      await Process.start('/bin/bash', [scriptPath, '$pid'],
+          mode: ProcessStartMode.detached);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      exit(0); // 退出后脚本接管替换并重启
+    } catch (e) {
+      status.value = '自动更新失败：$e';
+      await Future<void>.delayed(const Duration(seconds: 2));
+      close();
+      _snack('自动更新失败，请用「前往下载」手动更新');
+    }
+  }
+
+  /// Android：下载 apk→调起系统安装器（需用户确认安装）。
+  Future<void> _autoUpdateAndroid(String url, String version) async {
+    final dir = await getExternalStorageDirectory();
+    if (dir == null) {
+      _snack('无法获取存储目录');
+      return;
+    }
+    final apkPath = '${dir.path}/xiaoli-$version.apk';
+    final progress = ValueNotifier<double>(0);
+    final status = ValueNotifier<String>('准备下载…');
+    var dialogOpen = true;
+    void close() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('自动更新中'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<double>(
+              valueListenable: progress,
+              builder: (_, v, __) => LinearProgressIndicator(value: v > 0 ? v : null),
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, s, __) => Text(s, textAlign: TextAlign.center),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      if (!await _downloadInto(url, apkPath, progress, status)) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      status.value = '启动安装器…';
+      await const MethodChannel('xiaoli/installer')
+          .invokeMethod('install', {'path': apkPath});
+      close();
+    } catch (e) {
+      close();
+      _snack('自动更新失败：$e（可用「前往下载」手动更新）');
+    }
   }
 
   Future<void> _addFiles() async {
@@ -1368,7 +1856,11 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _current = t);
     _pushPlayHistory(t);
     PlaybackSource src;
-    if (t.bvid != null) {
+    final cachedFile = DownloadManager.instance.cachedPath(t.key);
+    if (cachedFile != null && File(cachedFile).existsSync()) {
+      // 已离线缓存：直接放本地文件，无需联网解析
+      src = PlaybackSource.local(cachedFile, title: t.name);
+    } else if (t.bvid != null) {
       // B站：先弹 loading，异步取音频流
       showDialog<void>(
         context: context,
@@ -1783,6 +2275,7 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
           const SizedBox(width: 8),
+          _downloadsButton(),
           IconButton(
             onPressed: _openUrl,
             tooltip: '打开网址 / 直播流',
@@ -3190,6 +3683,16 @@ class _HomeShellState extends State<HomeShell> {
       items.add(const PopupMenuItem(
           value: 'pdownload', child: Text('下载到本地')));
     }
+    if (!t.isLocal && (t.bvid != null || t.url != null)) {
+      if (DownloadManager.instance.isCached(t.key)) {
+        items.add(
+            const PopupMenuItem(value: 'uncache', child: Text('删除离线缓存')));
+      } else {
+        items.add(
+            const PopupMenuItem(value: 'cache', child: Text('缓存(离线可看)')));
+      }
+      items.add(const PopupMenuItem(value: 'bgdl', child: Text('后台下载到…')));
+    }
     showMenu<String>(
       context: context,
       position: RelativeRect.fromLTRB(pos.dx, pos.dy, pos.dx, pos.dy),
@@ -3206,6 +3709,13 @@ class _HomeShellState extends State<HomeShell> {
         _setTrackTag(t);
       } else if (v == 'pdownload') {
         _downloadPlatformVideo(t);
+      } else if (v == 'cache') {
+        _cacheVideo(t);
+      } else if (v == 'uncache') {
+        DownloadManager.instance.deleteCached(t.key);
+        _snack('已删除离线缓存');
+      } else if (v == 'bgdl') {
+        _bgDownload(t);
       } else if (v == 'copyname') {
         Clipboard.setData(ClipboardData(text: t.name));
         ScaffoldMessenger.of(context)
@@ -3561,7 +4071,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.37.0'),
+          title: Text('小李播放器 v2.38.0'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -3851,6 +4361,18 @@ class _HomeShellState extends State<HomeShell> {
           title: const Text('检查更新'),
           subtitle: const Text('检测并下载最新版本'),
           onTap: _checkUpdateManually,
+        ),
+        ListTile(
+          leading: const Icon(Icons.speed),
+          title: const Text('测网速'),
+          subtitle: Text(_speedResult ?? '测试到平台服务器的下载速度'),
+          trailing: _speedTesting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.chevron_right),
+          onTap: _speedTesting ? null : _runSpeedTest,
         ),
         ListTile(
           leading: const Icon(Icons.playlist_play),
