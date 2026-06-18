@@ -46,6 +46,7 @@ class PlayerScreen extends StatefulWidget {
   final Future<void> Function(int score)? onRate; // 平台视频评分
   final Future<List<SubtitleOption>> Function()? onLoadSubtitleOptions; // F13
   final Future<Map<String, String?>> Function()? onLoadMultiSubtitles; // F14
+  final VoidCallback? onCache; // 缓存此视频到本地（离线可看）；本地/已缓存为 null
   const PlayerScreen({
     super.key,
     required this.source,
@@ -74,6 +75,7 @@ class PlayerScreen extends StatefulWidget {
     this.onRate,
     this.onLoadSubtitleOptions,
     this.onLoadMultiSubtitles,
+    this.onCache,
   });
 
   @override
@@ -2307,6 +2309,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             color: const Color(0xFF2B2B33),
             onSelected: (v) {
               switch (v) {
+                case 'cache':
+                  widget.onCache?.call();
+                  break;
                 case 'loop':
                   _toggleLoop();
                   break;
@@ -2427,6 +2432,11 @@ class _PlayerScreenState extends State<PlayerScreen>
               }
             },
             itemBuilder: (_) => [
+              if (widget.onCache != null)
+                const PopupMenuItem(
+                    value: 'cache',
+                    child: Text('⬇ 缓存此视频(离线可看)',
+                        style: TextStyle(color: Colors.white))),
               if (widget.onTriple != null) ...[
                 const PopupMenuItem(
                     value: 'triple',
