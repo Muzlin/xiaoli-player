@@ -190,6 +190,8 @@ class _HomeShellState extends State<HomeShell> {
   final UpdateService _update = UpdateService();
   bool _speedTesting = false; // 测网速进行中
   String? _speedResult; // 测速结果文案
+  int _settingsTaps = 0; // 连点设置进后台管理
+  DateTime? _lastSettingsTap;
   Track? _current;
   String _query = '';
   int _navIndex = 0;
@@ -271,10 +273,48 @@ class _HomeShellState extends State<HomeShell> {
     _urlTimer = Timer.periodic(
         const Duration(seconds: 60), (_) => _refreshPlatformUrl());
     if (Platform.isAndroid) _initAndroidChannels();
+    _initOpenFileChannel(); // 「打开方式」用本 app 打开音视频文件
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
     });
+  }
+
+  /// 系统「打开方式」选小李播放器时，原生把文件路径经此 channel 交过来播放。
+  void _initOpenFileChannel() {
+    if (!Platform.isMacOS && !Platform.isAndroid) return;
+    const ch = MethodChannel('xiaoli/openfile');
+    ch.setMethodCallHandler((call) async {
+      if (call.method == 'open' && call.arguments is String) {
+        _openExternalFile(call.arguments as String);
+      }
+      return null;
+    });
+    // 拉取启动时缓存的待播文件（双击文件启动 app 的情况）。
+    ch.invokeMethod('getPending').then((v) {
+      if (v is List) {
+        final paths = v.whereType<String>().toList();
+        if (paths.isEmpty) return;
+        for (final p in paths) {
+          if (!_localTracks.any((x) => x.localPath == p)) {
+            _localTracks.insert(0, Track.local(p));
+          }
+        }
+        _saveLocal();
+        if (mounted) setState(() {});
+        _play(Track.local(paths.first));
+      }
+    }).catchError((_) {});
+  }
+
+  /// 把外部打开的单个文件加入本地库并播放。
+  void _openExternalFile(String path) {
+    if (path.isEmpty || !mounted) return;
+    if (!_localTracks.any((x) => x.localPath == path)) {
+      setState(() => _localTracks.insert(0, Track.local(path)));
+      _saveLocal();
+    }
+    _play(Track.local(path));
   }
 
   @override
@@ -1600,6 +1640,23 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  /// 连续快速点击「设置」5 次→进入隐藏的后台管理。
+  void _onSettingsTap() {
+    final now = DateTime.now();
+    if (_lastSettingsTap == null ||
+        now.difference(_lastSettingsTap!) > const Duration(milliseconds: 1500)) {
+      _settingsTaps = 1;
+    } else {
+      _settingsTaps++;
+    }
+    _lastSettingsTap = now;
+    if (_settingsTaps >= 5) {
+      _settingsTaps = 0;
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const _AdminPage()));
+    }
+  }
+
   /// 清空全部离线缓存（先确认，告知释放多少空间）。
   Future<void> _clearCacheConfirm() async {
     final bytes = await DownloadManager.instance.totalCacheBytes();
@@ -2281,6 +2338,7 @@ class _HomeShellState extends State<HomeShell> {
           // F26: 记住上次所在 tab。
           SharedPreferences.getInstance()
               .then((p) => p.setInt('last_nav', index));
+          if (index == 3) _onSettingsTap(); // 连点设置5次→后台管理
         },
         icon: Icon(icon, color: selected ? cs.primary : Colors.white60),
       ),
@@ -4294,7 +4352,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.39.2'),
+          title: Text('小李播放器 v2.39.3'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -5285,6 +5343,157 @@ class _PasswordProtectPageState extends State<_PasswordProtectPage> {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// 隐藏后台管理：连点设置5次进入。管理平台/云端视频 + 公网状态。
+class _AdminPage extends StatefulWidget {
+  const _AdminPage();
+  @override
+  State<_AdminPage> createState() => _AdminPageState();
+}
+
+class _AdminPageState extends State<_AdminPage> {
+  final _svc = PlatformService();
+  List<PlatformVideo> _videos = [];
+  bool _loading = true;
+  bool _healthy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final v = await _svc.list();
+    final h = await _svc.publicHealthy();
+    if (!mounted) return;
+    setState(() {
+      _videos = v;
+      _healthy = h;
+      _loading = false;
+    });
+  }
+
+  Future<void> _refreshUrl() async {
+    await PlatformService.loadRemoteUrl();
+    await PlatformService.loadLocal();
+    await _load();
+  }
+
+  Future<void> _delete(PlatformVideo v) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除视频'),
+        content: Text('删除「${v.title}」？平台和 GitHub 备份都会一并删除。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final done = await PlatformService.deleteVideo(v.id);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(done ? '已删除' : '删除失败')));
+    if (done) _load();
+  }
+
+  Widget _kv(String k, String v, {Color? color}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+                width: 76,
+                child: Text(k,
+                    style: const TextStyle(color: Colors.black54, fontSize: 13))),
+            Expanded(
+                child: SelectableText(v,
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: color,
+                        fontWeight: FontWeight.w500))),
+          ],
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('后台管理'), actions: [
+        IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
+      ]),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              children: [
+                Card(
+                  margin: const EdgeInsets.all(12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('平台状态',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 15)),
+                        const SizedBox(height: 8),
+                        _kv('公网地址', PlatformService.current),
+                        _kv('局域网', PlatformService.detectedIp ?? '未探测到'),
+                        _kv('公网健康', _healthy ? '正常 ✓' : '异常 ✗',
+                            color: _healthy ? Colors.green : Colors.red),
+                        _kv('视频数', '${_videos.length} 条'),
+                        const SizedBox(height: 8),
+                        Wrap(spacing: 8, children: [
+                          OutlinedButton.icon(
+                            onPressed: _refreshUrl,
+                            icon: const Icon(Icons.cloud_sync, size: 18),
+                            label: const Text('刷新公网地址'),
+                          ),
+                        ]),
+                      ],
+                    ),
+                  ),
+                ),
+                const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 4, 16, 4),
+                  child: Text('平台 / 云端视频（点删除会同时删 GitHub 备份）',
+                      style: TextStyle(color: Colors.black54, fontSize: 13)),
+                ),
+                if (_videos.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(30),
+                    child: Center(
+                        child: Text('暂无视频',
+                            style: TextStyle(color: Colors.black38))),
+                  ),
+                for (final v in _videos)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.movie_outlined),
+                    title: Text(v.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                        '${v.uploader.isEmpty ? '匿名' : v.uploader} · ${v.cat}'),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.delete_outline, color: Colors.red),
+                      tooltip: '删除',
+                      onPressed: () => _delete(v),
+                    ),
+                  ),
+                const SizedBox(height: 20),
+              ],
+            ),
     );
   }
 }
