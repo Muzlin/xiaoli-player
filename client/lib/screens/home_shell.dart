@@ -5145,11 +5145,83 @@ class _HomeShellState extends State<HomeShell> {
           onTap: () => _guard('useLan', _setLanIp),
         ),
         ListTile(
+          leading: const Icon(Icons.menu_book_outlined),
+          title: const Text('使用说明'),
+          subtitle: const Text('新手指南 · 功能怎么用', style: TextStyle(fontSize: 12)),
+          onTap: _showGuide,
+        ),
+        ListTile(
           leading: const Icon(Icons.description_outlined),
           title: const Text('免责声明'),
           onTap: _showDisclaimer,
         ),
       ],
+    );
+  }
+
+  // 使用说明：一页讲清各功能怎么用。
+  void _showGuide() {
+    const sections = <(String, String, String)>[
+      ('▶️', '播放与媒体库',
+          '左侧切换：音乐库 / 收藏 / 我的视频 / 历史。点任意条目即可播放，支持几乎所有音视频格式。'),
+      ('🎬', '看平台视频',
+          '首页和搜索里带「平台」标签的是本应用共享平台的视频，点开直接在线播放，无需下载。'),
+      ('🅱️', 'B站搜索播放',
+          '顶部搜索框可搜 B站 视频/UP主，支持评论、弹幕、分P、字幕；登录后可点赞投币关注。'),
+      ('👍', '播放页三连',
+          '播放平台视频时，控制按钮下方有 👍点赞 / 🪙投币 / ⭐收藏。点赞收藏免费可反复切，投币花小李兑换币。'),
+      ('👤', '个人中心',
+          '左侧👤进入：看兑换币余额、每日签到领币(连签7天额外+50)、做每日任务领币、查看我的收藏/点赞/投币、热门榜。'),
+      ('🪙', '小李兑换币',
+          '赚币：签到、每日任务。花币：投币、改创作者名。投币越多称号越高(路人→新粉→铁粉→真爱粉)。'),
+      ('🏆', '创作中心',
+          '左侧🏆进入：上传作品到平台、批量上传、看自己作品的数据、改创作者名。'),
+      ('📥', '缓存与离线',
+          '在线视频可一键缓存到本地，之后离线也能看；支持后台下载、批量/全选缓存。'),
+      ('🎵', '后台播放',
+          '退出播放页或切到别的界面，音视频继续播放；底部迷你条可控制。'),
+      ('🔗', '设为默认播放器',
+          '可把本应用设为系统打开音视频文件的默认方式（macOS「打开方式」/ 安卓选择应用）。'),
+      ('🌐', '连不上/网络异常',
+          '平台地址会自动跟随更新，通常稍等会自动恢复；也可在设置里测网速、改局域网服务器IP。'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('使用说明'),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final s in sections)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('${s.$1}  ${s.$2}',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 14)),
+                        const SizedBox(height: 2),
+                        Text(s.$3,
+                            style: const TextStyle(
+                                color: Colors.black54, fontSize: 13, height: 1.4)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('知道了')),
+        ],
+      ),
     );
   }
 }
