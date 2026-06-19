@@ -274,10 +274,23 @@ class _HomeShellState extends State<HomeShell> {
         const Duration(seconds: 60), (_) => _refreshPlatformUrl());
     if (Platform.isAndroid) _initAndroidChannels();
     _initOpenFileChannel(); // 「打开方式」用本 app 打开音视频文件
+    _loadAppName(); // App 内显示名（后台可改）
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
       _silentCheckUpdate();
     });
+  }
+
+  /// App 内显示名：先用缓存即时显示，再后台拉服务器最新（后台可改）。
+  Future<void> _loadAppName() async {
+    final p = await SharedPreferences.getInstance();
+    final cached = p.getString('app_name_cache') ?? '';
+    if (cached.isNotEmpty) appNameNotifier.value = cached;
+    final remote = await PlatformService.getAppName();
+    if (remote.isNotEmpty) {
+      appNameNotifier.value = remote;
+      await p.setString('app_name_cache', remote);
+    }
   }
 
   /// 系统「打开方式」选小李播放器时，原生把文件路径经此 channel 交过来播放。
@@ -4383,10 +4396,13 @@ class _HomeShellState extends State<HomeShell> {
             style: TextStyle(
                 fontSize: 20, fontWeight: FontWeight.bold, color: cs.primary)),
         const SizedBox(height: 16),
-        const ListTile(
-          leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.39.7'),
-          subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+        ListTile(
+          leading: const Icon(Icons.info_outline),
+          title: ValueListenableBuilder<String>(
+            valueListenable: appNameNotifier,
+            builder: (_, name, __) => Text('$name v2.39.8'),
+          ),
+          subtitle: const Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
           leading: CircleAvatar(
@@ -6325,6 +6341,185 @@ class _AdminPageState extends State<_AdminPage> {
     _toast(ok ? '已设为下一版 $which 应用文件' : '上传失败');
   }
 
+  // 批次4：回收站
+  Future<void> _showTrash() async {
+    final d = await PlatformService.adminGet('trash');
+    if (!mounted) return;
+    final trash = (d?['trash'] as List?) ?? [];
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          builder: (_, scroll) => Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(10),
+                child: Row(children: [
+                  const Text('回收站',
+                      style:
+                          TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const Spacer(),
+                  if (trash.isNotEmpty)
+                    TextButton(
+                        onPressed: () async {
+                          final ok = await _confirm('清空回收站',
+                              '永久删除回收站里 ${trash.length} 个（含 GitHub 备份），不可恢复！');
+                          if (ok != true) return;
+                          await PlatformService.adminGet('empty-trash');
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          _toast('回收站已清空');
+                        },
+                        child: const Text('清空',
+                            style: TextStyle(color: Colors.red))),
+                ]),
+              ),
+              Expanded(
+                child: trash.isEmpty
+                    ? const Center(
+                        child: Text('回收站是空的',
+                            style: TextStyle(color: Colors.black38)))
+                    : ListView(
+                        controller: scroll,
+                        children: [
+                          for (final v in trash)
+                            ListTile(
+                              dense: true,
+                              leading: const Icon(Icons.delete_outline),
+                              title: Text('${(v as Map)['title'] ?? ''}',
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                              trailing: TextButton(
+                                child: const Text('恢复'),
+                                onPressed: () async {
+                                  await PlatformService.adminGet('restore',
+                                      params: {'id': '${v['id']}'});
+                                  if (!ctx.mounted) return;
+                                  setSheet(() => trash.remove(v));
+                                  _toast('已恢复');
+                                  _load();
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 批次4：索引一致性检查
+  Future<void> _verify() async {
+    final d = await PlatformService.adminGet('verify');
+    if (d == null || !mounted) {
+      _toast('检查失败');
+      return;
+    }
+    final miss = (d['missing_files'] as List?) ?? [];
+    final orph = (d['orphan_files'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('索引一致性检查'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('条目', '${d['entries']}'),
+            _kv('文件', '${d['files']}'),
+            _kv('缺文件', '${miss.length}',
+                color: miss.isEmpty ? Colors.green : Colors.orange),
+            _kv('孤儿文件', '${orph.length}',
+                color: orph.isEmpty ? Colors.green : Colors.orange),
+            if (miss.isEmpty && orph.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child:
+                    Text('一切正常 ✓', style: TextStyle(color: Colors.green)),
+              ),
+          ],
+        ),
+        actions: [
+          if (orph.isNotEmpty)
+            TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _cleanOrphans();
+                },
+                child: const Text('清理孤儿')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次4：导出统计 CSV
+  void _exportCsv() {
+    final b = StringBuffer('标题,上传者,大小(MB),播放量,已备份,隐藏,置顶\n');
+    for (final v in _videos) {
+      final t = v.title.replaceAll(',', '，');
+      b.writeln('$t,${v.uploader},${(v.size / 1048576).toStringAsFixed(1)},'
+          '${v.views},${v.ghUrl != null ? 1 : 0},${v.hidden ? 1 : 0},${v.pinned ? 1 : 0}');
+    }
+    Clipboard.setData(ClipboardData(text: b.toString()));
+    _toast('统计 CSV 已复制');
+  }
+
+  // 批次4：原始配置查看
+  Future<void> _showConfig() async {
+    final d = await PlatformService.adminGet('get-config');
+    if (!mounted) return;
+    final cfg = d?['config'] ?? {};
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('服务器配置 config.json'),
+        content: SingleChildScrollView(
+            child: SelectableText(
+                const JsonEncoder.withIndent('  ').convert(cfg),
+                style:
+                    const TextStyle(fontSize: 12, fontFamily: 'monospace'))),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次4：单条立即备份 / 重置播放量
+  Future<void> _backupOne(PlatformVideo v) async {
+    final d = await PlatformService.adminGet('backup-one', params: {'id': v.id});
+    _toast(d?['ok'] == true ? '已开始备份到 GitHub' : '备份失败');
+  }
+
+  Future<void> _resetViews(PlatformVideo v) async {
+    await PlatformService.adminGet('reset-views', params: {'id': v.id});
+    _toast('播放量已重置');
+    _load();
+  }
+
+  // 批次4：批量备份选中
+  Future<void> _batchBackup() async {
+    if (_selected.isEmpty) return;
+    setState(() => _busy = true);
+    for (final id in _selected.toList()) {
+      await PlatformService.adminGet('backup-one', params: {'id': id});
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _selectMode = false;
+      _selected.clear();
+    });
+    _toast('已排队备份');
+  }
+
   // 功能20(批次3)：批量删除/隐藏选中
   Future<void> _batchAct(bool delete) async {
     if (_selected.isEmpty) return;
@@ -6387,11 +6582,15 @@ class _AdminPageState extends State<_AdminPage> {
             ),
           if (_selectMode) ...[
             IconButton(
+                tooltip: '备份选中到 GitHub',
+                onPressed: _busy ? null : _batchBackup,
+                icon: const Icon(Icons.backup_outlined)),
+            IconButton(
                 tooltip: '隐藏选中',
                 onPressed: _busy ? null : () => _batchAct(false),
                 icon: const Icon(Icons.visibility_off)),
             IconButton(
-                tooltip: '删除选中',
+                tooltip: '删除选中(进回收站)',
                 onPressed: _busy ? null : () => _batchAct(true),
                 icon: const Icon(Icons.delete, color: Colors.red)),
             IconButton(
@@ -6529,6 +6728,52 @@ class _AdminPageState extends State<_AdminPage> {
                                   _copy(PlatformService.current, '公网地址'),
                               icon: const Icon(Icons.copy, size: 16),
                               label: const Text('复制公网地址')),
+                          // 批次4
+                          OutlinedButton.icon(
+                              onPressed: _showTrash,
+                              icon: const Icon(Icons.delete_outline, size: 16),
+                              label: const Text('回收站')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _verify,
+                              icon: const Icon(Icons.fact_check_outlined, size: 16),
+                              label: const Text('一致性检查')),
+                          OutlinedButton.icon(
+                              onPressed: _exportCsv,
+                              icon: const Icon(Icons.table_chart_outlined, size: 16),
+                              label: const Text('导出CSV')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _showConfig,
+                              icon: const Icon(Icons.data_object, size: 16),
+                              label: const Text('查看配置')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('app-name', '改应用名字(App内显示)',
+                                      (_stats['app_name'] ?? '').toString()),
+                              icon: const Icon(Icons.drive_file_rename_outline,
+                                  size: 16),
+                              label: const Text('改应用名字')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('banned', '关键词黑名单(逗号分隔，命中拒绝上传)',
+                                      (_stats['banned'] ?? '').toString()),
+                              icon: const Icon(Icons.block, size: 16),
+                              label: const Text('黑名单')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('dl-title', '改下载页标题',
+                                      (_stats['dl_title'] ?? '').toString()),
+                              icon: const Icon(Icons.title, size: 16),
+                              label: const Text('下载页标题')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('dl-subtitle', '改下载页副标题',
+                                      (_stats['dl_subtitle'] ?? '').toString()),
+                              icon: const Icon(Icons.subtitles_outlined, size: 16),
+                              label: const Text('下载页副标题')),
                           OutlinedButton.icon(
                               onPressed: _busy ? null : _restartServer,
                               style: OutlinedButton.styleFrom(
@@ -6669,6 +6914,10 @@ class _AdminPageState extends State<_AdminPage> {
                                 _toggleFlag(v, 'pin', !v.pinned);
                               } else if (a == 'detail') {
                                 _detail(v);
+                              } else if (a == 'backup1') {
+                                _backupOne(v);
+                              } else if (a == 'resetviews') {
+                                _resetViews(v);
                               } else if (a == 'delete') {
                                 _delete(v);
                               }
@@ -6680,12 +6929,18 @@ class _AdminPageState extends State<_AdminPage> {
                                   value: 'download', child: Text('下载到本地')),
                               const PopupMenuItem(
                                   value: 'direct', child: Text('复制直链')),
+                              if (v.ghUrl == null)
+                                const PopupMenuItem(
+                                    value: 'backup1',
+                                    child: Text('立即备份到 GitHub')),
                               if (v.ghUrl != null)
                                 const PopupMenuItem(
                                     value: 'backup',
                                     child: Text('复制 GitHub 备份链接')),
                               const PopupMenuItem(
                                   value: 'edit', child: Text('改标题/上传者')),
+                              const PopupMenuItem(
+                                  value: 'resetviews', child: Text('重置播放量')),
                               PopupMenuItem(
                                   value: 'hide',
                                   child: Text(v.hidden ? '取消隐藏' : '隐藏(不公开)')),
@@ -6694,7 +6949,7 @@ class _AdminPageState extends State<_AdminPage> {
                                   child:
                                       Text(v.pinned ? '取消置顶' : '置顶/精选')),
                               const PopupMenuItem(
-                                  value: 'delete', child: Text('删除')),
+                                  value: 'delete', child: Text('删除(进回收站)')),
                             ],
                           ),
                   ),
