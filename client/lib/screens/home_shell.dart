@@ -2217,6 +2217,8 @@ class _HomeShellState extends State<HomeShell> {
   Future<void> _play(Track t, {bool replace = false}) async {
     setState(() => _current = t);
     _pushPlayHistory(t);
+    if (t.tag == '平台') PlatformService.pingTask('play'); // 每日任务：看视频
+
     PlaybackSource src;
     final cachedFile = DownloadManager.instance.cachedPath(t.key);
     if (cachedFile != null && File(cachedFile).existsSync()) {
@@ -5537,6 +5539,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   Map<String, List<String>> _ids = {'coined': [], 'liked': [], 'faved': []};
   final Map<String, PlatformVideo> _byId = {};
   List<PlatformVideo> _rank = []; // 热门榜
+  Map<String, dynamic>? _tasks; // 每日任务 /tasks 返回
 
   @override
   void initState() {
@@ -5550,6 +5553,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     final ids = await PlatformService.myLists();
     final all = await PlatformService().list(); // 全平台视频，用 id 解析成卡片
     final rank = await PlatformService.rank(by: 'coins');
+    final tasks = await PlatformService.getTasks();
     if (!mounted) return;
     _byId.clear();
     for (final v in all) {
@@ -5559,8 +5563,28 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
       _balance = bal;
       _ids = ids;
       _rank = rank;
+      _tasks = tasks;
       _loading = false;
     });
+  }
+
+  Future<void> _claimTask(String task) async {
+    final d = await PlatformService.claimTask(task);
+    if (!mounted) return;
+    if (d == null) {
+      _toast('领取失败');
+      return;
+    }
+    if (d['ok'] == true) {
+      _toast('领取成功！+${d['reward'] ?? 0} 兑换币');
+      setState(() {
+        if (d['balance'] != null) _balance = (d['balance'] as num).toInt();
+      });
+      final t = await PlatformService.getTasks(); // 刷新已领取状态
+      if (mounted) setState(() => _tasks = t);
+    } else {
+      _toast('${d['error'] ?? '领取失败'}');
+    }
   }
 
   // 称号：按投币数升级（投币越多越铁）。
@@ -5601,6 +5625,64 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text(m)));
     }
+  }
+
+  Widget _taskCard(ColorScheme cs) {
+    if (_tasks == null) return const SizedBox.shrink();
+    final t = (_tasks!['tasks'] as Map?) ?? {};
+    final goals = (_tasks!['goals'] as Map?) ?? const {};
+    final rewards = (_tasks!['rewards'] as Map?) ?? const {};
+    final claimed =
+        ((t['claimed'] as List?) ?? const []).map((e) => e.toString()).toSet();
+    const defs = <(String, String, IconData)>[
+      ('coin', '投 1 次币', Icons.monetization_on),
+      ('like', '点 1 个赞', Icons.thumb_up),
+      ('play', '看 1 个视频', Icons.play_circle),
+    ];
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          const Row(children: [
+            Icon(Icons.checklist, size: 18),
+            SizedBox(width: 6),
+            Text('每日任务',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+          ]),
+          const SizedBox(height: 6),
+          for (final d in defs)
+            Builder(builder: (_) {
+              final cur = ((t[d.$1] ?? 0) as num).toInt();
+              final goal = ((goals[d.$1] ?? 1) as num).toInt();
+              final done = cur >= goal;
+              final got = claimed.contains(d.$1);
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  Icon(d.$3,
+                      size: 18, color: done ? cs.primary : Colors.black26),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('${d.$2}  (+${rewards[d.$1] ?? 5})')),
+                  Text('$cur/$goal',
+                      style:
+                          const TextStyle(color: Colors.black45, fontSize: 12)),
+                  const SizedBox(width: 10),
+                  got
+                      ? const Text('已领',
+                          style: TextStyle(color: Colors.black38, fontSize: 13))
+                      : FilledButton(
+                          onPressed: done ? () => _claimTask(d.$1) : null,
+                          style: FilledButton.styleFrom(
+                              minimumSize: const Size(56, 32),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12)),
+                          child: const Text('领取')),
+                ]),
+              );
+            }),
+        ]),
+      ),
+    );
   }
 
   List<PlatformVideo> get _shown {
@@ -5694,6 +5776,8 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 16),
+                _taskCard(cs), // 每日任务
                 const SizedBox(height: 16),
                 // 三连分段
                 SingleChildScrollView(

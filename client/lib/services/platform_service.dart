@@ -257,6 +257,49 @@ class PlatformService {
     return null;
   }
 
+  /// 每日任务进度。返回 {ok, tasks:{coin,like,play,claimed}, goals, rewards}。
+  static Future<Map<String, dynamic>?> getTasks() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/tasks?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 领取每日任务奖励。返回 {ok, reward, balance} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> claimTask(String task) async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/claim?uid=$uid&task=$task'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 上报任务进度（如 play=看视频）。
+  static Future<void> pingTask(String kind) async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        await http
+            .get(Uri.parse('$base/task-done?uid=$uid&kind=$kind'))
+            .timeout(const Duration(seconds: 6));
+        return;
+      } catch (_) {}
+    }
+  }
+
   /// 公开热门榜：by=coins|likes|favs|views，前 20。
   static Future<List<PlatformVideo>> rank({String by = 'coins'}) async {
     for (final base in {current, baseUrl}) {
