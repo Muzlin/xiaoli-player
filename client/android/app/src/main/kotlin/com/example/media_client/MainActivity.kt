@@ -20,7 +20,9 @@ class MainActivity : FlutterActivity() {
     private var shareChannel: MethodChannel? = null
     private var screenChannel: MethodChannel? = null
     private var installerChannel: MethodChannel? = null
+    private var openChannel: MethodChannel? = null
     private var sharedUrl: String? = null
+    private var pendingOpenPath: String? = null // 启动时「打开方式」传入的待播文件
 
     // F46: 记录音量键按下时刻，区分长按(换曲)/短按(调音量)。
     private var volDownAt: Long = 0
@@ -68,6 +70,16 @@ class MainActivity : FlutterActivity() {
                 result.notImplemented()
             }
         }
+        // 「打开方式」：把外部用本 app 打开的音视频文件交给 Dart 播放。
+        openChannel = MethodChannel(messenger, "xiaoli/openfile")
+        openChannel?.setMethodCallHandler { call, result ->
+            if (call.method == "getPending") {
+                result.success(pendingOpenPath?.let { listOf(it) } ?: emptyList<String>())
+                pendingOpenPath = null
+            } else {
+                result.notImplemented()
+            }
+        }
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -77,12 +89,23 @@ class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleShareIntent(intent)
+        // 启动即「打开方式」：先缓存，Dart 起来后 getPending 拉取播放。
+        pendingOpenPath = viewIntentPath(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
         handleShareIntent(intent)
+        // app 已在运行时「打开方式」：直接推给 Dart 播放。
+        viewIntentPath(intent)?.let { openChannel?.invokeMethod("open", it) }
+    }
+
+    // 从 ACTION_VIEW intent 取出音视频文件地址（content:// 或 file:// 由 media_kit 直接播）。
+    private fun viewIntentPath(intent: Intent?): String? {
+        if (intent?.action != Intent.ACTION_VIEW) return null
+        val uri = intent.data ?: return null
+        return uri.toString()
     }
 
     // 自动更新：用 FileProvider 把 apk 交给系统安装器（Android 7+ 必须用 content:// URI）。
