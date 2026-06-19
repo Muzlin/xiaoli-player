@@ -281,17 +281,31 @@ class _HomeShellState extends State<HomeShell> {
     });
   }
 
-  /// App 内显示名：先用缓存即时显示，再后台拉服务器最新（后台可改）。
+  /// App 内显示名 + 官方下载网址：先用缓存即时显示，再后台拉 /version 最新（后台可改）。
   Future<void> _loadAppName() async {
     final p = await SharedPreferences.getInstance();
-    final cached = p.getString('app_name_cache') ?? '';
-    if (cached.isNotEmpty) appNameNotifier.value = cached;
-    final remote = await PlatformService.getAppName();
-    if (remote.isNotEmpty) {
-      appNameNotifier.value = remote;
-      await p.setString('app_name_cache', remote);
+    final cn = p.getString('app_name_cache') ?? '';
+    if (cn.isNotEmpty) appNameNotifier.value = cn;
+    final cd = p.getString('download_url_cache') ?? '';
+    if (cd.isNotEmpty) officialDownloadNotifier.value = cd;
+    final m = await PlatformService.fetchVersionInfo();
+    if (m == null) return;
+    final name = (m['app_name'] ?? '') as String;
+    final dl = (m['download_url'] ?? '') as String;
+    if (name.isNotEmpty) {
+      appNameNotifier.value = name;
+      await p.setString('app_name_cache', name);
+    }
+    if (dl.isNotEmpty) {
+      officialDownloadNotifier.value = dl;
+      await p.setString('download_url_cache', dl);
     }
   }
+
+  /// 官方下载网址：后台「下载源」配置优先（GitHub/平台），否则兜底平台下载页。
+  String get _officialDownload => officialDownloadNotifier.value.isNotEmpty
+      ? officialDownloadNotifier.value
+      : PlatformService.downloadUrl;
 
   /// 系统「打开方式」选小李播放器时，原生把文件路径经此 channel 交过来播放。
   void _initOpenFileChannel() {
@@ -4400,7 +4414,7 @@ class _HomeShellState extends State<HomeShell> {
           leading: const Icon(Icons.info_outline),
           title: ValueListenableBuilder<String>(
             valueListenable: appNameNotifier,
-            builder: (_, name, __) => Text('$name v2.39.8'),
+            builder: (_, name, __) => Text('$name v2.39.9'),
           ),
           subtitle: const Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
@@ -4967,7 +4981,7 @@ class _HomeShellState extends State<HomeShell> {
           title: const Text('官方下载网址'),
           isThreeLine: true,
           subtitle: Text(
-            '${PlatformService.downloadUrl}\n'
+            '$_officialDownload\n'
             '${PlatformService.useLan ? "● 局域网模式" : (_publicHealthy ? "● 公网正常" : "⚠ 公网限流/抽风中，建议切局域网")}',
             style: TextStyle(
                 fontSize: 12,
@@ -4979,8 +4993,7 @@ class _HomeShellState extends State<HomeShell> {
             icon: const Icon(Icons.copy, size: 18),
             tooltip: '复制',
             onPressed: () {
-              Clipboard.setData(
-                  ClipboardData(text: PlatformService.downloadUrl));
+              Clipboard.setData(ClipboardData(text: _officialDownload));
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('已复制下载网址')));
@@ -4988,7 +5001,7 @@ class _HomeShellState extends State<HomeShell> {
             },
           ),
           onTap: () async {
-            final uri = Uri.parse(PlatformService.downloadUrl);
+            final uri = Uri.parse(_officialDownload);
             if (await canLaunchUrl(uri)) {
               await launchUrl(uri, mode: LaunchMode.externalApplication);
             }
@@ -6520,6 +6533,206 @@ class _AdminPageState extends State<_AdminPage> {
     _toast('已排队备份');
   }
 
+  // 批次5：数据看板
+  Future<void> _dashboard() async {
+    final d = await PlatformService.adminGet('dashboard');
+    if (d == null || !mounted) {
+      _toast('加载失败');
+      return;
+    }
+    final top = (d['top'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('数据看板'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('作品数', '${d['videos']}'),
+            _kv('总播放', '${d['total_views']}'),
+            _kv('今日播放', '${d['plays_today']}'),
+            _kv('占用', _fmtBytes((d['storage'] ?? 0) as num)),
+            const Divider(),
+            const Text('热门 Top', style: TextStyle(fontWeight: FontWeight.bold)),
+            for (final t in top)
+              Text('· ${(t as Map)['title']} (▶${t['views']})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次5：访问IP统计
+  Future<void> _showIps() async {
+    final d = await PlatformService.adminGet('ips');
+    if (!mounted) return;
+    final ips = (d?['ips'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('访问来源（${d?['unique'] ?? 0} 个 IP）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ips.isEmpty
+              ? const Text('暂无')
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final e in ips.take(15))
+                      _kv('${(e as Map)['ip']}', '${e['hits']} 次'),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次5：GitHub 备份失效检测
+  Future<void> _verifyBackups() async {
+    setState(() => _busy = true);
+    final d = await PlatformService.adminGet('verify-backups');
+    if (!mounted) return;
+    setState(() => _busy = false);
+    final missing = (d?['missing'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('GitHub 备份检测'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('标记已备份', '${d?['backed'] ?? 0}'),
+            _kv('资产丢失', '${missing.length}',
+                color: missing.isEmpty ? Colors.green : Colors.red),
+            for (final m in missing.take(8)) Text('· $m'),
+          ],
+        ),
+        actions: [
+          if (missing.isNotEmpty)
+            TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _rebackup();
+                },
+                child: const Text('补全备份')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次5：批量URL导入（云端缓存）
+  Future<void> _batchImport() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('批量导入（云端缓存）'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('每行一个视频直链，服务器会逐个下载并备份',
+              style: TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 8),
+          TextField(
+              controller: ctrl,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                  hintText: 'https://...\nhttps://...',
+                  border: OutlineInputBorder())),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('开始')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final urls = ctrl.text
+        .split('\n')
+        .map((s) => s.trim())
+        .where((s) => s.startsWith('http'))
+        .toList();
+    if (urls.isEmpty || !mounted) return;
+    setState(() => _busy = true);
+    var done = 0;
+    for (final url in urls) {
+      final name = url.split('/').last.split('?').first;
+      final err =
+          await PlatformService.cloudFetch(name.isEmpty ? '导入' : name, '导入', url, const {}, 'mp4');
+      if (err == null) done++;
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _toast('导入完成 $done/${urls.length}');
+    _load();
+  }
+
+  // 批次5：清空日志
+  Future<void> _clearLogs() async {
+    final ok = await _confirm('清空日志', '清空 server/tunnel/keepalive 日志？');
+    if (ok != true) return;
+    for (final w in ['server', 'tunnel', 'keepalive']) {
+      await PlatformService.adminGet('clear-logs', params: {'which': w});
+    }
+    _toast('日志已清空');
+  }
+
+  // 批次5：置顶上移/下移
+  Future<void> _move(PlatformVideo v, String dir) async {
+    await PlatformService.adminGet('move', params: {'id': v.id, 'dir': dir});
+    _load();
+  }
+
+  // 批次5：批量改上传者（选中）
+  Future<void> _batchUploader() async {
+    if (_selected.isEmpty) return;
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('批量改上传者（${_selected.length} 个）'),
+        content: TextField(controller: ctrl, autofocus: true),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    for (final id in _selected.toList()) {
+      await PlatformService.adminGet('edit',
+          params: {'id': id, 'uploader': ctrl.text.trim()});
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _selectMode = false;
+      _selected.clear();
+    });
+    _toast('完成');
+    _load();
+  }
+
   // 功能20(批次3)：批量删除/隐藏选中
   Future<void> _batchAct(bool delete) async {
     if (_selected.isEmpty) return;
@@ -6585,6 +6798,10 @@ class _AdminPageState extends State<_AdminPage> {
                 tooltip: '备份选中到 GitHub',
                 onPressed: _busy ? null : _batchBackup,
                 icon: const Icon(Icons.backup_outlined)),
+            IconButton(
+                tooltip: '批量改上传者',
+                onPressed: _busy ? null : _batchUploader,
+                icon: const Icon(Icons.badge_outlined)),
             IconButton(
                 tooltip: '隐藏选中',
                 onPressed: _busy ? null : () => _batchAct(false),
@@ -6774,6 +6991,70 @@ class _AdminPageState extends State<_AdminPage> {
                                       (_stats['dl_subtitle'] ?? '').toString()),
                               icon: const Icon(Icons.subtitles_outlined, size: 16),
                               label: const Text('下载页副标题')),
+                          // 批次5
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _dashboard,
+                              icon: const Icon(Icons.dashboard_outlined, size: 16),
+                              label: const Text('数据看板')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _showIps,
+                              icon: const Icon(Icons.travel_explore, size: 16),
+                              label: const Text('访问统计')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _verifyBackups,
+                              icon: const Icon(Icons.verified_outlined, size: 16),
+                              label: const Text('备份检测')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _batchImport,
+                              icon: const Icon(Icons.playlist_add, size: 16),
+                              label: const Text('批量导入')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _clearLogs,
+                              icon: const Icon(Icons.delete_forever_outlined,
+                                  size: 16),
+                              label: const Text('清空日志')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('max-gb', '存储上限GB(0=无限)',
+                                      (_stats['max_gb'] ?? '').toString()),
+                              icon: const Icon(Icons.sd_storage, size: 16),
+                              label: const Text('存储上限')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('trash-days', '回收站自动清理(天,0=不清)',
+                                      (_stats['trash_days'] ?? '').toString()),
+                              icon: const Icon(Icons.auto_delete_outlined, size: 16),
+                              label: const Text('回收站清理')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('brand-color', '品牌色 hex(如 #ff5e8a)',
+                                      (_stats['brand_color'] ?? '').toString()),
+                              icon: const Icon(Icons.palette_outlined, size: 16),
+                              label: const Text('品牌色')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () async {
+                                      final cur =
+                                          (_stats['download_source'] ?? 'github')
+                                              .toString();
+                                      final next = cur == 'github'
+                                          ? 'platform'
+                                          : 'github';
+                                      final d = await PlatformService.adminGet(
+                                          'set-download-source',
+                                          params: {'v': next});
+                                      _toast(d?['ok'] == true
+                                          ? '下载源切到 ${next == "github" ? "GitHub" : "平台页"}'
+                                          : '切换失败');
+                                      if (d?['ok'] == true) _load();
+                                    },
+                              icon: const Icon(Icons.swap_horiz, size: 16),
+                              label: Text(
+                                  '下载源:${(_stats['download_source'] ?? 'github') == "github" ? "GitHub" : "平台"}')),
                           OutlinedButton.icon(
                               onPressed: _busy ? null : _restartServer,
                               style: OutlinedButton.styleFrom(
@@ -6918,6 +7199,10 @@ class _AdminPageState extends State<_AdminPage> {
                                 _backupOne(v);
                               } else if (a == 'resetviews') {
                                 _resetViews(v);
+                              } else if (a == 'moveup') {
+                                _move(v, 'up');
+                              } else if (a == 'movedown') {
+                                _move(v, 'down');
                               } else if (a == 'delete') {
                                 _delete(v);
                               }
@@ -6948,6 +7233,12 @@ class _AdminPageState extends State<_AdminPage> {
                                   value: 'pin',
                                   child:
                                       Text(v.pinned ? '取消置顶' : '置顶/精选')),
+                              if (v.pinned) ...[
+                                const PopupMenuItem(
+                                    value: 'moveup', child: Text('置顶内上移')),
+                                const PopupMenuItem(
+                                    value: 'movedown', child: Text('置顶内下移')),
+                              ],
                               const PopupMenuItem(
                                   value: 'delete', child: Text('删除(进回收站)')),
                             ],
