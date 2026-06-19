@@ -2321,11 +2321,37 @@ class _HomeShellState extends State<HomeShell> {
           _navIcon(Icons.favorite, 1, cs),
           _navIcon(Icons.video_library, 2, cs),
           _navIcon(Icons.history, 4, cs),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '创作中心',
+              onPressed: _openCreatorCenter,
+              icon: const Icon(Icons.workspace_premium_outlined,
+                  color: Colors.white60),
+            ),
+          ),
           _navIcon(Icons.settings, 3, cs),
           const Spacer(),
         ],
       ),
     );
+  }
+
+  void _openCreatorCenter() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _CreatorCenterPage(
+        onUpload: _uploadToPlatform,
+        onMyVideos: () {
+          Navigator.of(context).pop();
+          setState(() => _navIndex = 2);
+        },
+        onStats: () => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => StatsScreen(history: _history, watchSec: _watchSec),
+        )),
+        onPlay: (id, title) =>
+            _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+      ),
+    ));
   }
 
   Widget _navIcon(IconData icon, int index, ColorScheme cs) {
@@ -4352,7 +4378,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.39.4'),
+          title: Text('小李播放器 v2.39.5'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -5347,6 +5373,137 @@ class _PasswordProtectPageState extends State<_PasswordProtectPage> {
   }
 }
 
+/// 创作中心：上传作品、我的视频、数据统计、平台播放榜。
+class _CreatorCenterPage extends StatefulWidget {
+  final VoidCallback onUpload;
+  final VoidCallback onMyVideos;
+  final VoidCallback onStats;
+  final void Function(String id, String title) onPlay;
+  const _CreatorCenterPage(
+      {required this.onUpload,
+      required this.onMyVideos,
+      required this.onStats,
+      required this.onPlay});
+  @override
+  State<_CreatorCenterPage> createState() => _CreatorCenterPageState();
+}
+
+class _CreatorCenterPageState extends State<_CreatorCenterPage> {
+  List<PlatformVideo> _top = [];
+  bool _loading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final v = await PlatformService().list(sort: 'views');
+    if (!mounted) return;
+    setState(() {
+      _top = v;
+      _loading = false;
+    });
+  }
+
+  Widget _entry(IconData ic, String title, String sub, Color c, VoidCallback t) {
+    return Card(
+      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+      child: ListTile(
+        leading: CircleAvatar(
+            backgroundColor: c.withOpacity(0.15),
+            child: Icon(ic, color: c)),
+        title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+        subtitle: Text(sub, style: const TextStyle(fontSize: 12)),
+        trailing: const Icon(Icons.chevron_right),
+        onTap: t,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final totalViews = _top.fold<int>(0, (s, v) => s + v.views);
+    return Scaffold(
+      appBar: AppBar(title: const Text('创作中心'), actions: [
+        IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
+      ]),
+      body: ListView(
+        children: [
+          Container(
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                  colors: [Color(0xFFFF5E8A), Color(0xFFB14CFF)]),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('我的创作',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      Text('平台作品 ${_top.length} · 总播放 $totalViews',
+                          style: const TextStyle(color: Colors.white70)),
+                    ],
+                  ),
+                ),
+                const Icon(Icons.workspace_premium,
+                    color: Colors.white70, size: 40),
+              ],
+            ),
+          ),
+          _entry(Icons.cloud_upload_outlined, '上传作品到平台',
+              '把视频发布到平台，别人可搜可看', const Color(0xFFFF5E8A), widget.onUpload),
+          _entry(Icons.video_library_outlined, '我的视频 / 发布到B站',
+              '本地收录、投稿 B站', const Color(0xFF7C5CFF), widget.onMyVideos),
+          _entry(Icons.analytics_outlined, '观看数据统计',
+              '累计观看时长 / 播放排行', const Color(0xFF36B37E), widget.onStats),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
+            child: Text('平台作品 · 播放榜',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+          if (_loading)
+            const Padding(
+                padding: EdgeInsets.all(30),
+                child: Center(child: CircularProgressIndicator()))
+          else if (_top.isEmpty)
+            const Padding(
+                padding: EdgeInsets.all(30),
+                child: Center(
+                    child: Text('还没有作品，点上面「上传作品到平台」',
+                        style: TextStyle(color: Colors.black38))))
+          else
+            for (var i = 0; i < _top.length; i++)
+              ListTile(
+                dense: true,
+                leading: Text('${i + 1}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: i < 3 ? const Color(0xFFFF5E8A) : Colors.black38,
+                        fontSize: 16)),
+                title: Text(_top[i].title,
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                    '${_top[i].uploader.isEmpty ? '匿名' : _top[i].uploader} · ▶ ${_top[i].views}'),
+                onTap: () => widget.onPlay(_top[i].id, _top[i].title),
+              ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+}
+
 /// 隐藏后台管理：连点设置5次进入。管理平台/云端视频 + 公网状态。
 class _AdminPage extends StatefulWidget {
   const _AdminPage();
@@ -5373,7 +5530,7 @@ class _AdminPageState extends State<_AdminPage> {
   Future<void> _load() async {
     if (!mounted) return; // 异步动作后可能已退出本页
     setState(() => _loading = true);
-    final v = await _svc.list();
+    final v = await PlatformService.adminList(); // 含隐藏 + 管理字段
     final h = await _svc.publicHealthy();
     final s = await PlatformService.adminGet('stats'); // 功能1：统计
     if (!mounted) return;
@@ -5394,9 +5551,13 @@ class _AdminPageState extends State<_AdminPage> {
       l.sort((a, b) => b.size.compareTo(a.size));
     } else if (_sort == 'name') {
       l.sort((a, b) => a.title.compareTo(b.title));
+    } else if (_sort == 'views') {
+      l.sort((a, b) => b.views.compareTo(a.views));
     } else {
       l.sort((a, b) => b.ts.compareTo(a.ts));
     }
+    // 置顶的排最前
+    l.sort((a, b) => (b.pinned ? 1 : 0).compareTo(a.pinned ? 1 : 0));
     return l;
   }
 
@@ -5585,6 +5746,139 @@ class _AdminPageState extends State<_AdminPage> {
     if (done) _load();
   }
 
+  // 功能11/12：在线改「更新说明」/「公告栏」（持久化到服务器 config）。
+  Future<void> _editCfg(String key, String title, String cur) async {
+    final ctrl = TextEditingController(text: cur);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+            controller: ctrl, autofocus: true, maxLines: 4, minLines: 1),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final d = await PlatformService.adminGet('set-$key',
+        params: {'v': ctrl.text.trim()});
+    _toast(d?['ok'] == true ? '$title 已保存' : '保存失败');
+    if (d?['ok'] == true) _load();
+  }
+
+  // 功能13：孤儿文件清理。
+  Future<void> _cleanOrphans() => _run('清理孤儿文件', () async {
+        final d = await PlatformService.adminGet('clean-orphans');
+        if (d?['ok'] == true) {
+          _toast('清理 ${d?['removed'] ?? 0} 个，释放 ${_fmtBytes((d?['freed'] ?? 0) as num)}');
+          return true;
+        }
+        return false;
+      });
+
+  // 功能14：导出 index.json 备份（复制到剪贴板）。
+  Future<void> _exportIndex() async {
+    final d = await PlatformService.adminGet('export');
+    if (d?['index'] == null) {
+      _toast('导出失败');
+      return;
+    }
+    _copy(jsonEncode({'index': d!['index'], 'config': d['config']}),
+        'index 备份(JSON)');
+  }
+
+  // 功能15：重启服务器。
+  Future<void> _restartServer() async {
+    final ok = await _confirm('重启服务器', '会短暂中断，keepalive 会自动拉起。继续？');
+    if (ok != true) return;
+    await PlatformService.adminGet('restart-server');
+    _toast('服务器重启中…几秒后刷新');
+  }
+
+  // 功能16：服务器信息。
+  Future<void> _sysinfo() async {
+    final d = await PlatformService.adminGet('sysinfo');
+    if (d == null || !mounted) {
+      _toast('取信息失败');
+      return;
+    }
+    final up = (d['uptime_sec'] ?? 0) as num;
+    final h = (up ~/ 3600), m = ((up % 3600) ~/ 60);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('服务器信息'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('版本', '${d['version']}'),
+            _kv('运行', '${h}h ${m}m'),
+            _kv('Python', '${d['python']}'),
+            _kv('系统', '${d['platform']}'),
+            _kv('目录', '${d['root']}'),
+            _kv('视频数', '${d['video_count']}'),
+            _kv('公网', '${d['public_url']}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 功能17/18：隐藏/显示、置顶/取消。
+  Future<void> _toggleFlag(PlatformVideo v, String flag, bool on) async {
+    final d = await PlatformService.adminGet(flag,
+        params: {'id': v.id, 'on': on ? '1' : '0'});
+    if (d?['ok'] == true) _load();
+  }
+
+  // 功能19：视频详情。
+  Future<void> _detail(PlatformVideo v) async {
+    final when = v.ts > 0
+        ? DateTime.fromMillisecondsSinceEpoch(v.ts * 1000).toString().substring(0, 19)
+        : '未知';
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('上传者', v.uploader.isEmpty ? '匿名' : v.uploader),
+            _kv('分类', v.cat),
+            _kv('大小', _fmtBytes(v.size)),
+            _kv('播放量', '${v.views}'),
+            _kv('上传时间', when),
+            _kv('GitHub备份', v.ghUrl != null ? '已备份 ✓' : '未备份'),
+            _kv('状态',
+                '${v.hidden ? '已隐藏 ' : ''}${v.pinned ? '已置顶' : ''}'.trim().isEmpty ? '正常' : '${v.hidden ? '已隐藏 ' : ''}${v.pinned ? '已置顶' : ''}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () {
+                _copy(PlatformService.videoUrl(v.id), '直链');
+                Navigator.pop(ctx);
+              },
+              child: const Text('复制直链')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
   Widget _kv(String k, String v, {Color? color}) => Padding(
         padding: const EdgeInsets.symmetric(vertical: 3),
         child: Row(
@@ -5668,6 +5962,40 @@ class _AdminPageState extends State<_AdminPage> {
                               onPressed: _busy ? null : _showLog,
                               icon: const Icon(Icons.article_outlined, size: 16),
                               label: const Text('看日志')),
+                          // 批次2 新增
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('notes', '改更新说明',
+                                      (_stats['notes'] ?? '').toString()),
+                              icon: const Icon(Icons.edit_note, size: 16),
+                              label: const Text('改更新说明')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('notice', '改公告栏',
+                                      (_stats['notice'] ?? '').toString()),
+                              icon: const Icon(Icons.campaign_outlined, size: 16),
+                              label: const Text('公告栏')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _cleanOrphans,
+                              icon: const Icon(Icons.cleaning_services_outlined,
+                                  size: 16),
+                              label: const Text('清理孤儿')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _exportIndex,
+                              icon: const Icon(Icons.download_outlined, size: 16),
+                              label: const Text('导出index')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _sysinfo,
+                              icon: const Icon(Icons.info_outline, size: 16),
+                              label: const Text('服务器信息')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _restartServer,
+                              style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.orange),
+                              icon: const Icon(Icons.power_settings_new, size: 16),
+                              label: const Text('重启服务器')),
                           OutlinedButton.icon(
                               onPressed: _busy ? null : _clearAll,
                               style: OutlinedButton.styleFrom(
@@ -5702,6 +6030,7 @@ class _AdminPageState extends State<_AdminPage> {
                         items: const [
                           DropdownMenuItem(value: 'time', child: Text('最新')),
                           DropdownMenuItem(value: 'size', child: Text('大小')),
+                          DropdownMenuItem(value: 'views', child: Text('播放量')),
                           DropdownMenuItem(value: 'name', child: Text('名称')),
                         ],
                         onChanged: (v) => setState(() => _sort = v ?? 'time'),
@@ -5724,10 +6053,23 @@ class _AdminPageState extends State<_AdminPage> {
                       v.ghUrl != null ? Icons.cloud_done : Icons.cloud_off,
                       color: v.ghUrl != null ? Colors.green : Colors.black26,
                     ),
-                    title: Text(v.title,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    title: Row(children: [
+                      if (v.pinned)
+                        const Icon(Icons.push_pin, size: 13, color: Colors.orange),
+                      if (v.hidden)
+                        const Icon(Icons.visibility_off,
+                            size: 13, color: Colors.black38),
+                      Flexible(
+                        child: Text(v.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: v.hidden ? Colors.black45 : null)),
+                      ),
+                    ]),
                     subtitle: Text(
-                        '${v.uploader.isEmpty ? '匿名' : v.uploader} · ${v.cat} · ${_fmtBytes(v.size)}'),
+                        '${v.uploader.isEmpty ? '匿名' : v.uploader} · ${_fmtBytes(v.size)} · ▶ ${v.views}'),
+                    onTap: () => _detail(v), // 功能19：详情
                     trailing: PopupMenuButton<String>(
                       onSelected: (a) {
                         if (a == 'direct') {
@@ -5736,11 +6078,18 @@ class _AdminPageState extends State<_AdminPage> {
                           _copy(v.ghUrl ?? '', 'GitHub 备份链接');
                         } else if (a == 'rename') {
                           _rename(v);
+                        } else if (a == 'hide') {
+                          _toggleFlag(v, 'hide', !v.hidden);
+                        } else if (a == 'pin') {
+                          _toggleFlag(v, 'pin', !v.pinned);
+                        } else if (a == 'detail') {
+                          _detail(v);
                         } else if (a == 'delete') {
                           _delete(v);
                         }
                       },
                       itemBuilder: (_) => [
+                        const PopupMenuItem(value: 'detail', child: Text('详情')),
                         const PopupMenuItem(
                             value: 'direct', child: Text('复制直链')),
                         if (v.ghUrl != null)
@@ -5748,6 +6097,11 @@ class _AdminPageState extends State<_AdminPage> {
                               value: 'backup', child: Text('复制 GitHub 备份链接')),
                         const PopupMenuItem(
                             value: 'rename', child: Text('重命名')),
+                        PopupMenuItem(
+                            value: 'hide',
+                            child: Text(v.hidden ? '取消隐藏' : '隐藏(不公开)')),
+                        PopupMenuItem(
+                            value: 'pin', child: Text(v.pinned ? '取消置顶' : '置顶/精选')),
                         const PopupMenuItem(
                             value: 'delete', child: Text('删除')),
                       ],
