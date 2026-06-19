@@ -257,7 +257,32 @@ class PlatformService {
     return null;
   }
 
-  /// 每日签到领兑换币。返回 {ok, already, reward, balance}。
+  /// 公开热门榜：by=coins|likes|favs|views，前 20。
+  static Future<List<PlatformVideo>> rank({String by = 'coins'}) async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/rank?by=$by'))
+            .timeout(const Duration(seconds: 10));
+        final list = (jsonDecode(r.body) as List?) ?? [];
+        return list
+            .map((e) => PlatformVideo(
+                  id: (e['id'] ?? '') as String,
+                  title: (e['title'] ?? '') as String,
+                  uploader: (e['uploader'] ?? '') as String,
+                  views: ((e['views'] ?? 0) as num).toInt(),
+                  coins: ((e['coins'] ?? 0) as num).toInt(),
+                  likes: ((e['likes'] ?? 0) as num).toInt(),
+                  favs: ((e['favs'] ?? 0) as num).toInt(),
+                ))
+            .where((v) => v.id.isNotEmpty)
+            .toList();
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  /// 每日签到领兑换币。返回 {ok, already, reward, balance, streak}。
   static Future<Map<String, dynamic>?> signIn() async {
     final uid = await walletUid();
     for (final base in {current, baseUrl}) {

@@ -5530,11 +5530,13 @@ class _PersonalCenterPage extends StatefulWidget {
 
 class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   int _balance = 0;
+  int _streak = 0; // 连续签到天数
   bool _loading = true;
   bool _signing = false;
-  String _tab = 'faved'; // faved / liked / coined
+  String _tab = 'faved'; // faved / liked / coined / rank
   Map<String, List<String>> _ids = {'coined': [], 'liked': [], 'faved': []};
   final Map<String, PlatformVideo> _byId = {};
+  List<PlatformVideo> _rank = []; // 热门榜
 
   @override
   void initState() {
@@ -5547,6 +5549,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     final bal = await PlatformService.getBalance();
     final ids = await PlatformService.myLists();
     final all = await PlatformService().list(); // 全平台视频，用 id 解析成卡片
+    final rank = await PlatformService.rank(by: 'coins');
     if (!mounted) return;
     _byId.clear();
     for (final v in all) {
@@ -5555,8 +5558,18 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     setState(() {
       _balance = bal;
       _ids = ids;
+      _rank = rank;
       _loading = false;
     });
+  }
+
+  // 称号：按投币数升级（投币越多越铁）。
+  ({String name, IconData icon}) get _title {
+    final n = _ids['coined']?.length ?? 0;
+    if (n >= 20) return (name: '真爱粉', icon: Icons.local_fire_department);
+    if (n >= 5) return (name: '铁粉', icon: Icons.military_tech);
+    if (n >= 1) return (name: '新粉', icon: Icons.star_outline);
+    return (name: '路人', icon: Icons.person_outline);
   }
 
   Future<void> _sign() async {
@@ -5570,13 +5583,17 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
       return;
     }
     if (d['already'] == true) {
-      _toast('今天已签到过啦，明天再来~');
+      _toast('今天已签到过啦，明天再来~（已连签 ${d['streak'] ?? _streak} 天）');
     } else {
-      _toast('签到成功！+${d['reward'] ?? 0} 小李兑换币');
+      final bonus = (d['bonus'] ?? 0) as num;
+      _toast(bonus > 0
+          ? '签到成功！+${d['reward']} 兑换币（连签 ${d['streak']} 天，额外 +$bonus！）'
+          : '签到成功！+${d['reward'] ?? 0} 兑换币（已连签 ${d['streak'] ?? 1} 天）');
     }
-    if (d['balance'] != null) {
-      setState(() => _balance = (d['balance'] as num).toInt());
-    }
+    setState(() {
+      if (d['balance'] != null) _balance = (d['balance'] as num).toInt();
+      if (d['streak'] != null) _streak = (d['streak'] as num).toInt();
+    });
   }
 
   void _toast(String m) {
@@ -5587,6 +5604,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   }
 
   List<PlatformVideo> get _shown {
+    if (_tab == 'rank') return _rank;
     final ids = _ids[_tab] ?? const [];
     final out = <PlatformVideo>[];
     for (final id in ids) {
@@ -5629,6 +5647,22 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                           const Text('我的小李兑换币',
                               style: TextStyle(
                                   fontSize: 14, fontWeight: FontWeight.w600)),
+                          const Spacer(),
+                          // 称号徽章
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 10, vertical: 4),
+                            decoration: BoxDecoration(
+                                color: cs.primary,
+                                borderRadius: BorderRadius.circular(20)),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(_title.icon, color: Colors.white, size: 14),
+                              const SizedBox(width: 4),
+                              Text(_title.name,
+                                  style: const TextStyle(
+                                      color: Colors.white, fontSize: 12)),
+                            ]),
+                          ),
                         ]),
                         const SizedBox(height: 8),
                         Text('$_balance',
@@ -5650,31 +5684,39 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                           ),
                         ),
                         const SizedBox(height: 6),
-                        const Text('每天签到领兑换币，投币给喜欢的视频，改名也能花币。',
-                            style:
-                                TextStyle(color: Colors.black38, fontSize: 12)),
+                        Text(
+                            _streak > 0
+                                ? '已连签 $_streak 天 · 连签满 7 天额外 +50'
+                                : '每天签到领兑换币 · 连签满 7 天额外 +50',
+                            style: const TextStyle(
+                                color: Colors.black38, fontSize: 12)),
                       ],
                     ),
                   ),
                 ),
                 const SizedBox(height: 16),
                 // 三连分段
-                SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(value: 'faved', label: Text('收藏'), icon: Icon(Icons.star)),
-                    ButtonSegment(value: 'liked', label: Text('点赞'), icon: Icon(Icons.thumb_up)),
-                    ButtonSegment(value: 'coined', label: Text('投币'), icon: Icon(Icons.monetization_on)),
-                  ],
-                  selected: {_tab},
-                  onSelectionChanged: (s) => setState(() => _tab = s.first),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'faved', label: Text('收藏'), icon: Icon(Icons.star)),
+                      ButtonSegment(value: 'liked', label: Text('点赞'), icon: Icon(Icons.thumb_up)),
+                      ButtonSegment(value: 'coined', label: Text('投币'), icon: Icon(Icons.monetization_on)),
+                      ButtonSegment(value: 'rank', label: Text('热门榜'), icon: Icon(Icons.local_fire_department)),
+                    ],
+                    selected: {_tab},
+                    onSelectionChanged: (s) => setState(() => _tab = s.first),
+                  ),
                 ),
                 const SizedBox(height: 12),
                 if (shown.isEmpty)
-                  const Padding(
-                    padding: EdgeInsets.all(30),
+                  Padding(
+                    padding: const EdgeInsets.all(30),
                     child: Center(
-                        child: Text('这里还空空的，去给喜欢的视频点点吧~',
-                            style: TextStyle(color: Colors.black38))),
+                        child: Text(
+                            _tab == 'rank' ? '还没有热门视频' : '这里还空空的，去给喜欢的视频点点吧~',
+                            style: const TextStyle(color: Colors.black38))),
                   )
                 else
                   for (final v in shown)
