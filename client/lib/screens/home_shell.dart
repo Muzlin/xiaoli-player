@@ -5455,7 +5455,7 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
     });
   }
 
-  // 投币：视频+1币，钱包+10兑换币。
+  // 投币：视频币+1，钱包扣兑换币(后台可配，默认1)。可给自己的视频投币。
   Future<void> _coin(PlatformVideo v) async {
     final d = await PlatformService.coin(v.id);
     if (d == null) {
@@ -6097,6 +6097,109 @@ class _AdminPageState extends State<_AdminPage> {
         params: {'v': ctrl.text.trim()});
     _toast(d?['ok'] == true ? '$title 已保存' : '保存失败');
     if (d?['ok'] == true) _load();
+  }
+
+  // 后台直接改某视频的投币数（给自己刷币 / 纠错）。
+  Future<void> _setCoins(PlatformVideo v) async {
+    final ctrl = TextEditingController(text: '${v.coins}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('改投币数 · ${v.title}'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+              labelText: '投币数', helperText: '直接设为该数值（0 起）'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final n = int.tryParse(ctrl.text.trim());
+    if (n == null || n < 0) {
+      _toast('请输入 ≥0 的整数');
+      return;
+    }
+    final d = await PlatformService.adminGet('set-coins',
+        params: {'id': v.id, 'n': '$n'});
+    _toast(d?['ok'] == true ? '投币数已改为 ${d?['coins'] ?? n}' : '改失败');
+    if (d?['ok'] == true) _load();
+  }
+
+  // 功能价格：表单面板（改名/投币花费 + 新用户起始余额），不再手填 JSON。
+  Future<void> _editPrices() async {
+    // 当前价格：prices 可能是 JSON 字符串或空。
+    var prices = <String, dynamic>{};
+    final raw = (_stats['prices'] ?? '').toString();
+    if (raw.trim().isNotEmpty) {
+      try {
+        final p = jsonDecode(raw);
+        if (p is Map) prices = Map<String, dynamic>.from(p);
+      } catch (_) {}
+    }
+    int cur(String k, int dft) {
+      final x = prices[k];
+      if (x is num) return x.toInt();
+      return int.tryParse('${x ?? ''}') ?? dft;
+    }
+
+    final rename = TextEditingController(text: '${cur('rename', 5)}');
+    final coin = TextEditingController(text: '${cur('coin', 1)}');
+    final start = TextEditingController(
+        text: '${int.tryParse('${_stats['start_balance'] ?? 100}') ?? 100}');
+    Widget field(String label, String hint, TextEditingController c) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: TextField(
+            controller: c,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+                labelText: label,
+                helperText: hint,
+                border: const OutlineInputBorder()),
+          ),
+        );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('功能价格（小李兑换币）'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            field('改创作者名 花费', '默认 5', rename),
+            field('投一次币 花费', '默认 1', coin),
+            field('新用户起始余额', '默认 100', start),
+          ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    int nn(TextEditingController c, int dft) {
+      final x = int.tryParse(c.text.trim());
+      return (x == null || x < 0) ? dft : x;
+    }
+
+    final pj = jsonEncode({'rename': nn(rename, 5), 'coin': nn(coin, 1)});
+    final d1 = await PlatformService.adminGet('set-prices', params: {'v': pj});
+    final d2 = await PlatformService.adminGet('set-start-balance',
+        params: {'v': '${nn(start, 100)}'});
+    _toast((d1?['ok'] == true && d2?['ok'] == true) ? '价格已保存' : '保存失败');
+    if (d1?['ok'] == true) _load();
   }
 
   // 功能13：孤儿文件清理。
@@ -7104,10 +7207,7 @@ class _AdminPageState extends State<_AdminPage> {
                               label: Text(
                                   '下载源:${(_stats['download_source'] ?? 'github') == "github" ? "GitHub" : "平台"}')),
                           OutlinedButton.icon(
-                              onPressed: _busy
-                                  ? null
-                                  : () => _editCfg('prices', '功能价格JSON 如 {"rename":5}',
-                                      (_stats['prices'] ?? '').toString()),
+                              onPressed: _busy ? null : _editPrices,
                               icon: const Icon(Icons.price_change_outlined,
                                   size: 16),
                               label: const Text('功能价格')),
@@ -7255,6 +7355,8 @@ class _AdminPageState extends State<_AdminPage> {
                                 _backupOne(v);
                               } else if (a == 'resetviews') {
                                 _resetViews(v);
+                              } else if (a == 'setcoins') {
+                                _setCoins(v);
                               } else if (a == 'moveup') {
                                 _move(v, 'up');
                               } else if (a == 'movedown') {
@@ -7282,6 +7384,8 @@ class _AdminPageState extends State<_AdminPage> {
                                   value: 'edit', child: Text('改标题/上传者')),
                               const PopupMenuItem(
                                   value: 'resetviews', child: Text('重置播放量')),
+                              const PopupMenuItem(
+                                  value: 'setcoins', child: Text('改投币数')),
                               PopupMenuItem(
                                   value: 'hide',
                                   child: Text(v.hidden ? '取消隐藏' : '隐藏(不公开)')),
