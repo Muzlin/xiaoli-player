@@ -257,6 +257,40 @@ class PlatformService {
     return null;
   }
 
+  /// 每日签到领兑换币。返回 {ok, already, reward, balance}。
+  static Future<Map<String, dynamic>?> signIn() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/sign?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 本设备的投币/点赞/收藏视频 id 列表。
+  static Future<Map<String, List<String>>> myLists() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/mylists?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map) {
+          List<String> g(String k) =>
+              ((d[k] as List?) ?? []).map((e) => e.toString()).toList();
+          return {'coined': g('coined'), 'liked': g('liked'), 'faved': g('faved')};
+        }
+      } catch (_) {}
+    }
+    return {'coined': [], 'liked': [], 'faved': []};
+  }
+
   /// 启动登记本设备 + 取封号状态。返回 {ok, banned, ban_msg, ban_phone}。
   /// 取不到(离线)返回 null——按"未封号"处理，不误锁用户。
   static Future<Map<String, dynamic>?> checkin() async {

@@ -2444,6 +2444,15 @@ class _HomeShellState extends State<HomeShell> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: IconButton(
+              tooltip: '个人中心',
+              onPressed: _openPersonalCenter,
+              icon: const Icon(Icons.account_circle_outlined,
+                  color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
               tooltip: '创作中心',
               onPressed: _openCreatorCenter,
               icon: const Icon(Icons.workspace_premium_outlined,
@@ -2455,6 +2464,15 @@ class _HomeShellState extends State<HomeShell> {
         ],
       ),
     );
+  }
+
+  void _openPersonalCenter() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _PersonalCenterPage(
+        onPlay: (id, title) =>
+            _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+      ),
+    ));
   }
 
   void _openCreatorCenter() {
@@ -5491,6 +5509,179 @@ class _PasswordProtectPageState extends State<_PasswordProtectPage> {
             ),
         ],
       ),
+    );
+  }
+}
+
+/// 个人中心：我的钱包、每日签到领币、我的收藏/点赞/投币。
+class _PersonalCenterPage extends StatefulWidget {
+  final void Function(String id, String title) onPlay;
+  const _PersonalCenterPage({required this.onPlay});
+  @override
+  State<_PersonalCenterPage> createState() => _PersonalCenterPageState();
+}
+
+class _PersonalCenterPageState extends State<_PersonalCenterPage> {
+  int _balance = 0;
+  bool _loading = true;
+  bool _signing = false;
+  String _tab = 'faved'; // faved / liked / coined
+  Map<String, List<String>> _ids = {'coined': [], 'liked': [], 'faved': []};
+  final Map<String, PlatformVideo> _byId = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final bal = await PlatformService.getBalance();
+    final ids = await PlatformService.myLists();
+    final all = await PlatformService().list(); // 全平台视频，用 id 解析成卡片
+    if (!mounted) return;
+    _byId.clear();
+    for (final v in all) {
+      _byId[v.id] = v;
+    }
+    setState(() {
+      _balance = bal;
+      _ids = ids;
+      _loading = false;
+    });
+  }
+
+  Future<void> _sign() async {
+    if (_signing) return;
+    setState(() => _signing = true);
+    final d = await PlatformService.signIn();
+    if (!mounted) return;
+    setState(() => _signing = false);
+    if (d == null) {
+      _toast('签到失败，请检查网络');
+      return;
+    }
+    if (d['already'] == true) {
+      _toast('今天已签到过啦，明天再来~');
+    } else {
+      _toast('签到成功！+${d['reward'] ?? 0} 小李兑换币');
+    }
+    if (d['balance'] != null) {
+      setState(() => _balance = (d['balance'] as num).toInt());
+    }
+  }
+
+  void _toast(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  List<PlatformVideo> get _shown {
+    final ids = _ids[_tab] ?? const [];
+    final out = <PlatformVideo>[];
+    for (final id in ids) {
+      final v = _byId[id];
+      if (v != null) out.add(v);
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final shown = _shown;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('个人中心'),
+        actions: [
+          IconButton(
+              onPressed: _loading ? null : _load,
+              icon: const Icon(Icons.refresh)),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                // 钱包卡片
+                Card(
+                  color: cs.primary.withValues(alpha: 0.10),
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          Icon(Icons.account_balance_wallet,
+                              color: cs.primary, size: 22),
+                          const SizedBox(width: 8),
+                          const Text('我的小李兑换币',
+                              style: TextStyle(
+                                  fontSize: 14, fontWeight: FontWeight.w600)),
+                        ]),
+                        const SizedBox(height: 8),
+                        Text('$_balance',
+                            style: TextStyle(
+                                fontSize: 40,
+                                fontWeight: FontWeight.bold,
+                                color: cs.primary)),
+                        const SizedBox(height: 6),
+                        Text(
+                            '🪙 投币 ${_ids['coined']?.length ?? 0}    👍 点赞 ${_ids['liked']?.length ?? 0}    ⭐ 收藏 ${_ids['faved']?.length ?? 0}',
+                            style: const TextStyle(color: Colors.black54)),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton.icon(
+                            onPressed: _signing ? null : _sign,
+                            icon: const Icon(Icons.redeem),
+                            label: const Text('每日签到领币'),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        const Text('每天签到领兑换币，投币给喜欢的视频，改名也能花币。',
+                            style:
+                                TextStyle(color: Colors.black38, fontSize: 12)),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                // 三连分段
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'faved', label: Text('收藏'), icon: Icon(Icons.star)),
+                    ButtonSegment(value: 'liked', label: Text('点赞'), icon: Icon(Icons.thumb_up)),
+                    ButtonSegment(value: 'coined', label: Text('投币'), icon: Icon(Icons.monetization_on)),
+                  ],
+                  selected: {_tab},
+                  onSelectionChanged: (s) => setState(() => _tab = s.first),
+                ),
+                const SizedBox(height: 12),
+                if (shown.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(30),
+                    child: Center(
+                        child: Text('这里还空空的，去给喜欢的视频点点吧~',
+                            style: TextStyle(color: Colors.black38))),
+                  )
+                else
+                  for (final v in shown)
+                    ListTile(
+                      leading: const Icon(Icons.play_circle_outline),
+                      title: Text(v.title,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                          '▶ ${v.views}   🪙 ${v.coins}   👍 ${v.likes}   ⭐ ${v.favs}'),
+                      onTap: () => widget.onPlay(v.id, v.title),
+                    ),
+                const SizedBox(height: 20),
+              ],
+            ),
     );
   }
 }
