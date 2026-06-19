@@ -188,6 +188,20 @@ class PlatformService {
     return '';
   }
 
+  /// 拉 /version 全量（app_name / download_url 等后台可改项）。失败 null。
+  static Future<Map<String, dynamic>?> fetchVersionInfo() async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/version'))
+            .timeout(const Duration(seconds: 6));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// 取免责声明（后台设的；空则 app 用内置默认）。
   static Future<String> getDisclaimer() async {
     for (final base in {current, baseUrl}) {
