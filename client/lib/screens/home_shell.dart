@@ -167,6 +167,11 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
   final List<Track> _history = []; // 最近播放
   bool _shuffle = false; // 随机播放
+  Timer? _sleepTimer; // 睡眠定时器
+  int _sleepMin = 30; // 睡眠定时分钟
+  double _defaultSpeed = 1.0; // 默认播放倍速
+  bool _loopSingle = false; // 默认单曲循环
+  bool _wifiOnly = false; // 仅WiFi提醒
   int _skipIntro = 0; // 片头跳过秒数
   String _profileName = ''; // 本机显示名
   String? _profileAvatar; // 本机头像路径
@@ -438,6 +443,7 @@ class _HomeShellState extends State<HomeShell> {
     _suggestDebounce?.cancel();
     _urlTimer?.cancel();
     _banTimer?.cancel();
+    _sleepTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -2300,7 +2306,9 @@ class _HomeShellState extends State<HomeShell> {
           _bookmarks[t.key] = list;
           _saveBookmarks();
         },
-        initialSpeed: _speeds[t.key] ?? 0,
+        initialSpeed:
+            _speeds[t.key] ?? (_defaultSpeed == 1.0 ? 0 : _defaultSpeed),
+        initialLoop: _loopSingle,
         onSaveSpeed: (sp) {
           _speeds[t.key] = sp;
           _saveSpeeds();
@@ -3021,6 +3029,9 @@ class _HomeShellState extends State<HomeShell> {
         ThemeMode.values[(p.getInt('theme_mode') ?? 0).clamp(0, 2)];
     _searchTid = p.getString('search_tid_v1') ?? '';
     _listDensity = p.getDouble('list_density') ?? 1.0;
+    _defaultSpeed = p.getDouble('default_speed') ?? 1.0;
+    _loopSingle = p.getBool('loop_single') ?? false;
+    _wifiOnly = p.getBool('wifi_only') ?? false;
     _autoPalette = p.getBool('auto_palette') ?? false;
     _guestMode = p.getBool('guest_mode') ?? false;
     // F26: 启动导航。-1=记住上次；否则固定到该 tab。
@@ -4527,9 +4538,11 @@ class _HomeShellState extends State<HomeShell> {
           leading: const Icon(Icons.info_outline),
           title: ValueListenableBuilder<String>(
             valueListenable: appNameNotifier,
-            builder: (_, name, __) => Text('$name v2.39.10'),
+            builder: (_, name, __) =>
+                Text('$name v${UpdateService.currentVersion}'),
           ),
           subtitle: const Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+          onTap: _showAbout,
         ),
         ListTile(
           leading: CircleAvatar(
@@ -5145,6 +5158,84 @@ class _HomeShellState extends State<HomeShell> {
           onTap: () => _guard('useLan', _setLanIp),
         ),
         ListTile(
+          leading: const Icon(Icons.bedtime_outlined),
+          title: const Text('睡眠定时'),
+          subtitle: Text(
+              _sleepTimer != null ? '将在 $_sleepMin 分钟后停止播放' : '定时停止播放',
+              style: const TextStyle(fontSize: 12)),
+          trailing: _sleepTimer != null
+              ? IconButton(
+                  icon: const Icon(Icons.close), onPressed: _cancelSleep)
+              : const Icon(Icons.chevron_right),
+          onTap: _setSleepTimer,
+        ),
+        ListTile(
+          leading: const Icon(Icons.speed_outlined),
+          title: const Text('默认播放倍速'),
+          subtitle: Text('新视频默认 ${_defaultSpeed}x（播放页仍可临时调）',
+              style: const TextStyle(fontSize: 12)),
+          trailing: DropdownButton<double>(
+            value: _defaultSpeed,
+            underline: const SizedBox.shrink(),
+            items: const [0.75, 1.0, 1.25, 1.5, 2.0]
+                .map((s) => DropdownMenuItem(value: s, child: Text('${s}x')))
+                .toList(),
+            onChanged: (v) async {
+              if (v == null) return;
+              setState(() => _defaultSpeed = v);
+              final p = await SharedPreferences.getInstance();
+              await p.setDouble('default_speed', v);
+            },
+          ),
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.repeat_one),
+          title: const Text('默认单曲循环'),
+          subtitle: const Text('新视频默认循环本曲', style: TextStyle(fontSize: 12)),
+          value: _loopSingle,
+          onChanged: (v) async {
+            setState(() => _loopSingle = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('loop_single', v);
+          },
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.wifi),
+          title: const Text('仅 WiFi 提醒'),
+          subtitle: const Text('用流量在线播放/缓存前提醒', style: TextStyle(fontSize: 12)),
+          value: _wifiOnly,
+          onChanged: (v) async {
+            setState(() => _wifiOnly = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('wifi_only', v);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.manage_search),
+          title: const Text('清空搜索历史'),
+          subtitle: const Text('清除搜索框的历史记录', style: TextStyle(fontSize: 12)),
+          onTap: _clearSearchHistory,
+        ),
+        ListTile(
+          leading: const Icon(Icons.feedback_outlined),
+          title: const Text('意见反馈'),
+          subtitle: const Text('把建议/问题发给开发者', style: TextStyle(fontSize: 12)),
+          onTap: _sendFeedback,
+        ),
+        ListTile(
+          leading: const Icon(Icons.ios_share),
+          title: const Text('分享 / 推荐给好友'),
+          subtitle: const Text('复制官方下载链接', style: TextStyle(fontSize: 12)),
+          onTap: _shareApp,
+        ),
+        ListTile(
+          leading: const Icon(Icons.restart_alt),
+          title: const Text('恢复默认设置'),
+          subtitle: const Text('清除播放/外观等偏好（不动收藏和数据）',
+              style: TextStyle(fontSize: 12)),
+          onTap: _resetPrefs,
+        ),
+        ListTile(
           leading: const Icon(Icons.menu_book_outlined),
           title: const Text('使用说明'),
           subtitle: const Text('新手指南 · 功能怎么用', style: TextStyle(fontSize: 12)),
@@ -5156,6 +5247,170 @@ class _HomeShellState extends State<HomeShell> {
           onTap: _showDisclaimer,
         ),
       ],
+    );
+  }
+
+  // 睡眠定时：N 分钟后停止播放。
+  Future<void> _setSleepTimer() async {
+    final mins = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('睡眠定时'),
+        children: [
+          for (final m in [15, 30, 45, 60, 90])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, m),
+              child: Text('$m 分钟后停止'),
+            ),
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 0),
+              child: const Text('取消定时')),
+        ],
+      ),
+    );
+    if (mins == null) return;
+    _sleepTimer?.cancel();
+    if (mins <= 0) {
+      setState(() => _sleepTimer = null);
+      return;
+    }
+    setState(() {
+      _sleepMin = mins;
+      _sleepTimer = Timer(Duration(minutes: mins), () {
+        PlayerHolder.i.stop();
+        if (mounted) setState(() => _sleepTimer = null);
+        _snack('睡眠定时到，已停止播放');
+      });
+    });
+    _snack('已设定 $mins 分钟后停止播放');
+  }
+
+  void _cancelSleep() {
+    _sleepTimer?.cancel();
+    setState(() => _sleepTimer = null);
+    _snack('已取消睡眠定时');
+  }
+
+  Future<void> _clearSearchHistory() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空搜索历史'),
+        content: const Text('清除所有搜索记录？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    await p.remove('search_history_v1');
+    _snack('搜索历史已清空');
+  }
+
+  Future<void> _sendFeedback() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('意见反馈'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 4,
+          decoration: const InputDecoration(
+              hintText: '说说你的建议或遇到的问题…', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('提交')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = ctrl.text.trim();
+    if (msg.isEmpty) return;
+    final sent = await PlatformService.feedback(msg);
+    _snack(sent ? '反馈已提交，谢谢！' : '提交失败，请检查网络');
+  }
+
+  // 恢复默认设置：只清偏好类键，不动收藏/历史/账号/缓存。
+  Future<void> _resetPrefs() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('恢复默认设置'),
+        content: const Text('将清除播放/外观等偏好（倍速、淡入淡出、主题色、字号、'
+            '睡眠定时、密度等）。收藏、历史、账号、缓存不受影响。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('恢复')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    const keys = [
+      'default_speed', 'loop_single', 'wifi_only', 'fade_in', 'fade_out',
+      'text_scale', 'accent_color', 'theme_mode', 'list_density',
+      'auto_palette', 'seek_step', 'skip_intro'
+    ];
+    for (final k in keys) {
+      await p.remove(k);
+    }
+    if (!mounted) return;
+    setState(() {
+      _defaultSpeed = 1.0;
+      _loopSingle = false;
+      _wifiOnly = false;
+      _fadeIn = false;
+      _fadeOut = false;
+      _listDensity = 1.0;
+      _autoPalette = false;
+      _seekStep = 10;
+      _skipIntro = 0;
+      textScaleNotifier.value = 1.0;
+      accentNotifier.value = const Color(0xFFF26B21);
+      themeModeNotifier.value = ThemeMode.system;
+    });
+    _snack('已恢复默认设置');
+  }
+
+  Future<void> _shareApp() async {
+    final url = _officialDownload;
+    final text = '推荐你用「${appNameNotifier.value}」看视频/听歌：$url';
+    await Clipboard.setData(ClipboardData(text: text));
+    _snack('下载链接已复制，发给好友即可');
+  }
+
+  void _showAbout() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AboutDialog(
+        applicationName: appNameNotifier.value,
+        applicationVersion: 'v${UpdateService.currentVersion}',
+        applicationIcon: const Icon(Icons.music_video, size: 40),
+        children: const [
+          SizedBox(height: 8),
+          Text('一个支持几乎所有格式的媒体播放器，内置共享视频平台、'
+              'B站搜索播放、小李兑换币经济、离线缓存、后台播放等。'),
+          SizedBox(height: 8),
+          Text('基于 Flutter + libmpv 构建。'),
+        ],
+      ),
     );
   }
 
@@ -5612,10 +5867,15 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   final Map<String, PlatformVideo> _byId = {};
   List<PlatformVideo> _rank = []; // 热门榜
   Map<String, dynamic>? _tasks; // 每日任务 /tasks 返回
+  List<Map<String, dynamic>> _rich = []; // 富豪榜
+  String _customTitle = ''; // 自定义称号(本地存)
+  String _notice = ''; // 后台公告
 
   @override
   void initState() {
     super.initState();
+    SharedPreferences.getInstance()
+        .then((p) => setState(() => _customTitle = p.getString('my_title') ?? ''));
     _load();
   }
 
@@ -5626,6 +5886,8 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     final all = await PlatformService().list(); // 全平台视频，用 id 解析成卡片
     final rank = await PlatformService.rank(by: 'coins');
     final tasks = await PlatformService.getTasks();
+    final rich = await PlatformService.richlist();
+    final notice = await PlatformService.getNotice();
     if (!mounted) return;
     _byId.clear();
     for (final v in all) {
@@ -5636,8 +5898,78 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
       _ids = ids;
       _rank = rank;
       _tasks = tasks;
+      _rich = rich;
+      _notice = notice;
       _loading = false;
     });
+  }
+
+  // 花兑换币设置专属称号（覆盖自动称号）。
+  Future<void> _editTitle() async {
+    final ctrl = TextEditingController(text: _customTitle);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('设置专属称号'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: 8,
+          decoration: const InputDecoration(
+              hintText: '最多 8 字', helperText: '花 10 小李兑换币'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('花10币设置')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final t = ctrl.text.trim();
+    if (t.isEmpty) return;
+    final sp = await PlatformService.spend('title');
+    if (sp == null || sp['ok'] != true) {
+      _toast('兑换币不足（需 ${sp?['need'] ?? 10}，当前 ${sp?['balance'] ?? _balance}）');
+      return;
+    }
+    final p = await SharedPreferences.getInstance();
+    await p.setString('my_title', t);
+    if (!mounted) return;
+    setState(() {
+      _customTitle = t;
+      _balance = ((sp['balance'] ?? _balance) as num).toInt();
+    });
+    _toast('称号已设为「$t」');
+  }
+
+  // 一键领取所有已完成、未领取的任务。
+  Future<void> _claimAll() async {
+    if (_tasks == null) return;
+    final t = (_tasks!['tasks'] as Map?) ?? {};
+    final goals = (_tasks!['goals'] as Map?) ?? const {};
+    final claimed =
+        ((t['claimed'] as List?) ?? const []).map((e) => e.toString()).toSet();
+    var got = 0, total = 0;
+    for (final k in ['coin', 'like', 'play']) {
+      final cur = ((t[k] ?? 0) as num).toInt();
+      final goal = ((goals[k] ?? 1) as num).toInt();
+      if (cur >= goal && !claimed.contains(k)) {
+        final d = await PlatformService.claimTask(k);
+        if (d != null && d['ok'] == true) {
+          got++;
+          total += ((d['reward'] ?? 0) as num).toInt();
+          if (d['balance'] != null) _balance = (d['balance'] as num).toInt();
+        }
+      }
+    }
+    final nt = await PlatformService.getTasks();
+    if (!mounted) return;
+    setState(() => _tasks = nt);
+    _toast(got > 0 ? '领取 $got 个任务，共 +$total 兑换币' : '没有可领取的任务');
   }
 
   Future<void> _claimTask(String task) async {
@@ -5659,13 +5991,26 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     }
   }
 
-  // 称号：按投币数升级（投币越多越铁）。
+  // 称号：自定义优先，否则按投币数自动升级。
   ({String name, IconData icon}) get _title {
+    if (_customTitle.isNotEmpty) {
+      return (name: _customTitle, icon: Icons.workspace_premium);
+    }
     final n = _ids['coined']?.length ?? 0;
     if (n >= 20) return (name: '真爱粉', icon: Icons.local_fire_department);
     if (n >= 5) return (name: '铁粉', icon: Icons.military_tech);
     if (n >= 1) return (name: '新粉', icon: Icons.star_outline);
     return (name: '路人', icon: Icons.person_outline);
+  }
+
+  // 距下一个自动称号还差几次投币（自定义称号时不显示）。
+  String get _levelHint {
+    if (_customTitle.isNotEmpty) return '';
+    final n = _ids['coined']?.length ?? 0;
+    if (n < 1) return '再投币 1 次升「新粉」';
+    if (n < 5) return '再投币 ${5 - n} 次升「铁粉」';
+    if (n < 20) return '再投币 ${20 - n} 次升「真爱粉」';
+    return '已是最高称号 🎉';
   }
 
   Future<void> _sign() async {
@@ -5715,11 +6060,13 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Row(children: [
-            Icon(Icons.checklist, size: 18),
-            SizedBox(width: 6),
-            Text('每日任务',
+          Row(children: [
+            const Icon(Icons.checklist, size: 18),
+            const SizedBox(width: 6),
+            const Text('每日任务',
                 style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            TextButton(onPressed: _claimAll, child: const Text('一键领取')),
           ]),
           const SizedBox(height: 6),
           for (final d in defs)
@@ -5802,20 +6149,27 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                               style: TextStyle(
                                   fontSize: 14, fontWeight: FontWeight.w600)),
                           const Spacer(),
-                          // 称号徽章
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                                horizontal: 10, vertical: 4),
-                            decoration: BoxDecoration(
-                                color: cs.primary,
-                                borderRadius: BorderRadius.circular(20)),
-                            child: Row(mainAxisSize: MainAxisSize.min, children: [
-                              Icon(_title.icon, color: Colors.white, size: 14),
-                              const SizedBox(width: 4),
-                              Text(_title.name,
-                                  style: const TextStyle(
-                                      color: Colors.white, fontSize: 12)),
-                            ]),
+                          // 称号徽章（点击花币设置专属称号）
+                          GestureDetector(
+                            onTap: _editTitle,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                  color: cs.primary,
+                                  borderRadius: BorderRadius.circular(20)),
+                              child:
+                                  Row(mainAxisSize: MainAxisSize.min, children: [
+                                Icon(_title.icon, color: Colors.white, size: 14),
+                                const SizedBox(width: 4),
+                                Text(_title.name,
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 12)),
+                                const SizedBox(width: 2),
+                                const Icon(Icons.edit,
+                                    color: Colors.white70, size: 11),
+                              ]),
+                            ),
                           ),
                         ]),
                         const SizedBox(height: 8),
@@ -5837,17 +6191,72 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                             label: const Text('每日签到领币'),
                           ),
                         ),
-                        const SizedBox(height: 6),
+                        const SizedBox(height: 8),
+                        // 签到日历：7 格，连签进度点亮
+                        Row(children: [
+                          for (var i = 0; i < 7; i++)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: Container(
+                                width: 22,
+                                height: 22,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  color: i < (_streak % 7 == 0 && _streak > 0
+                                          ? 7
+                                          : _streak % 7)
+                                      ? cs.primary
+                                      : Colors.black12,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Text('${i + 1}',
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: i < (_streak % 7 == 0 &&
+                                                _streak > 0
+                                            ? 7
+                                            : _streak % 7)
+                                            ? Colors.white
+                                            : Colors.black38)),
+                              ),
+                            ),
+                        ]),
+                        const SizedBox(height: 8),
                         Text(
                             _streak > 0
                                 ? '已连签 $_streak 天 · 连签满 7 天额外 +50'
                                 : '每天签到领兑换币 · 连签满 7 天额外 +50',
                             style: const TextStyle(
                                 color: Colors.black38, fontSize: 12)),
+                        if (_levelHint.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(_levelHint,
+                              style: TextStyle(
+                                  color: cs.primary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500)),
+                        ],
                       ],
                     ),
                   ),
                 ),
+                if (_notice.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                        color: Colors.amber.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(10)),
+                    child: Row(children: [
+                      const Icon(Icons.campaign_outlined,
+                          color: Colors.orange, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                          child: Text(_notice,
+                              style: const TextStyle(fontSize: 13))),
+                    ]),
+                  ),
+                ],
                 const SizedBox(height: 16),
                 _taskCard(cs), // 每日任务
                 const SizedBox(height: 16),
@@ -5860,13 +6269,39 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                       ButtonSegment(value: 'liked', label: Text('点赞'), icon: Icon(Icons.thumb_up)),
                       ButtonSegment(value: 'coined', label: Text('投币'), icon: Icon(Icons.monetization_on)),
                       ButtonSegment(value: 'rank', label: Text('热门榜'), icon: Icon(Icons.local_fire_department)),
+                      ButtonSegment(value: 'rich', label: Text('富豪榜'), icon: Icon(Icons.emoji_events)),
                     ],
                     selected: {_tab},
                     onSelectionChanged: (s) => setState(() => _tab = s.first),
                   ),
                 ),
                 const SizedBox(height: 12),
-                if (shown.isEmpty)
+                if (_tab == 'rich') ...[
+                  // 富豪榜：余额排行（uid 已打码）
+                  if (_rich.isEmpty)
+                    const Padding(
+                        padding: EdgeInsets.all(30),
+                        child: Center(
+                            child: Text('暂无榜单',
+                                style: TextStyle(color: Colors.black38))))
+                  else
+                    for (var i = 0; i < _rich.length; i++)
+                      ListTile(
+                        leading: CircleAvatar(
+                          radius: 14,
+                          backgroundColor: i < 3 ? cs.primary : Colors.black12,
+                          child: Text('${i + 1}',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color:
+                                      i < 3 ? Colors.white : Colors.black54)),
+                        ),
+                        title: Text('${_rich[i]['uid']}'),
+                        trailing: Text('🪙 ${_rich[i]['balance']}',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600)),
+                      ),
+                ] else if (shown.isEmpty)
                   Padding(
                     padding: const EdgeInsets.all(30),
                     child: Center(

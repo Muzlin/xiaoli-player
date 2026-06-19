@@ -257,6 +257,39 @@ class PlatformService {
     return null;
   }
 
+  /// 富豪榜：余额前 20（uid 已打码）。
+  static Future<List<Map<String, dynamic>>> richlist() async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/richlist'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map && d['rich'] is List) {
+          return (d['rich'] as List)
+              .map((e) => Map<String, dynamic>.from(e as Map))
+              .toList();
+        }
+      } catch (_) {}
+    }
+    return [];
+  }
+
+  /// 提交意见反馈。
+  static Future<bool> feedback(String msg) async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse(
+                '$base/feedback?uid=$uid&msg=${Uri.encodeComponent(msg)}'))
+            .timeout(const Duration(seconds: 8));
+        if (jsonDecode(r.body)['ok'] == true) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
   /// 每日任务进度。返回 {ok, tasks:{coin,like,play,claimed}, goals, rewards}。
   static Future<Map<String, dynamic>?> getTasks() async {
     final uid = await walletUid();

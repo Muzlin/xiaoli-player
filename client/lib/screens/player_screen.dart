@@ -42,6 +42,7 @@ class PlayerScreen extends StatefulWidget {
   final List<int> bookmarks; // 时间戳书签(秒)
   final void Function(List<int>)? onSaveBookmarks;
   final double initialSpeed; // 该视频上次倍速
+  final bool initialLoop; // 默认单曲循环（设置项）
   final void Function(double)? onSaveSpeed;
   final Future<void> Function()? onAddToFav; // 收藏到B站
   final Future<List<Map<String, dynamic>>> Function()? onLoadParts; // 分P列表
@@ -73,6 +74,7 @@ class PlayerScreen extends StatefulWidget {
     this.bookmarks = const [],
     this.onSaveBookmarks,
     this.initialSpeed = 0,
+    this.initialLoop = false,
     this.onSaveSpeed,
     this.onAddToFav,
     this.onLoadParts,
@@ -479,7 +481,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   // 音量 / 循环 / 睡眠定时
   double _volume = 100;
   bool _muted = false;
-  bool _loop = false;
+  late bool _loop = widget.initialLoop;
   Duration? _aPoint; // A-B 循环 A 点
   Duration? _bPoint; // A-B 循环 B 点
   int _rotation = 0; // 旋转 0/1/2/3×90°
