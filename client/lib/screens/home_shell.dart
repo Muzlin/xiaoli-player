@@ -265,11 +265,10 @@ class _HomeShellState extends State<HomeShell> {
         _snack('下载失败：${t.name}');
       }
     };
-    if (Platform.isMacOS) {
-      _urlTimer = Timer.periodic(
-          const Duration(seconds: 30), (_) => _refreshPlatformUrl());
-      _refreshPlatformUrl();
-    }
+    // 所有平台：启动即从 GitHub 指针拉当前公网地址，并定时刷新（隧道换址自愈）。
+    _refreshPlatformUrl();
+    _urlTimer = Timer.periodic(
+        const Duration(seconds: 60), (_) => _refreshPlatformUrl());
     if (Platform.isAndroid) _initAndroidChannels();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _showDisclaimer();
@@ -558,9 +557,14 @@ class _HomeShellState extends State<HomeShell> {
         });
   }
 
-  /// 缓存到本地（离线可播），后台进行，不阻塞。
+  /// 缓存到本地（离线可播），后台进行，不阻塞。单个用，会弹提示。
   void _cacheVideo(Track t) {
-    if (t.isLocal) return;
+    if (_enqueueCache(t)) _snack('已加入缓存，后台下载中…');
+  }
+
+  /// 把一个在线曲目排队缓存（不弹提示，供批量复用）。返回是否成功入队。
+  bool _enqueueCache(Track t) {
+    if (t.isLocal) return false;
     final (resolve, headers) = _resolveFor(t);
     // 用真实后缀命名，离线播放才能正确判定音/视频（音频→封面，视频→画面）。
     var ext = 'mp4';
@@ -573,7 +577,52 @@ class _HomeShellState extends State<HomeShell> {
     }
     DownloadManager.instance
         .cacheVideo(t.key, t.name, resolve, headers: headers, ext: ext);
-    _snack('已加入缓存，后台下载中…');
+    return true;
+  }
+
+  /// 列表顶部的「全部缓存」条：当前页有未缓存的在线视频时显示，一键全选缓存。
+  Widget _batchCacheBar(List<Track> items) {
+    return AnimatedBuilder(
+      animation: DownloadManager.instance,
+      builder: (_, __) {
+        final online = items
+            .where((t) =>
+                !t.isLocal && !DownloadManager.instance.isCached(t.key))
+            .toList();
+        if (online.isEmpty) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.fromLTRB(14, 4, 8, 4),
+          child: Row(
+            children: [
+              const Icon(Icons.offline_pin_outlined,
+                  size: 16, color: Colors.white54),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('本页 ${online.length} 个在线视频可离线缓存',
+                    style:
+                        const TextStyle(fontSize: 12, color: Colors.white54)),
+              ),
+              TextButton.icon(
+                onPressed: () => _cacheBatch(online),
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('全部缓存'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 批量缓存一组在线曲目（跳过本地/已缓存），弹一条汇总提示。
+  void _cacheBatch(Iterable<Track> tracks) {
+    var n = 0;
+    for (final t in tracks) {
+      if (!t.isLocal && !DownloadManager.instance.isCached(t.key)) {
+        if (_enqueueCache(t)) n++;
+      }
+    }
+    _snack(n == 0 ? '没有可缓存的在线视频' : '已加入缓存队列：$n 个，后台下载中');
   }
 
   /// 后台下载到用户选定路径，不阻塞（可去看别的视频）。
@@ -2321,7 +2370,9 @@ class _HomeShellState extends State<HomeShell> {
                   builder: (_) => _BiliListPage(
                       title: title,
                       fetch: fn,
-                      onPlay: (bvid, t) => _play(Track.bili(t, bvid)))));
+                      onPlay: (bvid, t) => _play(Track.bili(t, bvid)),
+                      onCacheAll: (l) =>
+                          _cacheBatch(l.map((b) => Track.bili(b.title, b.bvid))))));
             },
             itemBuilder: (_) => const [
               PopupMenuItem(
@@ -2375,7 +2426,8 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _refreshPlatformUrl() async {
     final before = PlatformService.current;
-    await PlatformService.loadLocal();
+    await PlatformService.loadRemoteUrl(); // 所有平台：GitHub 指针取最新隧道地址
+    await PlatformService.loadLocal(); // Mac：本机 public_url.txt 覆盖 + 探 LAN
     final healthy = await _platform.publicHealthy();
     if (!mounted) return;
     setState(() => _publicHealthy = healthy);
@@ -3058,7 +3110,9 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => _BiliListPage(
             title: '收藏夹',
             fetch: () => _bili.getFavVideos(mlid),
-            onPlay: (bvid, t) => _play(Track.bili(t, bvid)))));
+            onPlay: (bvid, t) => _play(Track.bili(t, bvid)),
+            onCacheAll: (l) =>
+                _cacheBatch(l.map((b) => Track.bili(b.title, b.bvid))))));
   }
 
   Future<void> _addToBiliFav(String bvid) async {
@@ -3659,6 +3713,7 @@ class _HomeShellState extends State<HomeShell> {
         if (_query.isNotEmpty) _platformCatBar(cs),
         if (_query.isNotEmpty && _accountResults.isNotEmpty)
           _accountsBar(cs),
+        _batchCacheBar(items),
         Expanded(
           child: items.isEmpty
               ? Center(
@@ -4143,7 +4198,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.39.0'),
+          title: Text('小李播放器 v2.39.1'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -4195,7 +4250,7 @@ class _HomeShellState extends State<HomeShell> {
                     playlists: _playlists,
                     onPlay: _play,
                     onSave: _savePlaylists,
-                    onCacheTrack: _cacheVideo)));
+                    onCacheTrack: _enqueueCache)));
             setState(() {});
           },
         ),
@@ -5142,8 +5197,12 @@ class _BiliListPage extends StatefulWidget {
   final String title;
   final Future<List<BiliTrack>> Function() fetch;
   final void Function(String bvid, String title) onPlay;
+  final void Function(List<BiliTrack>)? onCacheAll; // 全部缓存(离线)
   const _BiliListPage(
-      {required this.title, required this.fetch, required this.onPlay});
+      {required this.title,
+      required this.fetch,
+      required this.onPlay,
+      this.onCacheAll});
   @override
   State<_BiliListPage> createState() => _BiliListPageState();
 }
@@ -5171,7 +5230,14 @@ class _BiliListPageState extends State<_BiliListPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(title: Text(widget.title), actions: [
+        if (widget.onCacheAll != null && _list.isNotEmpty)
+          IconButton(
+            icon: const Icon(Icons.offline_pin_outlined),
+            tooltip: '全部缓存(离线可看)',
+            onPressed: () => widget.onCacheAll!(_list),
+          ),
+      ]),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _list.isEmpty
