@@ -13,7 +13,7 @@ class UpdateInfo {
 /// 检查更新：优先问自建平台 /version（国内直连稳），拿不到再退 GitHub Releases。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.39.8';
+  static const currentVersion = '2.39.9';
 
   /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';
@@ -43,9 +43,11 @@ class UpdateService {
       final m = jsonDecode(r.body) as Map<String, dynamic>;
       final latest = (m['version'] ?? '') as String;
       if (latest.isEmpty || !isNewer(latest, currentVersion)) return null;
+      // 官方下载地址由后台「下载源」开关决定（GitHub releases 或 平台下载页）。
+      final dl = (m['download_url'] ?? '') as String;
       return UpdateInfo(
         version: latest,
-        url: '$base/download', // 平台下载页（含直接下载 + GitHub 永久链接）
+        url: dl.isNotEmpty ? dl : '$base/download',
         notes: (m['notes'] ?? '') as String,
       );
     } catch (_) {
