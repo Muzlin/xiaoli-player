@@ -99,6 +99,21 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
       }
     }
 
+    // 「打开方式」：把双击/打开的文件路径交给 Dart 播放（getPending 拉启动时缓存的）。
+    let openCh = FlutterMethodChannel(
+      name: "xiaoli/openfile",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    openCh.setMethodCallHandler { (call, result) in
+      if call.method == "getPending" {
+        let f = AppDelegate.pendingFiles
+        AppDelegate.pendingFiles = []
+        result(f)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    AppDelegate.openChannel = openCh
+
     if UserDefaults.standard.bool(forKey: "hotkeyEnabled") {
       let d = UserDefaults.standard
       let code = d.integer(forKey: "hotkeyCode")
