@@ -8,6 +8,7 @@ class PlayerBar extends StatelessWidget {
   final VoidCallback onPrev;
   final VoidCallback onNext;
   final VoidCallback onPlayPause;
+  final VoidCallback? onTapInfo; // 点曲目信息区→恢复/打开播放页
 
   const PlayerBar({
     super.key,
@@ -17,6 +18,7 @@ class PlayerBar extends StatelessWidget {
     required this.onPrev,
     required this.onNext,
     required this.onPlayPause,
+    this.onTapInfo,
   });
 
   @override
@@ -30,44 +32,48 @@ class PlayerBar extends StatelessWidget {
         children: [
           SizedBox(
             width: 240,
-            child: Row(
-              children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: cs.primary.withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(8),
+            child: InkWell(
+              onTap: title == null ? null : onTapInfo,
+              borderRadius: BorderRadius.circular(8),
+              child: Row(
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: cs.primary.withOpacity(0.2),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Icon(Icons.music_note, color: cs.primary),
                   ),
-                  child: Icon(Icons.music_note, color: cs.primary),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        title ?? '未在播放',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      if (subtitle != null)
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
                         Text(
-                          subtitle!,
+                          title ?? '未在播放',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
-                            color: Colors.white38,
-                            fontSize: 12,
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
                           ),
                         ),
-                    ],
+                        if (subtitle != null)
+                          Text(
+                            subtitle!,
+                            style: const TextStyle(
+                              color: Colors.white38,
+                              fontSize: 12,
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           const Spacer(),
