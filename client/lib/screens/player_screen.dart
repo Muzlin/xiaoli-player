@@ -10,6 +10,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../player/playback_source.dart';
+import '../player/player_holder.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
 import '../text_scale.dart';
@@ -47,6 +48,7 @@ class PlayerScreen extends StatefulWidget {
   final Future<List<SubtitleOption>> Function()? onLoadSubtitleOptions; // F13
   final Future<Map<String, String?>> Function()? onLoadMultiSubtitles; // F14
   final VoidCallback? onCache; // 缓存此视频到本地（离线可看）；本地/已缓存为 null
+  final bool attach; // true=从迷你条恢复，附着到已在播放的全局播放器，不重新起播
   const PlayerScreen({
     super.key,
     required this.source,
@@ -76,6 +78,7 @@ class PlayerScreen extends StatefulWidget {
     this.onLoadSubtitleOptions,
     this.onLoadMultiSubtitles,
     this.onCache,
+    this.attach = false,
   });
 
   @override
@@ -84,8 +87,9 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
-  late final Player _player = Player();
-  late final VideoController _controller = VideoController(_player);
+  // 全局单例播放器：退出本页后仍继续播放（后台播放）。本页不再 new/dispose 它。
+  final Player _player = PlayerHolder.i.player;
+  final VideoController _controller = PlayerHolder.i.controller;
   final List<StreamSubscription<dynamic>> _subs = [];
 
   Duration _position = Duration.zero;
@@ -1864,6 +1868,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 标记：本页内容已成为全局当前播放项，且播放页在前台（迷你条暂不显示）。
+    PlayerHolder.i.current.value = widget.source;
+    PlayerHolder.i.screenOpen.value = true;
     _isWebVideo =
         widget.source.isVideo && widget.source.resource.startsWith('http');
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
@@ -1973,9 +1980,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         return null;
       });
     }
-    _player.open(
-      Media(widget.source.resource, httpHeaders: widget.source.headers),
-    );
+    // attach=true：从迷你条恢复，播放器已在放同一内容，不重新 open（否则会从头开始）。
+    if (!widget.attach) {
+      _player.open(
+        Media(widget.source.resource, httpHeaders: widget.source.headers),
+      );
+    }
     // 字幕异步取到后默认开启（不阻塞起播）
     widget.source.subtitleFuture?.then((srt) {
       if (!mounted || srt == null || srt.isEmpty) return;
@@ -2052,10 +2062,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 隐藏窗口(全局热键/Cmd+H)时暂停播放(仅 macOS)。
-    if (Platform.isMacOS && state == AppLifecycleState.hidden) {
-      _player.pause();
-    }
+    // 后台播放：窗口隐藏/切后台时不再自动暂停，音频继续播。
   }
 
   @override
@@ -2075,7 +2082,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     for (final s in _subs) {
       s.cancel();
     }
-    _player.dispose();
+    // 不 dispose 全局播放器——退出本页后继续播放（后台播放）。
+    PlayerHolder.i.screenOpen.value = false;
     super.dispose();
   }
 
