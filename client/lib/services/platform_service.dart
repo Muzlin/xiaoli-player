@@ -20,6 +20,8 @@ class PlatformVideo {
   final bool pinned; // 已置顶/精选
   final int views; // 播放量
   final int coins; // 投币数
+  final int likes; // 点赞数
+  final int favs; // 收藏数
   PlatformVideo(
       {required this.id,
       required this.title,
@@ -33,7 +35,9 @@ class PlatformVideo {
       this.hidden = false,
       this.pinned = false,
       this.views = 0,
-      this.coins = 0});
+      this.coins = 0,
+      this.likes = 0,
+      this.favs = 0});
 }
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
@@ -224,6 +228,51 @@ class PlatformService {
     return null;
   }
 
+  /// 点赞（免费）。[on] 给出目标状态(true=赞/false=取消)，服务器幂等设置——
+  /// 慢请求/重试都不会来回切。返回 {ok, liked:bool, likes:新计数}。
+  static Future<Map<String, dynamic>?> like(String videoId, {bool? on}) async {
+    return _engage('like', videoId, on);
+  }
+
+  /// 收藏（免费，幂等）。返回 {ok, faved:bool, favs:新计数}。
+  static Future<Map<String, dynamic>?> fav(String videoId, {bool? on}) async {
+    return _engage('fav', videoId, on);
+  }
+
+  static Future<Map<String, dynamic>?> _engage(
+      String path, String videoId, bool? on) async {
+    final uid = await walletUid();
+    final st = on == null ? '' : '&state=${on ? 1 : 0}';
+    // 传了目标状态=幂等，可安全重试备用地址；没传=切换，非幂等，只打当前地址。
+    final bases = on == null ? <String>{current} : <String>{current, baseUrl};
+    for (final base in bases) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/$path?uid=$uid&id=$videoId$st'))
+            .timeout(const Duration(seconds: 10));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 本设备对某视频的三连状态 + 各计数（一次取齐，开播放页时调一次）。
+  /// 返回 {ok, balance, coined_this, liked_this, faved_this, coins, likes, favs}。
+  static Future<Map<String, dynamic>?> videoState(String videoId) async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/wallet?uid=$uid&id=$videoId'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// 花兑换币做某动作（如 rename）。后台 prices 决定价格。返回结果(ok/need/balance)。
   static Future<Map<String, dynamic>?> spend(String action) async {
     final uid = await walletUid();
@@ -369,6 +418,9 @@ class PlatformService {
               hidden: e['hidden'] == true,
               pinned: e['pinned'] == true,
               views: ((e['views'] ?? 0) as num).toInt(),
+              coins: ((e['coins'] ?? 0) as num).toInt(),
+              likes: ((e['likes'] ?? 0) as num).toInt(),
+              favs: ((e['favs'] ?? 0) as num).toInt(),
             ))
         .where((v) => v.id.isNotEmpty)
         .toList();
@@ -448,6 +500,8 @@ class PlatformService {
                 ghUrl: e['gh_url'] as String?,
                 views: ((e['views'] ?? 0) as num).toInt(),
                 coins: ((e['coins'] ?? 0) as num).toInt(),
+                likes: ((e['likes'] ?? 0) as num).toInt(),
+                favs: ((e['favs'] ?? 0) as num).toInt(),
               ))
           .where((v) => v.id.isNotEmpty)
           .toList();

@@ -2200,6 +2200,9 @@ class _HomeShellState extends State<HomeShell> {
             t.bvid != null ? (n) => _bili.coinVideo(t.bvid!, multiply: n) : null,
         onTriple: t.bvid != null ? () => _bili.tripleVideo(t.bvid!) : null,
         bvid: t.bvid,
+        // 平台视频→传 id，播放页显示「点赞/投币/收藏」三连。
+        platformId:
+            (t.tag == '平台' && t.url != null) ? t.url!.split('/').last : null,
         seekStep: _seekStep,
         bookmarks: _bookmarks[t.key] ?? const [],
         onSaveBookmarks: (list) {

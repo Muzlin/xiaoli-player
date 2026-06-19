@@ -13,6 +13,7 @@ import '../player/playback_source.dart';
 import '../player/player_holder.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
+import '../services/platform_service.dart';
 import '../text_scale.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -36,6 +37,7 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function(int multiply)? onCoin; // B站投币
   final Future<String> Function()? onTriple; // B站一键三连
   final String? bvid; // B站 bvid(分享链接)
+  final String? platformId; // 平台视频ID(非空=本应用平台视频，可点赞/投币/收藏)
   final int seekStep; // 快进/快退步长
   final List<int> bookmarks; // 时间戳书签(秒)
   final void Function(List<int>)? onSaveBookmarks;
@@ -66,6 +68,7 @@ class PlayerScreen extends StatefulWidget {
     this.onCoin,
     this.onTriple,
     this.bvid,
+    this.platformId,
     this.seekStep = 10,
     this.bookmarks = const [],
     this.onSaveBookmarks,
@@ -98,6 +101,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _hasVideo = false;
   String? _error;
   double _speed = 1.0;
+
+  // ===== 平台视频三连：点赞/投币/收藏 =====
+  int _plLikes = 0, _plCoins = 0, _plFavs = 0; // 各计数
+  bool _plLiked = false, _plCoined = false, _plFaved = false; // 本设备状态
+  bool _plBusy = false; // 防连点造成的来回 toggle 竞态
 
   bool _isWebVideo = false; // 网络视频（B站等），可能带烧录角标水印
   bool _cropEdges = false; // 放大裁边，把角落水印推出画面
@@ -1876,6 +1884,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _fav = widget.isFavorite;
     _marks.addAll(widget.bookmarks);
+    _loadPlatformEngage(); // 平台视频：取本设备三连状态+各计数
     if (!widget.source.resource.startsWith('http')) {
       _autoLoadSidecarSub(widget.source.resource);
     }
@@ -2093,6 +2102,111 @@ class _PlayerScreenState extends State<PlayerScreen>
     return d.inHours > 0
         ? '${d.inHours.toString().padLeft(2, '0')}:$m:$s'
         : '$m:$s';
+  }
+
+  // ===== 平台三连：点赞/投币/收藏 =====
+  Future<void> _loadPlatformEngage() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final d = await PlatformService.videoState(id);
+    if (d == null || !mounted) return;
+    setState(() {
+      _plLikes = ((d['likes'] ?? 0) as num).toInt();
+      _plCoins = ((d['coins'] ?? 0) as num).toInt();
+      _plFavs = ((d['favs'] ?? 0) as num).toInt();
+      _plLiked = d['liked_this'] == true;
+      _plCoined = d['coined_this'] == true;
+      _plFaved = d['faved_this'] == true;
+    });
+  }
+
+  void _engageToast(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(m), duration: const Duration(milliseconds: 1200)));
+  }
+
+  Future<void> _onPlatLike() async {
+    final id = widget.platformId;
+    if (id == null || _plBusy) return;
+    setState(() => _plBusy = true);
+    try {
+      final d = await PlatformService.like(id, on: !_plLiked); // 幂等：传目标状态
+      if (d != null && d['ok'] == true && mounted) {
+        setState(() {
+          _plLiked = d['liked'] == true;
+          _plLikes = ((d['likes'] ?? _plLikes) as num).toInt();
+        });
+      } else if (d == null) {
+        _engageToast('点赞失败');
+      }
+    } finally {
+      if (mounted) setState(() => _plBusy = false);
+    }
+  }
+
+  Future<void> _onPlatFav() async {
+    final id = widget.platformId;
+    if (id == null || _plBusy) return;
+    setState(() => _plBusy = true);
+    try {
+      final d = await PlatformService.fav(id, on: !_plFaved); // 幂等：传目标状态
+      if (d != null && d['ok'] == true && mounted) {
+        setState(() {
+          _plFaved = d['faved'] == true;
+          _plFavs = ((d['favs'] ?? _plFavs) as num).toInt();
+        });
+        _engageToast(_plFaved ? '已收藏' : '已取消收藏');
+      } else if (d == null) {
+        _engageToast('收藏失败');
+      }
+    } finally {
+      if (mounted) setState(() => _plBusy = false);
+    }
+  }
+
+  Future<void> _onPlatCoin() async {
+    final id = widget.platformId;
+    if (id == null || _plBusy || _plCoined) return;
+    setState(() => _plBusy = true);
+    try {
+      final d = await PlatformService.coin(id);
+      if (d == null) {
+        _engageToast('投币失败');
+      } else if (d['ok'] == true) {
+        setState(() {
+          _plCoined = true;
+          _plCoins += 1;
+        });
+        _engageToast('投币成功！花费 ${d['cost'] ?? 1} 小李兑换币');
+      } else {
+        _engageToast('${d['error'] ?? '投币失败'}（余额 ${d['balance'] ?? 0}）');
+        if ((d['error'] ?? '').toString().contains('已投')) {
+          setState(() => _plCoined = true);
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _plBusy = false);
+    }
+  }
+
+  // 单个三连按钮：图标(点亮=主题色) + 计数。
+  Widget _engageBtn(
+      IconData icon, bool active, int count, Color cs, VoidCallback? onTap) {
+    final color = active ? cs : Colors.white70;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, color: color, size: 26),
+          const SizedBox(height: 2),
+          Text('$count',
+              style: TextStyle(color: color, fontSize: 12)),
+        ]),
+      ),
+    );
   }
 
   @override
@@ -2820,6 +2934,24 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
                   ],
                 ),
+                if (widget.platformId != null) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _engageBtn(_plLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                          _plLiked, _plLikes, cs.primary, _plBusy ? null : _onPlatLike),
+                      _engageBtn(
+                          Icons.monetization_on,
+                          _plCoined,
+                          _plCoins,
+                          cs.primary,
+                          (_plBusy || _plCoined) ? null : _onPlatCoin),
+                      _engageBtn(_plFaved ? Icons.star : Icons.star_border,
+                          _plFaved, _plFavs, cs.primary, _plBusy ? null : _onPlatFav),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 8),
                 _volumeBar(cs),
                 const SizedBox(height: 20),
