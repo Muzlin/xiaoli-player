@@ -22,11 +22,17 @@ class PlatformVideo {
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
 class PlatformService {
-  /// 平台公网地址（cloudflared 隧道）。隧道重启会变，届时需更新。
-  /// 兜底地址（隧道默认值）。生效地址 [_base] 启动时可被本机 public_url.txt 覆盖。
+  /// 平台公网地址（cloudflared 隧道）。隧道重启会变——所有平台启动时都会
+  /// 从 [_remotePointer] 拉取当前地址，所以这里只是首次启动的兜底初值。
   static const baseUrl =
-      'https://shapes-cups-hospital-respected.trycloudflare.com';
-  static String _base = baseUrl; // 公网地址
+      'https://internal-apt-saturn-navy.trycloudflare.com';
+  static String _base = baseUrl; // 公网地址（运行时由 GitHub 指针/本机文件刷新）
+
+  /// 永久指针：GitHub 上的 public_url.txt 始终写着当前隧道地址。
+  /// 服务器隧道一变，keepalive 脚本就把新址提交到这里；app 启动即拉取，
+  /// 全平台通用、国内 api.github.com 可达，从此换隧道无需重新打包。
+  static const _remotePointer =
+      'https://api.github.com/repos/Muzlin/xiaoli-player/contents/public_url.txt?ref=flutter-client';
   static bool useLan = false; // 切到局域网服务器
   static String? _lanIp; // 本机局域网 IP
 
@@ -108,6 +114,26 @@ class PlatformService {
           }
         }
       }
+    } catch (_) {}
+  }
+
+  /// 从 GitHub 永久指针拉取当前公网地址（所有平台）。
+  /// 隧道地址变了也能自愈，无需重新打包 app。失败则保持现有地址。
+  static Future<void> loadRemoteUrl() async {
+    try {
+      // 用 JSON contents API（base64）：比 raw CDN 端点更快反映最新提交。
+      final r = await http.get(Uri.parse(_remotePointer), headers: {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'xiaoli-player',
+      }).timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return;
+      var u = r.body.trim();
+      if (u.startsWith('{')) {
+        final m = jsonDecode(u) as Map<String, dynamic>;
+        final c = ((m['content'] ?? '') as String).replaceAll('\n', '');
+        u = utf8.decode(base64.decode(c)).trim();
+      }
+      if (u.startsWith('https://') && u.length < 200) _base = u;
     } catch (_) {}
   }
 
@@ -272,7 +298,7 @@ class PlatformService {
   /// cloudflared 免费隧道上传极慢，故同机/同网时直传服务器。
   static List<String> get _uploadBases => [
         'http://localhost:8900',
-        'http://10.10.10.5:8900',
+        lanBase, // 自动探测的局域网地址（随网络自愈，不再写死 IP）
         _base,
       ];
 
