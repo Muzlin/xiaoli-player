@@ -199,6 +199,25 @@ class PlatformService {
     return null;
   }
 
+  /// 后台管理：导入/恢复 index（POST，body=导出的 JSON 文本）。返回成功条数或 null。
+  static Future<int?> adminImport(String jsonText) async {
+    for (final base in {'http://localhost:8900', lanBase, current}) {
+      try {
+        final r = await http
+            .post(Uri.parse('$base/admin/import'),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Admin-Token': _adminToken,
+                },
+                body: jsonText)
+            .timeout(const Duration(seconds: 20));
+        final d = jsonDecode(r.body);
+        if (d['ok'] == true) return (d['count'] ?? 0) as int;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// 后台管理：取全部视频（含隐藏）+ 管理字段。
   static Future<List<PlatformVideo>> adminList() async {
     final d = await adminGet('videos');
@@ -315,14 +334,21 @@ class PlatformService {
       final total = resp.contentLength ?? 0;
       var received = 0;
       final sink = File(destPath).openWrite();
-      await for (final chunk in resp.stream) {
-        sink.add(chunk);
-        received += chunk.length;
-        if (onProgress != null) onProgress(received, total);
+      try {
+        await for (final chunk in resp.stream) {
+          sink.add(chunk);
+          received += chunk.length;
+          if (onProgress != null) onProgress(received, total);
+        }
+      } finally {
+        await sink.close(); // 异常路径也要关，避免句柄泄漏
       }
-      await sink.close();
       return null;
     } catch (e) {
+      try {
+        final f = File(destPath); // 出错删掉半截文件
+        if (f.existsSync()) f.deleteSync();
+      } catch (_) {}
       return '$e';
     }
   }
