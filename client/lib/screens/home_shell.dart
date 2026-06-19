@@ -17,6 +17,7 @@ import '../services/transcribe_service.dart';
 import '../services/platform_service.dart';
 import '../services/update_service.dart';
 import '../services/download_manager.dart';
+import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
 import 'stats_screen.dart';
@@ -612,6 +613,70 @@ class _HomeShellState extends State<HomeShell> {
         );
       },
     );
+  }
+
+  /// 云端缓存：解析直链后交给平台服务器下载+备份到 GitHub（不阻塞 UI 用对话框等结果）。
+  Future<void> _cloudCache(Track t) async {
+    if (t.isLocal || !mounted) return;
+    final (resolve, headers) = _resolveFor(t);
+    var ext = 'mp4';
+    if (t.bvid == null && t.url != null) {
+      final u = t.url!.split('?').first.toLowerCase();
+      if (u.contains('.')) {
+        final e = u.split('.').last;
+        if (e.isNotEmpty && e.length <= 4) ext = e;
+      }
+    }
+    final status = ValueNotifier<String>('解析地址…');
+    var open = true;
+    void close() {
+      if (open && mounted) {
+        open = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('云端缓存中'),
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: status,
+                builder: (_, s, __) => Text(s),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      final url = await resolve();
+      if (url == null || url.isEmpty) {
+        close();
+        _snack('取地址失败');
+        return;
+      }
+      status.value = '服务器下载并备份中…（大视频需等一会）';
+      final err =
+          await PlatformService.cloudFetch(t.name, '云端', url, headers, ext);
+      close();
+      _snack(err == null
+          ? '已云端缓存：平台可搜到、已备份 GitHub，换设备也能看'
+          : '云端缓存失败：$err');
+    } catch (e) {
+      close();
+      _snack('云端缓存出错：$e');
+    }
   }
 
   /// 批量缓存一组在线曲目（跳过本地/已缓存），弹一条汇总提示。
@@ -2004,9 +2069,17 @@ class _HomeShellState extends State<HomeShell> {
       src = t.toSource();
     }
     if (!mounted) return;
+    _pushPlayer(t, src, replace: replace);
+  }
+
+  /// 构建并跳转到播放页。attach=true 用于从迷你条恢复——附着到已在播放的全局播放器，不重新起播。
+  void _pushPlayer(Track t, PlaybackSource src,
+      {bool replace = false, bool attach = false}) {
+    final cachedFile = DownloadManager.instance.cachedPath(t.key);
     final route = MaterialPageRoute<void>(
       builder: (_) => PlayerScreen(
         source: src,
+        attach: attach,
         isFavorite: _isFav(t),
         onToggleFavorite: () => _toggleFav(t),
         onCompleted: () {
@@ -2147,14 +2220,33 @@ class _HomeShellState extends State<HomeShell> {
           ],
         ),
       ),
-      bottomNavigationBar: PlayerBar(
-        title: _current?.name,
-        subtitle: _currentSubtitle,
-        onPrev: _prev,
-        onNext: _next,
-        onPlayPause: () {
-          if (_current != null) _play(_current!);
-        },
+      bottomNavigationBar: AnimatedBuilder(
+        animation: Listenable.merge(
+            [PlayerHolder.i.playing, PlayerHolder.i.current]),
+        builder: (_, __) => PlayerBar(
+          title: _current?.name,
+          subtitle: _currentSubtitle,
+          isPlaying: PlayerHolder.i.playing.value,
+          onPrev: _prev,
+          onNext: _next,
+          onPlayPause: () {
+            // 全局播放器已有内容→真正暂停/继续（后台也在播）；否则从头起播。
+            if (PlayerHolder.i.current.value != null) {
+              PlayerHolder.i.playPause();
+            } else if (_current != null) {
+              _play(_current!);
+            }
+          },
+          onTapInfo: () {
+            // 点信息区→恢复播放页：若正在后台播同一内容，附着恢复(不重播)；否则重新起播。
+            final src = PlayerHolder.i.current.value;
+            if (src != null && _current != null) {
+              _pushPlayer(_current!, src, attach: true);
+            } else if (_current != null) {
+              _play(_current!);
+            }
+          },
+        ),
       ),
     );
   }
@@ -3816,8 +3908,10 @@ class _HomeShellState extends State<HomeShell> {
             const PopupMenuItem(value: 'uncache', child: Text('删除离线缓存')));
       } else {
         items.add(
-            const PopupMenuItem(value: 'cache', child: Text('缓存(离线可看)')));
+            const PopupMenuItem(value: 'cache', child: Text('缓存到本地(离线)')));
       }
+      items.add(const PopupMenuItem(
+          value: 'cloud', child: Text('☁ 云端缓存(可分享/永久)')));
       items.add(const PopupMenuItem(value: 'bgdl', child: Text('后台下载到…')));
     }
     showMenu<String>(
@@ -3838,6 +3932,8 @@ class _HomeShellState extends State<HomeShell> {
         _downloadPlatformVideo(t);
       } else if (v == 'cache') {
         _cacheVideo(t);
+      } else if (v == 'cloud') {
+        _cloudCache(t);
       } else if (v == 'uncache') {
         DownloadManager.instance.deleteCached(t.key);
         _snack('已删除离线缓存');
@@ -4198,7 +4294,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.39.1'),
+          title: Text('小李播放器 v2.39.2'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
