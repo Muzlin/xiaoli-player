@@ -163,6 +163,22 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
+  /// 后台管理软口令（与 server.py ADMIN_TOKEN 一致）。
+  static const _adminToken = 'xladmin-9f2c7b';
+
+  /// 后台管理：删除一条平台/云端视频。返回是否成功。
+  static Future<bool> deleteVideo(String id) async {
+    for (final base in {'http://localhost:8900', current}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/delete?id=$id&token=$_adminToken'))
+            .timeout(const Duration(seconds: 10));
+        if (jsonDecode(r.body)['ok'] == true) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
   /// 云端缓存：把已解析的视频直链+请求头交给平台服务器，由服务器下载存储，
   /// 并后台备份到 GitHub Releases。客户端不碰令牌。返回 null 成功，否则错误串。
   static Future<String?> cloudFetch(String title, String uploader, String url,
