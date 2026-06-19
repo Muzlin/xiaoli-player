@@ -175,6 +175,48 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
+  /// 取免责声明（后台设的；空则 app 用内置默认）。
+  static Future<String> getDisclaimer() async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/version'))
+            .timeout(const Duration(seconds: 6));
+        return (jsonDecode(r.body)['disclaimer'] ?? '') as String;
+      } catch (_) {}
+    }
+    return '';
+  }
+
+  /// 后台：上传下一版应用文件(which=mac|apk|win)覆盖官网下载。仅局域网+口令。
+  static Future<bool> uploadAppFile(String which, String path) async {
+    final bytes = await File(path).readAsBytes();
+    for (final base in {'http://localhost:8900', lanBase}) {
+      try {
+        final r = await http
+            .post(Uri.parse('$base/admin/upload-app?which=$which'),
+                headers: {'X-Admin-Token': _adminToken}, body: bytes)
+            .timeout(const Duration(minutes: 10));
+        if (jsonDecode(r.body)['ok'] == true) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  /// 取平台公告（管理员在后台设的，公开可读）。
+  static Future<String> getNotice() async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/notice'))
+            .timeout(const Duration(seconds: 6));
+        final d = jsonDecode(r.body);
+        return (d['notice'] ?? '') as String;
+      } catch (_) {}
+    }
+    return '';
+  }
+
   /// 后台管理软口令（与 server.py ADMIN_TOKEN 一致）。
   static const _adminToken = 'xladmin-9f2c7b';
 
