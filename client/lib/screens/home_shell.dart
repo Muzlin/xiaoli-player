@@ -1552,20 +1552,27 @@ class _HomeShellState extends State<HomeShell> {
     poll?.cancel();
   }
 
+  static const _disclaimerDefault =
+      '「小李播放器」是一款媒体播放器，仅供学习与个人使用。\n\n'
+      '联网搜索内容来自公开网络平台；版权归原作者/平台所有，'
+      '请勿用于任何商业或侵权用途，使用本软件产生的一切后果由使用者自行承担。\n\n'
+      '点击「同意」即表示你已阅读并接受以上条款。';
+
   Future<void> _showDisclaimer() async {
+    // 免责声明文案后台可改：用上次缓存(或内置默认)立即显示，不卡启动；同时后台拉最新供下次。
+    final p = await SharedPreferences.getInstance();
+    final cached = p.getString('disclaimer_text') ?? '';
+    final text = cached.isNotEmpty ? cached : _disclaimerDefault;
+    PlatformService.getDisclaimer().then((r) {
+      if (r.isNotEmpty) p.setString('disclaimer_text', r);
+    });
+    if (!mounted) return;
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         title: const Text('免责声明'),
-        content: const SingleChildScrollView(
-          child: Text(
-            '「小李播放器」是一款媒体播放器，仅供学习与个人使用。\n\n'
-            '联网搜索内容来自公开网络平台；版权归原作者/平台所有，'
-            '请勿用于任何商业或侵权用途，使用本软件产生的一切后果由使用者自行承担。\n\n'
-            '点击「同意」即表示你已阅读并接受以上条款。',
-          ),
-        ),
+        content: SingleChildScrollView(child: Text(text)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -4378,7 +4385,7 @@ class _HomeShellState extends State<HomeShell> {
         const SizedBox(height: 16),
         const ListTile(
           leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.39.6'),
+          title: Text('小李播放器 v2.39.7'),
           subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
         ListTile(
@@ -5389,8 +5396,13 @@ class _CreatorCenterPage extends StatefulWidget {
 }
 
 class _CreatorCenterPageState extends State<_CreatorCenterPage> {
-  List<PlatformVideo> _top = [];
+  final _svc = PlatformService();
+  List<PlatformVideo> _works = [];
   bool _loading = true;
+  String _notice = ''; // 功能2：公告条
+  String _query = ''; // 功能5：搜索
+  String _sort = 'views'; // 功能6：排序
+  String _creatorName = ''; // 功能9：创作者名字
 
   @override
   void initState() {
@@ -5399,38 +5411,197 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
   }
 
   Future<void> _load() async {
-    final v = await PlatformService().list(sort: 'views');
+    final v = await _svc.list(sort: _sort);
+    final notice = await PlatformService.getNotice();
+    final p = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
-      _top = v;
+      _works = v;
+      _notice = notice;
+      _creatorName = p.getString('creator_name') ?? '';
       _loading = false;
     });
   }
 
-  Widget _entry(IconData ic, String title, String sub, Color c, VoidCallback t) {
-    return Card(
-      margin: const EdgeInsets.fromLTRB(12, 6, 12, 0),
-      child: ListTile(
-        leading: CircleAvatar(
-            backgroundColor: c.withOpacity(0.15),
-            child: Icon(ic, color: c)),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
-        subtitle: Text(sub, style: const TextStyle(fontSize: 12)),
-        trailing: const Icon(Icons.chevron_right),
-        onTap: t,
+  void _toast(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  static String _fmtBytes(num b) {
+    if (b >= 1073741824) return '${(b / 1073741824).toStringAsFixed(1)}G';
+    if (b >= 1048576) return '${(b / 1048576).toStringAsFixed(0)}M';
+    return '${(b / 1024).toStringAsFixed(0)}K';
+  }
+
+  List<PlatformVideo> get _shown => _works
+      .where((v) => _query.isEmpty || v.title.toLowerCase().contains(_query))
+      .toList();
+
+  // 功能3/4：上传文件（可多选批量），带进度
+  Future<void> _upload({required bool multi}) async {
+    final r = await FilePicker.platform
+        .pickFiles(type: FileType.video, allowMultiple: multi);
+    if (r == null || r.files.isEmpty) return;
+    final paths = r.files.map((f) => f.path).whereType<String>().toList();
+    final uploader = _creatorName.isEmpty ? '匿名' : _creatorName;
+    for (var i = 0; i < paths.length; i++) {
+      final name = paths[i].split(Platform.pathSeparator).last;
+      final title =
+          name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
+      final progress = ValueNotifier<double>(0);
+      var open = true;
+      void close() {
+        if (open && mounted) {
+          open = false;
+          Navigator.of(context).pop();
+        }
+      }
+
+      if (mounted) {
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => AlertDialog(
+            title: Text('上传中 ${i + 1}/${paths.length}'),
+            content: Column(mainAxisSize: MainAxisSize.min, children: [
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, v, __) => LinearProgressIndicator(value: v),
+              ),
+              const SizedBox(height: 10),
+              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            ]),
+          ),
+        );
+      }
+      try {
+        await for (final p in _svc.uploadWithProgress(paths[i], title, uploader)) {
+          progress.value = p;
+        }
+        close();
+        _toast(_svc.lastUploadMessage);
+      } catch (_) {
+        close();
+        _toast('上传失败：${_svc.lastUploadMessage}');
+      }
+    }
+    _load();
+  }
+
+  // 功能7：删除作品
+  Future<void> _delete(PlatformVideo v) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除作品'),
+        content: Text('从平台删除「${v.title}」？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
       ),
     );
+    if (ok != true) return;
+    final done = await PlatformService.deleteVideo(v.id);
+    _toast(done ? '已删除' : '删除失败');
+    if (done) _load();
   }
+
+  // 功能9：设置创作者名字（上传时用）
+  Future<void> _editName() async {
+    final ctrl = TextEditingController(text: _creatorName);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('创作者名字'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: '上传作品时显示的名字')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    await p.setString('creator_name', ctrl.text.trim());
+    if (mounted) setState(() => _creatorName = ctrl.text.trim());
+  }
+
+  // 功能10：导出作品列表
+  void _export() {
+    final b = StringBuffer('我的平台作品\n');
+    for (final v in _works) {
+      b.writeln(
+          '${v.title}\t播放${v.views}\t${_fmtBytes(v.size)}\t${PlatformService.videoUrl(v.id)}');
+    }
+    Clipboard.setData(ClipboardData(text: b.toString()));
+    _toast('作品列表已复制');
+  }
+
+  Widget _statCard(String label, String val, Color c) => Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+              color: c.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12)),
+          child: Column(children: [
+            Text(val,
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold, color: c)),
+            Text(label,
+                style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          ]),
+        ),
+      );
 
   @override
   Widget build(BuildContext context) {
-    final totalViews = _top.fold<int>(0, (s, v) => s + v.views);
+    final views = _works.fold<int>(0, (s, v) => s + v.views);
+    final size = _works.fold<int>(0, (s, v) => s + v.size);
+    final rated = _works.where((v) => v.rcount > 0).toList();
+    final avg = rated.isEmpty
+        ? 0.0
+        : rated.fold<double>(0, (s, v) => s + v.rating) / rated.length;
+    final shown = _shown;
     return Scaffold(
       appBar: AppBar(title: const Text('创作中心'), actions: [
+        IconButton(
+            tooltip: '创作者名字',
+            onPressed: _editName,
+            icon: const Icon(Icons.badge_outlined)),
         IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
       ]),
       body: ListView(
         children: [
+          // 功能2：公告条
+          if (_notice.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFFFF3E0),
+                  borderRadius: BorderRadius.circular(10)),
+              child: Row(children: [
+                const Icon(Icons.campaign, color: Colors.orange, size: 20),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_notice, style: const TextStyle(fontSize: 13))),
+              ]),
+            ),
+          // 头图
           Container(
             margin: const EdgeInsets.all(12),
             padding: const EdgeInsets.all(16),
@@ -5439,63 +5610,137 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
                   colors: [Color(0xFFFF5E8A), Color(0xFFB14CFF)]),
               borderRadius: BorderRadius.circular(16),
             ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Text('我的创作',
-                          style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 4),
-                      Text('平台作品 ${_top.length} · 总播放 $totalViews',
-                          style: const TextStyle(color: Colors.white70)),
-                    ],
-                  ),
+            child: Row(children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(_creatorName.isEmpty ? '我的创作' : _creatorName,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    const Text('管理你的平台作品',
+                        style: TextStyle(color: Colors.white70)),
+                  ],
                 ),
-                const Icon(Icons.workspace_premium,
-                    color: Colors.white70, size: 40),
-              ],
-            ),
+              ),
+              const Icon(Icons.workspace_premium,
+                  color: Colors.white70, size: 40),
+            ]),
           ),
-          _entry(Icons.cloud_upload_outlined, '上传作品到平台',
-              '把视频发布到平台，别人可搜可看', const Color(0xFFFF5E8A), widget.onUpload),
-          _entry(Icons.video_library_outlined, '我的视频 / 发布到B站',
-              '本地收录、投稿 B站', const Color(0xFF7C5CFF), widget.onMyVideos),
-          _entry(Icons.analytics_outlined, '观看数据统计',
-              '累计观看时长 / 播放排行', const Color(0xFF36B37E), widget.onStats),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
-            child: Text('平台作品 · 播放榜',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          // 功能1：数据概览
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(children: [
+              _statCard('作品', '${_works.length}', const Color(0xFFFF5E8A)),
+              _statCard('总播放', '$views', const Color(0xFF7C5CFF)),
+              _statCard('占用', _fmtBytes(size), const Color(0xFF36B37E)),
+              _statCard('均分', avg == 0 ? '-' : avg.toStringAsFixed(1),
+                  const Color(0xFFFFA726)),
+            ]),
+          ),
+          const SizedBox(height: 8),
+          // 功能3/4：上传 + 入口
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Wrap(spacing: 8, runSpacing: 4, children: [
+              FilledButton.icon(
+                  onPressed: () => _upload(multi: false),
+                  icon: const Icon(Icons.upload_file, size: 18),
+                  label: const Text('上传作品')),
+              OutlinedButton.icon(
+                  onPressed: () => _upload(multi: true),
+                  icon: const Icon(Icons.drive_folder_upload, size: 18),
+                  label: const Text('批量上传')),
+              OutlinedButton.icon(
+                  onPressed: widget.onMyVideos,
+                  icon: const Icon(Icons.video_library_outlined, size: 18),
+                  label: const Text('我的视频/B站')),
+              OutlinedButton.icon(
+                  onPressed: widget.onStats,
+                  icon: const Icon(Icons.analytics_outlined, size: 18),
+                  label: const Text('数据统计')),
+              OutlinedButton.icon(
+                  onPressed: _export,
+                  icon: const Icon(Icons.ios_share, size: 18),
+                  label: const Text('导出作品')),
+            ]),
+          ),
+          const Divider(height: 24),
+          // 功能5/6：作品标题 + 搜索 + 排序
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+            child: Row(children: [
+              const Text('我的作品',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              const Spacer(),
+              SizedBox(
+                width: 130,
+                child: TextField(
+                  decoration: const InputDecoration(
+                      isDense: true,
+                      prefixIcon: Icon(Icons.search, size: 18),
+                      hintText: '搜索'),
+                  onChanged: (s) =>
+                      setState(() => _query = s.trim().toLowerCase()),
+                ),
+              ),
+              DropdownButton<String>(
+                value: _sort,
+                underline: const SizedBox(),
+                items: const [
+                  DropdownMenuItem(value: 'views', child: Text('播放')),
+                  DropdownMenuItem(value: 'time', child: Text('最新')),
+                  DropdownMenuItem(value: 'rating', child: Text('评分')),
+                ],
+                onChanged: (v) {
+                  setState(() => _sort = v ?? 'views');
+                  _load();
+                },
+              ),
+            ]),
           ),
           if (_loading)
             const Padding(
                 padding: EdgeInsets.all(30),
                 child: Center(child: CircularProgressIndicator()))
-          else if (_top.isEmpty)
+          else if (shown.isEmpty)
             const Padding(
                 padding: EdgeInsets.all(30),
                 child: Center(
-                    child: Text('还没有作品，点上面「上传作品到平台」',
+                    child: Text('还没有作品，点上面「上传作品」发布到平台',
                         style: TextStyle(color: Colors.black38))))
           else
-            for (var i = 0; i < _top.length; i++)
+            // 功能7/8：每条作品（评分 + 播放/分享/删除）
+            for (final v in shown)
               ListTile(
                 dense: true,
-                leading: Text('${i + 1}',
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: i < 3 ? const Color(0xFFFF5E8A) : Colors.black38,
-                        fontSize: 16)),
-                title: Text(_top[i].title,
+                leading: const Icon(Icons.movie_outlined),
+                title: Text(v.title,
                     maxLines: 1, overflow: TextOverflow.ellipsis),
                 subtitle: Text(
-                    '${_top[i].uploader.isEmpty ? '匿名' : _top[i].uploader} · ▶ ${_top[i].views}'),
-                onTap: () => widget.onPlay(_top[i].id, _top[i].title),
+                    '▶ ${v.views}${v.rcount > 0 ? '   ★ ${v.rating.toStringAsFixed(1)}' : ''}   ${_fmtBytes(v.size)}'),
+                onTap: () => widget.onPlay(v.id, v.title),
+                trailing: PopupMenuButton<String>(
+                  onSelected: (a) {
+                    if (a == 'play') {
+                      widget.onPlay(v.id, v.title);
+                    } else if (a == 'share') {
+                      Clipboard.setData(ClipboardData(
+                          text: PlatformService.videoUrl(v.id)));
+                      _toast('分享链接已复制');
+                    } else if (a == 'delete') {
+                      _delete(v);
+                    }
+                  },
+                  itemBuilder: (_) => const [
+                    PopupMenuItem(value: 'play', child: Text('播放')),
+                    PopupMenuItem(value: 'share', child: Text('复制分享链接')),
+                    PopupMenuItem(value: 'delete', child: Text('删除')),
+                  ],
+                ),
               ),
           const SizedBox(height: 20),
         ],
@@ -6051,6 +6296,35 @@ class _AdminPageState extends State<_AdminPage> {
     }
   }
 
+  // 设置下一版应用文件：选平台 + 选文件上传覆盖官网下载。
+  Future<void> _uploadApp() async {
+    final which = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('上传哪个平台的应用文件？'),
+        children: [
+          for (final w in const [
+            ['mac', 'macOS (.app 压缩包 zip)'],
+            ['apk', 'Android (.apk)'],
+            ['win', 'Windows (.zip)']
+          ])
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, w[0]),
+                child: Text(w[1])),
+        ],
+      ),
+    );
+    if (which == null) return;
+    final r = await FilePicker.platform.pickFiles();
+    final path = r?.files.single.path;
+    if (path == null) return;
+    setState(() => _busy = true);
+    final ok = await PlatformService.uploadAppFile(which, path);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _toast(ok ? '已设为下一版 $which 应用文件' : '上传失败');
+  }
+
   // 功能20(批次3)：批量删除/隐藏选中
   Future<void> _batchAct(bool delete) async {
     if (_selected.isEmpty) return;
@@ -6201,6 +6475,24 @@ class _AdminPageState extends State<_AdminPage> {
                                       (_stats['notice'] ?? '').toString()),
                               icon: const Icon(Icons.campaign_outlined, size: 16),
                               label: const Text('公告栏')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('disclaimer', '改免责声明',
+                                      (_stats['disclaimer'] ?? '').toString()),
+                              icon: const Icon(Icons.gavel_outlined, size: 16),
+                              label: const Text('改免责声明')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('app-version', '改应用版本号(留空=用内置)',
+                                      (_stats['app_version'] ?? '').toString()),
+                              icon: const Icon(Icons.numbers, size: 16),
+                              label: const Text('改版本号')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _uploadApp,
+                              icon: const Icon(Icons.system_update_alt, size: 16),
+                              label: const Text('上传应用文件')),
                           OutlinedButton.icon(
                               onPressed: _busy ? null : _cleanOrphans,
                               icon: const Icon(Icons.cleaning_services_outlined,
