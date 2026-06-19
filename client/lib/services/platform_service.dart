@@ -257,6 +257,37 @@ class PlatformService {
     return null;
   }
 
+  /// 启动登记本设备 + 取封号状态。返回 {ok, banned, ban_msg, ban_phone}。
+  /// 取不到(离线)返回 null——按"未封号"处理，不误锁用户。
+  static Future<Map<String, dynamic>?> checkin() async {
+    final uid = await walletUid();
+    final plat = Platform.operatingSystem;
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/checkin?uid=$uid&plat=$plat'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 被封用户点「联系管理员」→ 通知管理台。
+  static Future<bool> contactAdmin() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/contact-admin?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        if (jsonDecode(r.body)['ok'] == true) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
   /// 本设备对某视频的三连状态 + 各计数（一次取齐，开播放页时调一次）。
   /// 返回 {ok, balance, coined_this, liked_this, faved_this, coins, likes, favs}。
   static Future<Map<String, dynamic>?> videoState(String videoId) async {

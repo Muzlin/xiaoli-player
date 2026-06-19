@@ -138,6 +138,11 @@ class _HomeShellState extends State<HomeShell> {
         tag: '热门'),
   ];
 
+  // 封号拦截：被管理台封禁的设备进入即挡，显示提示+客服电话+联系管理员按钮。
+  bool _banned = false;
+  String _banMsg = '账号已被封，请联系管理员';
+  String _banPhone = '17713538952';
+
   final List<Track> _localTracks = [];
   final List<Track> _onlineTracks = [];
   final BilibiliService _bili = BilibiliService();
@@ -279,6 +284,83 @@ class _HomeShellState extends State<HomeShell> {
       _showDisclaimer();
       _silentCheckUpdate();
     });
+    _checkBan(); // 启动登记设备 + 查封号
+  }
+
+  // 启动时向平台登记本设备并查封号；被封则切到拦截页。离线/失败=不封(不误锁)。
+  Future<void> _checkBan() async {
+    final d = await PlatformService.checkin();
+    if (d == null || !mounted) return;
+    if (d['banned'] == true) {
+      setState(() {
+        _banned = true;
+        final m = (d['ban_msg'] ?? '').toString();
+        final p = (d['ban_phone'] ?? '').toString();
+        if (m.isNotEmpty) _banMsg = m;
+        if (p.isNotEmpty) _banPhone = p;
+      });
+    }
+  }
+
+  Future<void> _contactAdmin() async {
+    final ok = await PlatformService.contactAdmin();
+    _snack(ok ? '已通知管理员，请耐心等待处理' : '通知失败，请直接拨打客服电话');
+  }
+
+  // 封号拦截页：占满全屏，禁用一切功能，只能联系管理员。
+  Widget _bannedScreen(ColorScheme cs) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF1E1E26),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.gpp_bad_outlined,
+                    color: Color(0xFFE05A4F), size: 76),
+                const SizedBox(height: 20),
+                const Text('账号已被封',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 14),
+                Text(_banMsg,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 15)),
+                const SizedBox(height: 10),
+                Text('客服电话：$_banPhone',
+                    style: TextStyle(
+                        color: cs.primary,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 28),
+                FilledButton.icon(
+                  onPressed: _contactAdmin,
+                  icon: const Icon(Icons.support_agent),
+                  label: const Text('联系管理员'),
+                  style: FilledButton.styleFrom(
+                      minimumSize: const Size(220, 48)),
+                ),
+                const SizedBox(height: 12),
+                TextButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: _banPhone));
+                    _snack('客服电话已复制');
+                  },
+                  icon: const Icon(Icons.copy, size: 16, color: Colors.white54),
+                  label: const Text('复制电话',
+                      style: TextStyle(color: Colors.white54)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   /// App 内显示名 + 官方下载网址：先用缓存即时显示，再后台拉 /version 最新（后台可改）。
@@ -2297,6 +2379,7 @@ class _HomeShellState extends State<HomeShell> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    if (_banned) return _bannedScreen(cs); // 封号拦截：挡在所有功能之前
     return Scaffold(
       backgroundColor: _baseBg,
       body: _withBackground(
