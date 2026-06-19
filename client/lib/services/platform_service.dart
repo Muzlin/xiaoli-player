@@ -11,13 +11,19 @@ class PlatformVideo {
   final double rating;
   final int rcount;
   final String cat; // 分类：'视频' / '音乐'
+  final int size; // 字节
+  final int ts; // 上传时间戳(秒)
+  final String? ghUrl; // GitHub Releases 永久备份链接(有则已备份)
   PlatformVideo(
       {required this.id,
       required this.title,
       required this.uploader,
       this.rating = 0,
       this.rcount = 0,
-      this.cat = ''});
+      this.cat = '',
+      this.size = 0,
+      this.ts = 0,
+      this.ghUrl});
 }
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
@@ -166,13 +172,35 @@ class PlatformService {
   /// 后台管理软口令（与 server.py ADMIN_TOKEN 一致）。
   static const _adminToken = 'xladmin-9f2c7b';
 
+  /// 后台管理通用调用：GET /admin/<action>，自动带软口令。返回解析后的 JSON（失败 null）。
+  static Future<Map<String, dynamic>?> adminGet(String action,
+      {Map<String, String> params = const {}}) async {
+    final qs = params.entries
+        .map((e) => '${e.key}=${Uri.encodeComponent(e.value)}')
+        .join('&');
+    for (final base in {'http://localhost:8900', lanBase, current}) {
+      try {
+        final uri = qs.isEmpty
+            ? '$base/admin/$action'
+            : '$base/admin/$action?$qs';
+        final r = await http.get(Uri.parse(uri),
+            headers: {'X-Admin-Token': _adminToken}) // 令牌走头，不进日志
+            .timeout(const Duration(seconds: 15));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
   /// 后台管理：删除一条平台/云端视频。返回是否成功。
   static Future<bool> deleteVideo(String id) async {
-    for (final base in {'http://localhost:8900', current}) {
+    for (final base in {'http://localhost:8900', lanBase, current}) {
       try {
-        final r = await http
-            .get(Uri.parse('$base/delete?id=$id&token=$_adminToken'))
-            .timeout(const Duration(seconds: 10));
+        final r = await http.get(
+            Uri.parse('$base/delete?id=${Uri.encodeComponent(id)}'),
+            headers: {'X-Admin-Token': _adminToken}).timeout(
+            const Duration(seconds: 10));
         if (jsonDecode(r.body)['ok'] == true) return true;
       } catch (_) {}
     }
@@ -180,7 +208,7 @@ class PlatformService {
   }
 
   /// 云端缓存：把已解析的视频直链+请求头交给平台服务器，由服务器下载存储，
-  /// 并后台备份到 GitHub Releases。客户端不碰令牌。返回 null 成功，否则错误串。
+  /// 并后台备份到 GitHub Releases。带软口令(防公网匿名滥用)。返回 null 成功，否则错误串。
   static Future<String?> cloudFetch(String title, String uploader, String url,
       Map<String, String> headers, String ext) async {
     final body = jsonEncode({
@@ -199,7 +227,11 @@ class PlatformService {
         if (h.statusCode != 200) continue;
         final r = await http
             .post(Uri.parse('$base/cloud-fetch'),
-                headers: {'Content-Type': 'application/json'}, body: body)
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-Admin-Token': _adminToken, // 云端缓存需令牌(防公网匿名滥用)
+                },
+                body: body)
             .timeout(const Duration(minutes: 15));
         final d = jsonDecode(r.body);
         if (d['ok'] == true) return null;
@@ -230,6 +262,9 @@ class PlatformService {
                 rating: ((e['rating'] ?? 0) as num).toDouble(),
                 rcount: ((e['rcount'] ?? 0) as num).toInt(),
                 cat: (e['cat'] ?? '') as String,
+                size: ((e['size'] ?? 0) as num).toInt(),
+                ts: ((e['ts'] ?? 0) as num).toInt(),
+                ghUrl: e['gh_url'] as String?,
               ))
           .where((v) => v.id.isNotEmpty)
           .toList();
