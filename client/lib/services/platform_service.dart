@@ -175,6 +175,19 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
+  /// 取 App 内显示名（后台设的；空则用默认）。
+  static Future<String> getAppName() async {
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/version'))
+            .timeout(const Duration(seconds: 6));
+        return (jsonDecode(r.body)['app_name'] ?? '') as String;
+      } catch (_) {}
+    }
+    return '';
+  }
+
   /// 取免责声明（后台设的；空则 app 用内置默认）。
   static Future<String> getDisclaimer() async {
     for (final base in {current, baseUrl}) {
