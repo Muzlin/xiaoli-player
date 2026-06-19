@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// 本应用「视频平台」一条视频。
 class PlatformVideo {
@@ -17,6 +19,7 @@ class PlatformVideo {
   final bool hidden; // 已隐藏(不在公开搜索/列表显示)
   final bool pinned; // 已置顶/精选
   final int views; // 播放量
+  final int coins; // 投币数
   PlatformVideo(
       {required this.id,
       required this.title,
@@ -29,7 +32,8 @@ class PlatformVideo {
       this.ghUrl,
       this.hidden = false,
       this.pinned = false,
-      this.views = 0});
+      this.views = 0,
+      this.coins = 0});
 }
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
@@ -174,6 +178,66 @@ class PlatformService {
   }
 
   static String videoUrl(String id) => '$current/video/$id';
+
+  // ===== 小李兑换币钱包 =====
+  static String? _uid;
+
+  /// 本设备钱包 id（首次生成存 prefs）。
+  static Future<String> walletUid() async {
+    if (_uid != null) return _uid!;
+    final p = await SharedPreferences.getInstance();
+    var id = p.getString('wallet_uid') ?? '';
+    if (id.isEmpty) {
+      id = 'u${DateTime.now().millisecondsSinceEpoch}-${Random().nextInt(99999)}';
+      await p.setString('wallet_uid', id);
+    }
+    _uid = id;
+    return id;
+  }
+
+  /// 当前兑换币余额。
+  static Future<int> getBalance() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/wallet?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        return ((jsonDecode(r.body)['balance'] ?? 0) as num).toInt();
+      } catch (_) {}
+    }
+    return 0;
+  }
+
+  /// 给视频投币（+10 兑换币，同视频限一次）。返回服务器结果。
+  static Future<Map<String, dynamic>?> coin(String videoId) async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/coin?uid=$uid&id=$videoId'))
+            .timeout(const Duration(seconds: 10));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 花兑换币做某动作（如 rename）。后台 prices 决定价格。返回结果(ok/need/balance)。
+  static Future<Map<String, dynamic>?> spend(String action) async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/spend?uid=$uid&action=$action'))
+            .timeout(const Duration(seconds: 10));
+        final d = jsonDecode(r.body);
+        if (d is Map<String, dynamic>) return d;
+      } catch (_) {}
+    }
+    return null;
+  }
 
   /// 取 App 内显示名（后台设的；空则用默认）。
   static Future<String> getAppName() async {
@@ -382,6 +446,8 @@ class PlatformService {
                 size: ((e['size'] ?? 0) as num).toInt(),
                 ts: ((e['ts'] ?? 0) as num).toInt(),
                 ghUrl: e['gh_url'] as String?,
+                views: ((e['views'] ?? 0) as num).toInt(),
+                coins: ((e['coins'] ?? 0) as num).toInt(),
               ))
           .where((v) => v.id.isNotEmpty)
           .toList();
