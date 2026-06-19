@@ -163,6 +163,39 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
+  /// 云端缓存：把已解析的视频直链+请求头交给平台服务器，由服务器下载存储，
+  /// 并后台备份到 GitHub Releases。客户端不碰令牌。返回 null 成功，否则错误串。
+  static Future<String?> cloudFetch(String title, String uploader, String url,
+      Map<String, String> headers, String ext) async {
+    final body = jsonEncode({
+      'title': title,
+      'uploader': uploader,
+      'url': url,
+      'headers': headers,
+      'ext': ext,
+    });
+    String lastErr = '服务器连不上';
+    for (final base in _uploadBases) {
+      try {
+        final h = await http
+            .get(Uri.parse('$base/health'))
+            .timeout(const Duration(seconds: 3));
+        if (h.statusCode != 200) continue;
+        final r = await http
+            .post(Uri.parse('$base/cloud-fetch'),
+                headers: {'Content-Type': 'application/json'}, body: body)
+            .timeout(const Duration(minutes: 15));
+        final d = jsonDecode(r.body);
+        if (d['ok'] == true) return null;
+        lastErr = '${d['error'] ?? r.statusCode}';
+      } catch (e) {
+        lastErr = '$e';
+        continue;
+      }
+    }
+    return lastErr;
+  }
+
   Future<List<PlatformVideo>> search(String q,
       {String cat = '', String sort = ''}) async {
     try {
