@@ -190,6 +190,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _fadeIn = false; // 起播音量淡入
   bool _fadeOut = false; // 结束淡出
   Timer? _urlTimer; // 定时重读本机平台地址
+  Timer? _banTimer; // 每5秒查封号状态(封/解封即时生效)
   bool _publicHealthy = true;
   bool _useLan = false;
   final UpdateService _update = UpdateService();
@@ -285,21 +286,26 @@ class _HomeShellState extends State<HomeShell> {
       _silentCheckUpdate();
     });
     _checkBan(); // 启动登记设备 + 查封号
+    // 每5秒查一次封号状态：管理台一封号/解封，App 内 5 秒内即时生效。
+    _banTimer = Timer.periodic(
+        const Duration(seconds: 5), (_) => _checkBan());
   }
 
-  // 启动时向平台登记本设备并查封号；被封则切到拦截页。离线/失败=不封(不误锁)。
+  // 登记本设备并查封号；封/解封都即时反映(双向)。离线/失败=保持现状(不误锁)。
   Future<void> _checkBan() async {
     final d = await PlatformService.checkin();
     if (d == null || !mounted) return;
-    if (d['banned'] == true) {
-      setState(() {
-        _banned = true;
+    final banned = d['banned'] == true;
+    if (banned == _banned) return; // 状态没变，不重建
+    setState(() {
+      _banned = banned;
+      if (banned) {
         final m = (d['ban_msg'] ?? '').toString();
         final p = (d['ban_phone'] ?? '').toString();
         if (m.isNotEmpty) _banMsg = m;
         if (p.isNotEmpty) _banPhone = p;
-      });
-    }
+      }
+    });
   }
 
   Future<void> _contactAdmin() async {
@@ -431,6 +437,7 @@ class _HomeShellState extends State<HomeShell> {
     _searchDebounce?.cancel();
     _suggestDebounce?.cancel();
     _urlTimer?.cancel();
+    _banTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
