@@ -4414,7 +4414,7 @@ class _HomeShellState extends State<HomeShell> {
           leading: const Icon(Icons.info_outline),
           title: ValueListenableBuilder<String>(
             valueListenable: appNameNotifier,
-            builder: (_, name, __) => Text('$name v2.39.9'),
+            builder: (_, name, __) => Text('$name v2.39.10'),
           ),
           subtitle: const Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
         ),
@@ -5432,6 +5432,7 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
   String _query = ''; // 功能5：搜索
   String _sort = 'views'; // 功能6：排序
   String _creatorName = ''; // 功能9：创作者名字
+  int _balance = 0; // 小李兑换币余额
 
   @override
   void initState() {
@@ -5442,14 +5443,34 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
   Future<void> _load() async {
     final v = await _svc.list(sort: _sort);
     final notice = await PlatformService.getNotice();
+    final bal = await PlatformService.getBalance();
     final p = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
       _works = v;
       _notice = notice;
+      _balance = bal;
       _creatorName = p.getString('creator_name') ?? '';
       _loading = false;
     });
+  }
+
+  // 投币：视频+1币，钱包+10兑换币。
+  Future<void> _coin(PlatformVideo v) async {
+    final d = await PlatformService.coin(v.id);
+    if (d == null) {
+      _toast('投币失败');
+      return;
+    }
+    if (d['ok'] == true) {
+      _toast('投币成功！花费 ${d['cost'] ?? 1} 小李兑换币');
+      if (mounted) {
+        setState(() => _balance = ((d['balance'] ?? _balance) as num).toInt());
+      }
+      _load();
+    } else {
+      _toast('${d['error'] ?? '投币失败'}（余额 ${d['balance'] ?? 0}）');
+    }
   }
 
   void _toast(String m) {
@@ -5564,9 +5585,21 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
       ),
     );
     if (ok != true) return;
+    // 改名要花小李兑换币（后台可配，默认5）。先扣费，不足则拒绝。
+    final sp = await PlatformService.spend('rename');
+    if (sp == null || sp['ok'] != true) {
+      _toast('兑换币不足，改名需 ${sp?['need'] ?? '?'} 个（当前 ${sp?['balance'] ?? 0}）。投币可赚币');
+      return;
+    }
     final p = await SharedPreferences.getInstance();
     await p.setString('creator_name', ctrl.text.trim());
-    if (mounted) setState(() => _creatorName = ctrl.text.trim());
+    if (mounted) {
+      setState(() {
+        _creatorName = ctrl.text.trim();
+        _balance = ((sp['balance'] ?? _balance) as num).toInt();
+      });
+    }
+    _toast('已改名，花费 ${sp['cost']} 兑换币');
   }
 
   // 功能10：导出作品列表
@@ -5650,8 +5683,15 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
                             fontSize: 18,
                             fontWeight: FontWeight.bold)),
                     const SizedBox(height: 4),
-                    const Text('管理你的平台作品',
-                        style: TextStyle(color: Colors.white70)),
+                    Row(children: [
+                      const Icon(Icons.monetization_on,
+                          color: Color(0xFFFFD54F), size: 18),
+                      const SizedBox(width: 4),
+                      Text('$_balance 小李兑换币',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600)),
+                    ]),
                   ],
                 ),
               ),
@@ -5750,26 +5790,34 @@ class _CreatorCenterPageState extends State<_CreatorCenterPage> {
                 title: Text(v.title,
                     maxLines: 1, overflow: TextOverflow.ellipsis),
                 subtitle: Text(
-                    '▶ ${v.views}${v.rcount > 0 ? '   ★ ${v.rating.toStringAsFixed(1)}' : ''}   ${_fmtBytes(v.size)}'),
+                    '▶ ${v.views}   🪙 ${v.coins}${v.rcount > 0 ? '   ★ ${v.rating.toStringAsFixed(1)}' : ''}   ${_fmtBytes(v.size)}'),
                 onTap: () => widget.onPlay(v.id, v.title),
-                trailing: PopupMenuButton<String>(
-                  onSelected: (a) {
-                    if (a == 'play') {
-                      widget.onPlay(v.id, v.title);
-                    } else if (a == 'share') {
-                      Clipboard.setData(ClipboardData(
-                          text: PlatformService.videoUrl(v.id)));
-                      _toast('分享链接已复制');
-                    } else if (a == 'delete') {
-                      _delete(v);
-                    }
-                  },
-                  itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'play', child: Text('播放')),
-                    PopupMenuItem(value: 'share', child: Text('复制分享链接')),
-                    PopupMenuItem(value: 'delete', child: Text('删除')),
-                  ],
-                ),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    icon: const Icon(Icons.monetization_on_outlined,
+                        color: Color(0xFFFFA726)),
+                    tooltip: '投币(花1兑换币)',
+                    onPressed: () => _coin(v),
+                  ),
+                  PopupMenuButton<String>(
+                    onSelected: (a) {
+                      if (a == 'play') {
+                        widget.onPlay(v.id, v.title);
+                      } else if (a == 'share') {
+                        Clipboard.setData(ClipboardData(
+                            text: PlatformService.videoUrl(v.id)));
+                        _toast('分享链接已复制');
+                      } else if (a == 'delete') {
+                        _delete(v);
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'play', child: Text('播放')),
+                      PopupMenuItem(value: 'share', child: Text('复制分享链接')),
+                      PopupMenuItem(value: 'delete', child: Text('删除')),
+                    ],
+                  ),
+                ]),
               ),
           const SizedBox(height: 20),
         ],
@@ -7055,6 +7103,14 @@ class _AdminPageState extends State<_AdminPage> {
                               icon: const Icon(Icons.swap_horiz, size: 16),
                               label: Text(
                                   '下载源:${(_stats['download_source'] ?? 'github') == "github" ? "GitHub" : "平台"}')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('prices', '功能价格JSON 如 {"rename":5}',
+                                      (_stats['prices'] ?? '').toString()),
+                              icon: const Icon(Icons.price_change_outlined,
+                                  size: 16),
+                              label: const Text('功能价格')),
                           OutlinedButton.icon(
                               onPressed: _busy ? null : _restartServer,
                               style: OutlinedButton.styleFrom(
