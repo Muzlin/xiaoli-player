@@ -14,6 +14,9 @@ class PlatformVideo {
   final int size; // 字节
   final int ts; // 上传时间戳(秒)
   final String? ghUrl; // GitHub Releases 永久备份链接(有则已备份)
+  final bool hidden; // 已隐藏(不在公开搜索/列表显示)
+  final bool pinned; // 已置顶/精选
+  final int views; // 播放量
   PlatformVideo(
       {required this.id,
       required this.title,
@@ -23,7 +26,10 @@ class PlatformVideo {
       this.cat = '',
       this.size = 0,
       this.ts = 0,
-      this.ghUrl});
+      this.ghUrl,
+      this.hidden = false,
+      this.pinned = false,
+      this.views = 0});
 }
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
@@ -191,6 +197,29 @@ class PlatformService {
       } catch (_) {}
     }
     return null;
+  }
+
+  /// 后台管理：取全部视频（含隐藏）+ 管理字段。
+  static Future<List<PlatformVideo>> adminList() async {
+    final d = await adminGet('videos');
+    final list = (d?['videos'] as List?) ?? [];
+    return list
+        .map((e) => PlatformVideo(
+              id: (e['id'] ?? '') as String,
+              title: (e['title'] ?? '') as String,
+              uploader: (e['uploader'] ?? '') as String,
+              rating: ((e['rating'] ?? 0) as num).toDouble(),
+              rcount: ((e['rcount'] ?? 0) as num).toInt(),
+              cat: (e['cat'] ?? '') as String,
+              size: ((e['size'] ?? 0) as num).toInt(),
+              ts: ((e['ts'] ?? 0) as num).toInt(),
+              ghUrl: e['gh_url'] as String?,
+              hidden: e['hidden'] == true,
+              pinned: e['pinned'] == true,
+              views: ((e['views'] ?? 0) as num).toInt(),
+            ))
+        .where((v) => v.id.isNotEmpty)
+        .toList();
   }
 
   /// 后台管理：删除一条平台/云端视频。返回是否成功。
