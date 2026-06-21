@@ -172,6 +172,7 @@ class _HomeShellState extends State<HomeShell> {
   double _defaultSpeed = 1.0; // 默认播放倍速
   bool _loopSingle = false; // 默认单曲循环
   bool _wifiOnly = false; // 仅WiFi提醒
+  bool _autoUpdate0 = true; // 自动更新（发现新版自动下载安装，默认开）
   int _skipIntro = 0; // 片头跳过秒数
   String _profileName = ''; // 本机显示名
   String? _profileAvatar; // 本机头像路径
@@ -1715,7 +1716,21 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _silentCheckUpdate() async {
     final info = await _update.check();
-    if (info != null && mounted) _showUpdateDialog(info);
+    if (info == null || !mounted) return;
+    if (!_autoUpdate0) {
+      _showUpdateDialog(info);
+      return;
+    }
+    // 自动更新已开：直接下载安装新版。防回环：同一目标版本只自动更新一次，
+    // 若装完仍未生效(下载源落后于版本号)，下次不再自动循环，改成手动提示。
+    final p = await SharedPreferences.getInstance();
+    if (p.getString('auto_update_tried') == info.version) {
+      _showUpdateDialog(info);
+      return;
+    }
+    await p.setString('auto_update_tried', info.version);
+    _snack('发现新版本 v${info.version}，正在自动更新…');
+    _autoUpdate(info);
   }
 
   Future<void> _checkUpdateManually() async {
@@ -3048,6 +3063,7 @@ class _HomeShellState extends State<HomeShell> {
     _defaultSpeed = p.getDouble('default_speed') ?? 1.0;
     _loopSingle = p.getBool('loop_single') ?? false;
     _wifiOnly = p.getBool('wifi_only') ?? false;
+    _autoUpdate0 = p.getBool('auto_update') ?? true;
     _autoPalette = p.getBool('auto_palette') ?? false;
     _guestMode = p.getBool('guest_mode') ?? false;
     // F26: 启动导航。-1=记住上次；否则固定到该 tab。
@@ -4843,10 +4859,22 @@ class _HomeShellState extends State<HomeShell> {
             await p.setInt('seek_step', _seekStep);
           },
         ),
+        SwitchListTile(
+          secondary: const Icon(Icons.autorenew),
+          title: const Text('自动更新'),
+          subtitle: const Text('启动时发现新版自动下载安装（无需手动确认）',
+              style: TextStyle(fontSize: 12)),
+          value: _autoUpdate0,
+          onChanged: (v) async {
+            setState(() => _autoUpdate0 = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('auto_update', v);
+          },
+        ),
         ListTile(
           leading: const Icon(Icons.system_update),
           title: const Text('检查更新'),
-          subtitle: const Text('检测并下载最新版本'),
+          subtitle: const Text('立即检测并下载最新版本'),
           onTap: _checkUpdateManually,
         ),
         ListTile(
