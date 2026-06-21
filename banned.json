@@ -1,1 +1,1 @@
-{"banned": ["githubtest"], "msg": "账号已被封，请联系管理员，你的账号积分异常", "phone": "17713538952", "reasons": {"githubtest": "测试"}, "until": {}}
+{"banned": [], "msg": "账号已被封，请联系管理员，你的账号积分异常", "phone": "17713538952", "reasons": {}, "until": {}}
