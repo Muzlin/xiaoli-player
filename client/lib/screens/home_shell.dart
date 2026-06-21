@@ -292,22 +292,90 @@ class _HomeShellState extends State<HomeShell> {
       _silentCheckUpdate();
     });
     _checkBan(); // 启动登记设备 + 查封号
-    // 每5秒查一次封号状态：管理台一封号/解封，App 内 5 秒内即时生效。
-    _banTimer = Timer.periodic(
-        const Duration(seconds: 5), (_) => _checkBan());
+    _checkGift(); // 启动查一次红包(后台空投)
+    // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
+    _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _checkBan();
+      _checkGift();
+    });
+  }
+
+  // 查后台空投的红包；有就弹「管理员给你发了一个红包」。
+  Future<void> _checkGift() async {
+    if (_banned) return;
+    final amount = await PlatformService.claimGift();
+    if (amount > 0 && mounted) _showRedPacket(amount);
+  }
+
+  void _showRedPacket(int amount) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 280,
+          decoration: BoxDecoration(
+            gradient: const LinearGradient(
+                colors: [Color(0xFFD7402F), Color(0xFFB2261B)],
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const SizedBox(height: 26),
+            const Text('🧧', style: TextStyle(fontSize: 60)),
+            const SizedBox(height: 6),
+            const Text('管理员给你发了一个红包',
+                style: TextStyle(
+                    color: Color(0xFFFFE2A8),
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 14),
+            Text('+$amount',
+                style: const TextStyle(
+                    color: Color(0xFFFFD24A),
+                    fontSize: 46,
+                    fontWeight: FontWeight.bold)),
+            const Text('小李兑换币',
+                style: TextStyle(color: Color(0xFFFFE2A8), fontSize: 13)),
+            const SizedBox(height: 22),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFFFD24A),
+                      foregroundColor: const Color(0xFF7A1F18)),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('收下',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
   }
 
   // 登记本设备并查封号；封/解封都即时反映(双向)。离线/失败=保持现状(不误锁)。
   Future<void> _checkBan() async {
+    // 公网封号同步走 GitHub 的 banned.json(可靠、不依赖隧道在线)；同时仍调 /checkin
+    // 登记设备并兜底。任一判定被封即封；两边都连不上则维持现状(不误解封)。
+    final gh = await PlatformService.bannedFromGitHub();
     final d = await PlatformService.checkin();
-    if (d == null || !mounted) return;
-    final banned = d['banned'] == true;
+    if (gh == null && d == null) return; // 都连不上→不改状态
+    final ghBan = gh != null && gh['banned'] == true;
+    final ciBan = d != null && d['banned'] == true;
+    final banned = ghBan || ciBan;
     if (banned == _banned) return; // 状态没变，不重建
+    final src = ghBan ? gh : (ciBan ? d : (gh ?? d));
     setState(() {
       _banned = banned;
-      if (banned) {
-        final m = (d['ban_msg'] ?? '').toString();
-        final p = (d['ban_phone'] ?? '').toString();
+      if (banned && src != null) {
+        final m = (src['ban_msg'] ?? '').toString();
+        final p = (src['ban_phone'] ?? '').toString();
         if (m.isNotEmpty) _banMsg = m;
         if (p.isNotEmpty) _banPhone = p;
       }
@@ -2294,6 +2362,7 @@ class _HomeShellState extends State<HomeShell> {
   /// 构建并跳转到播放页。attach=true 用于从迷你条恢复——附着到已在播放的全局播放器，不重新起播。
   void _pushPlayer(Track t, PlaybackSource src,
       {bool replace = false, bool attach = false}) {
+    if (t.tag == '平台') PlatformService.reportActivity(t.name); // 管理台「直接查看」
     final cachedFile = DownloadManager.instance.cachedPath(t.key);
     final route = MaterialPageRoute<void>(
       builder: (_) => PlayerScreen(

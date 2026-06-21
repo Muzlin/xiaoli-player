@@ -372,6 +372,163 @@ class PlatformService {
     return [];
   }
 
+  // ===== 社交/经济 通用 GET（withUid 时附本设备 uid） =====
+  static Future<dynamic> _g(String path, {bool withUid = false}) async {
+    var p = path;
+    if (withUid) {
+      final uid = await walletUid();
+      p += (path.contains('?') ? '&' : '?') + 'uid=$uid';
+    }
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base$p'))
+            .timeout(const Duration(seconds: 10));
+        return jsonDecode(r.body);
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  static List<PlatformVideo> _toVideos(List? list) =>
+      (list ?? [])
+          .map((e) => PlatformVideo(
+                id: (e['id'] ?? '') as String,
+                title: (e['title'] ?? '') as String,
+                uploader: (e['uploader'] ?? '') as String,
+                views: ((e['views'] ?? 0) as num).toInt(),
+                coins: ((e['coins'] ?? 0) as num).toInt(),
+                likes: ((e['likes'] ?? 0) as num).toInt(),
+                favs: ((e['favs'] ?? 0) as num).toInt(),
+              ))
+          .where((v) => v.id.isNotEmpty)
+          .toList();
+
+  /// 成就列表 [{key,name,unlocked}]。
+  static Future<List<Map<String, dynamic>>> achievements() async {
+    final d = await _g('/achievements', withUid: true);
+    if (d is Map && d['all'] is List) {
+      return (d['all'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
+  /// 本周榜（by=coins|views）。
+  static Future<List<PlatformVideo>> rankWeekly({String by = 'coins'}) async {
+    final d = await _g('/rank-weekly?by=$by');
+    if (d is Map && d['top'] is List) return _toVideos(d['top'] as List);
+    return [];
+  }
+
+  /// 兑换商城商品列表。
+  static Future<List<Map<String, dynamic>>> storeItems() async {
+    final d = await _g('/store-items');
+    if (d is Map && d['items'] is List) {
+      return (d['items'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
+  /// 购买商品。返回 {ok, balance, owned} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> storeBuy(String item) async {
+    final d = await _g('/store-buy?item=${Uri.encodeComponent(item)}', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 打赏视频作者 amount 币。返回 {ok, amount, balance} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> tip(String videoId, int amount) async {
+    final d = await _g('/tip?id=$videoId&amount=$amount', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 关注/取关某上传者。
+  static Future<Map<String, dynamic>?> follow(String to, bool on) async {
+    final d = await _g(
+        '/follow?to=${Uri.encodeComponent(to)}&state=${on ? 1 : 0}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 我关注的上传者名列表。
+  static Future<List<String>> following() async {
+    final d = await _g('/following', withUid: true);
+    if (d is Map && d['following'] is List) {
+      return (d['following'] as List).map((e) => e.toString()).toList();
+    }
+    return [];
+  }
+
+  /// 关注流：已关注上传者的最新作品。
+  static Future<List<PlatformVideo>> feed() async {
+    final d = await _g('/feed', withUid: true);
+    return _toVideos(d is List ? d : null);
+  }
+
+  /// 某视频的评论列表 [{uid,name,text,ts}]。
+  static Future<List<Map<String, dynamic>>> comments(String videoId) async {
+    final d = await _g('/comments?id=$videoId');
+    if (d is Map && d['comments'] is List) {
+      return (d['comments'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
+  /// 发评论。
+  static Future<bool> comment(String videoId, String text, String name) async {
+    final d = await _g(
+        '/comment?id=$videoId&text=${Uri.encodeComponent(text)}&name=${Uri.encodeComponent(name)}',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 站内通知 [{type,from,vid,ts,...}]；clear=true 拉完即清空。
+  static Future<List<Map<String, dynamic>>> notifs({bool clear = false}) async {
+    final d = await _g('/notifs${clear ? '?clear=1' : ''}', withUid: true);
+    if (d is Map && d['notifs'] is List) {
+      return (d['notifs'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
+  /// 公开歌单目录 [{pid,title,uid,ts}]。
+  static Future<List<Map<String, dynamic>>> sharedPlaylists() async {
+    final d = await _g('/shared-playlists');
+    if (d is Map && d['lists'] is List) {
+      return (d['lists'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
+  /// 发布歌单到公开目录。
+  static Future<bool> publishList(String pid, String title) async {
+    final d = await _g('/publish-list?pid=$pid&title=${Uri.encodeComponent(title)}', withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 上传本地历史到云端（跨设备）。
+  static Future<bool> pushHistory(List<Map<String, dynamic>> items) async {
+    final uid = await walletUid();
+    final body = jsonEncode({'uid': uid, 'items': items});
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .post(Uri.parse('$base/history-sync'), body: body)
+            .timeout(const Duration(seconds: 12));
+        if (jsonDecode(r.body)['ok'] == true) return true;
+      } catch (_) {}
+    }
+    return false;
+  }
+
+  /// 拉回云端历史。
+  static Future<List<Map<String, dynamic>>> pullHistory() async {
+    final d = await _g('/history', withUid: true);
+    if (d is Map && d['items'] is List) {
+      return (d['items'] as List).map((e) => Map<String, dynamic>.from(e as Map)).toList();
+    }
+    return [];
+  }
+
   /// 每日签到领兑换币。返回 {ok, already, reward, balance, streak}。
   static Future<Map<String, dynamic>?> signIn() async {
     final uid = await walletUid();
@@ -406,6 +563,50 @@ class PlatformService {
     return {'coined': [], 'liked': [], 'faved': []};
   }
 
+  /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
+  /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
+  /// 比走隧道 /checkin 更可靠。
+  static const _banPointer =
+      'https://api.github.com/repos/Muzlin/xiaoli-player/contents/banned.json?ref=flutter-client';
+
+  /// 从 GitHub 的 banned.json 查本设备是否被封(含临时封号自动到期)。
+  /// 返回 {banned:bool, ban_msg, ban_phone}；取不到返回 null(交给 /checkin 兜底)。
+  static Future<Map<String, dynamic>?> bannedFromGitHub() async {
+    try {
+      final uid = await walletUid();
+      final r = await http.get(Uri.parse(_banPointer), headers: {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'xiaoli-player',
+      }).timeout(const Duration(seconds: 8));
+      if (r.statusCode != 200) return null;
+      final m = jsonDecode(r.body) as Map<String, dynamic>;
+      final content = ((m['content'] ?? '') as String).replaceAll('\n', '');
+      if (content.isEmpty) return null;
+      final data =
+          jsonDecode(utf8.decode(base64.decode(content))) as Map<String, dynamic>;
+      final list = ((data['banned'] as List?) ?? const []).cast<dynamic>();
+      bool isBanned = list.contains(uid);
+      if (isBanned) {
+        final until = (data['until'] as Map?) ?? const {};
+        final exp = until[uid];
+        if (exp is num &&
+            DateTime.now().millisecondsSinceEpoch ~/ 1000 >= exp.toInt()) {
+          isBanned = false; // 临时封号已到期
+        }
+      }
+      if (!isBanned) return {'banned': false};
+      final reasons = (data['reasons'] as Map?) ?? const {};
+      final msg = (reasons[uid] ?? data['msg'] ?? '').toString();
+      return {
+        'banned': true,
+        'ban_msg': msg,
+        'ban_phone': (data['phone'] ?? '').toString(),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 启动登记本设备 + 取封号状态。返回 {ok, banned, ban_msg, ban_phone}。
   /// 取不到(离线)返回 null——按"未封号"处理，不误锁用户。
   static Future<Map<String, dynamic>?> checkin() async {
@@ -435,6 +636,32 @@ class PlatformService {
       } catch (_) {}
     }
     return false;
+  }
+
+  /// 领取后台空投的"红包"(返回本次金额，服务器随即清零)。0=没有。
+  static Future<int> claimGift() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/gift?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map && d['gift'] != null) return ((d['gift']) as num).toInt();
+      } catch (_) {}
+    }
+    return 0;
+  }
+
+  /// 上报当前在看的平台视频(管理台「直接查看」用，in-app 活动非录屏)。失败静默。
+  static Future<void> reportActivity(String now) async {
+    try {
+      final uid = await walletUid();
+      await http
+          .get(Uri.parse(
+              '$current/activity?uid=$uid&now=${Uri.encodeComponent(now)}'))
+          .timeout(const Duration(seconds: 6));
+    } catch (_) {}
   }
 
   /// 本设备对某视频的三连状态 + 各计数（一次取齐，开播放页时调一次）。
