@@ -311,6 +311,14 @@ class _HomeShellState extends State<HomeShell> {
         if (p.isNotEmpty) _banPhone = p;
       }
     });
+    if (banned && mounted) {
+      // 即时生效：哪怕正在看视频——停掉(后台)播放 + 收起所有压在上面的页面
+      // (播放页/设置/创作中心等)，把封号界面顶到最前，不用手动退出。
+      try {
+        PlayerHolder.i.stop();
+      } catch (_) {}
+      Navigator.of(context).popUntil((r) => r.isFirst);
+    }
   }
 
   Future<void> _contactAdmin() async {
@@ -2253,6 +2261,14 @@ class _HomeShellState extends State<HomeShell> {
           isVideo: true,
           subtitleFuture: subFut,
           coverUrl: t.pic.isEmpty ? null : t.pic);
+    } else if (t.tag == '平台' && t.url != null) {
+      // 平台视频：始终按 id 用当前服务器地址重建流地址，
+      // 避免历史/断点里存的旧局域网 IP 或旧隧道地址失效导致"播放失败"。
+      final id = t.url!.split('/').last;
+      final url = await PlatformService.playbackUrl(id);
+      if (!mounted) return;
+      src = PlaybackSource.stream(url, const <String, String>{},
+          title: t.name, isVideo: _trackIsVideo(t));
     } else {
       src = t.toSource();
     }

@@ -183,6 +183,20 @@ class PlatformService {
 
   static String videoUrl(String id) => '$current/video/$id';
 
+  /// 播放平台视频时用的"最佳可达"基址：本机若在跑服务器→localhost(最快最稳)，
+  /// 否则用 current(隧道/局域网)。永远按 id 现取，避免历史里旧 IP/旧隧道地址失效。
+  static Future<String> playbackUrl(String id) async {
+    if (Platform.isMacOS || Platform.isWindows || Platform.isLinux) {
+      try {
+        final r = await http
+            .get(Uri.parse('http://localhost:8900/health'))
+            .timeout(const Duration(milliseconds: 700));
+        if (r.statusCode == 200) return 'http://localhost:8900/video/$id';
+      } catch (_) {}
+    }
+    return '$current/video/$id';
+  }
+
   // ===== 小李兑换币钱包 =====
   static String? _uid;
 
