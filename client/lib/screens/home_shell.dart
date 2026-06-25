@@ -18,6 +18,7 @@ import '../services/platform_service.dart';
 import '../services/update_service.dart';
 import '../services/download_manager.dart';
 import '../services/coin_ledger.dart';
+import '../services/a11y.dart';
 import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
@@ -168,6 +169,8 @@ class _HomeShellState extends State<HomeShell> {
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
+  final Map<String, int> _resumeDur = {}; // #7 继续观看：track key→总时长秒
+  String _viewMode = 'list'; // #15 媒体库视图：list|grid
   final List<Track> _history = []; // 最近播放
   bool _shuffle = false; // 随机播放
   Timer? _sleepTimer; // 睡眠定时器
@@ -202,6 +205,7 @@ class _HomeShellState extends State<HomeShell> {
   Timer? _banTimer; // 每5秒查封号状态(封/解封即时生效)
   Timer? _shareFrameTimer; // 屏幕共享传帧
   bool _sharing = false; // 正在共享屏幕给管理员
+  bool _shareApproved = false; // 本机用户亲自点过「同意」(服务器 active 被伪造也不自动开始)
   bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
   OverlayEntry? _shareBanner; // 顶部「正在共享屏幕」横幅
   bool _publicHealthy = true;
@@ -260,7 +264,9 @@ class _HomeShellState extends State<HomeShell> {
     return t.ext.isEmpty ? null : t.ext;
   }
 
+  List<Track>? _queueOverride; // #11 用户手动编辑的播放队列(非空时优先)
   List<Track> get _playQueue =>
+      _queueOverride ??
       [..._hotTracks, ..._localTracks, ..._onlineTracks];
 
   @override
@@ -278,6 +284,8 @@ class _HomeShellState extends State<HomeShell> {
     _loadResume();
     _loadPlayHistory();
     _loadAutoNext();
+    A11y.load(); // 无障碍设置(#14)
+    _loadOnboarding(); // 新手引导(#13)
     DownloadManager.instance.loadCache(); // 加载离线缓存索引
     DownloadManager.instance.onComplete = (t) {
       if (!mounted) return;
@@ -333,14 +341,16 @@ class _HomeShellState extends State<HomeShell> {
     if (_banned) return;
     final d = await PlatformService.screensharePoll();
     if (d == null) return;
-    final req = d['req'] == true, active = d['active'] == true;
+    final req = d['req'] == true;
     if (!req) {
-      if (_sharing) _stopSharing(); // 管理员停止了
+      _shareApproved = false; // 管理员撤销请求→清掉本机同意
+      if (_sharing) _stopSharing();
       return;
     }
-    if (active && !_sharing) {
-      _startSharing(); // 已同意，开始传帧
-    } else if (req && !active && !_sharing && !_shareDialogOpen) {
+    // 只有「本机用户亲自点过同意」才共享——服务器 active 被伪造也不会自动开始。
+    if (_shareApproved) {
+      if (!_sharing) _startSharing();
+    } else if (!_shareDialogOpen) {
       _askScreenshareConsent(); // 弹同意框
     }
   }
@@ -366,9 +376,11 @@ class _HomeShellState extends State<HomeShell> {
     );
     _shareDialogOpen = false;
     if (ok == true) {
+      _shareApproved = true; // 本机用户亲自同意
       await PlatformService.screenshareConsent(true);
       _startSharing();
     } else {
+      _shareApproved = false;
       await PlatformService.screenshareConsent(false);
     }
   }
@@ -387,6 +399,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _stopSharing() {
     if (!_sharing && _shareFrameTimer == null && _shareBanner == null) return;
+    _shareApproved = false;
     _sharing = false;
     _shareFrameTimer?.cancel();
     _shareFrameTimer = null;
@@ -1512,7 +1525,13 @@ class _HomeShellState extends State<HomeShell> {
 
 
   /// 一首播完（未单曲循环）后：B站放相关推荐，其它放队列下一首。
+  bool _suppressNextOnce = false; // #3 片尾"取消连播"：抑制本次自动连播
+
   Future<void> _onTrackCompleted() async {
+    if (_suppressNextOnce) {
+      _suppressNextOnce = false;
+      return;
+    }
     if (_playMode == 'stop') return;
     final cur = _current;
     if (cur == null) return;
@@ -1688,7 +1707,7 @@ class _HomeShellState extends State<HomeShell> {
   /// 内容区：有自定义背景时盖一层 _baseBg 蒙层（透明度 = 1 − 背景透出度），
   /// 透明度滑块越大背景越显、越小越接近常规浅色界面；深色背景下文字也清晰。
   Widget _content(ColorScheme cs) {
-    final view = _navIndex == 0
+    var view = _navIndex == 0
         ? _libraryView(cs)
         : _navIndex == 1
             ? _favoritesView(cs)
@@ -1697,9 +1716,23 @@ class _HomeShellState extends State<HomeShell> {
                 : _navIndex == 4
                     ? _historyView(cs)
                     : _settingsView(cs);
-    if (!_hasCustomBg) return view;
-    return ColoredBox(
-      color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
+    if (_hasCustomBg) {
+      view = ColoredBox(
+        color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
+        child: view,
+      );
+    }
+    // 高对比(#14)：开启时加粗+提高文字对比度。
+    return ValueListenableBuilder<bool>(
+      valueListenable: A11y.highContrast,
+      builder: (context, hc, child) {
+        if (!hc) return child!;
+        return DefaultTextStyle.merge(
+          style: const TextStyle(
+              color: Colors.black, fontWeight: FontWeight.w600),
+          child: child!,
+        );
+      },
       child: view,
     );
   }
@@ -2451,6 +2484,11 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _play(Track t, {bool replace = false}) async {
+    // #11 从队列外起播→清掉手动队列(回到默认派生队列)。
+    if (_queueOverride != null &&
+        !_queueOverride!.any((x) => x.key == t.key)) {
+      _queueOverride = null;
+    }
     setState(() => _current = t);
     _pushPlayHistory(t);
     if (t.tag == '平台') PlatformService.pingTask('play'); // 每日任务：看视频
@@ -2526,6 +2564,15 @@ class _HomeShellState extends State<HomeShell> {
           _watchSec += 5;
           _saveResume();
         },
+        onDuration: (durSec) {
+          if (durSec > 0 && _resumeDur[t.key] != durSec) {
+            _resumeDur[t.key] = durSec;
+            _saveResumeDur();
+          }
+        },
+        nextUpTitle: _peekNextTitleAfter(t),
+        onPlayNext: _playNextNow,
+        onCancelNext: () => _suppressNextOnce = true,
         onLoadDanmaku: t.bvid != null ? () => _bili.getDanmaku(t.bvid!) : null,
         onPostDanmaku: t.bvid != null
             ? (msg, ms, color) =>
@@ -2632,6 +2679,124 @@ class _HomeShellState extends State<HomeShell> {
     if (i >= 0 && i < list.length - 1) _play(list[i + 1]);
   }
 
+  // #3 片尾浮层：预读 t 之后的下一首标题(随机/停止/无下一首时返回 null)。
+  String? _peekNextTitleAfter(Track t) {
+    if (_playMode == 'stop' || _shuffle) return null;
+    final q = _playQueue;
+    final i = q.indexWhere((x) => x.key == t.key);
+    if (i >= 0 && i < q.length - 1) return q[i + 1].name;
+    return null;
+  }
+
+  // #11 播放队列面板：可拖动重排/删除/跳转，编辑写入 _queueOverride。
+  void _showQueueSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final queue = List<Track>.from(_playQueue);
+          final curKey = _current?.key;
+          return SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.6,
+            child: Column(children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
+                child: Row(children: [
+                  Text('播放队列（${queue.length}）',
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  if (_queueOverride != null)
+                    TextButton(
+                      onPressed: () {
+                        setState(() => _queueOverride = null);
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text('恢复默认'),
+                    ),
+                ]),
+              ),
+              Expanded(
+                child: queue.isEmpty
+                    ? const Center(
+                        child: Text('队列为空',
+                            style: TextStyle(color: Colors.black38)))
+                    : ReorderableListView.builder(
+                        itemCount: queue.length,
+                        onReorder: (oldI, newI) {
+                          setSheet(() {
+                            if (newI > oldI) newI--;
+                            final item = queue.removeAt(oldI);
+                            queue.insert(newI, item);
+                          });
+                          setState(() => _queueOverride = List.from(queue));
+                        },
+                        itemBuilder: (_, i) {
+                          final t = queue[i];
+                          final playing = t.key == curKey;
+                          return ListTile(
+                            key: ValueKey('${t.key}#$i'),
+                            dense: true,
+                            leading: Icon(
+                                playing
+                                    ? Icons.equalizer
+                                    : (_trackIsVideo(t)
+                                        ? Icons.movie_outlined
+                                        : Icons.music_note),
+                                color: playing ? cssPrimaryOf(context) : null),
+                            title: Text(t.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontWeight: playing
+                                        ? FontWeight.w700
+                                        : FontWeight.normal)),
+                            trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.close, size: 18),
+                                    onPressed: queue.length <= 1
+                                        ? null
+                                        : () {
+                                            setSheet(() => queue.removeAt(i));
+                                            setState(() => _queueOverride =
+                                                List.from(queue));
+                                          },
+                                  ),
+                                  ReorderableDragStartListener(
+                                    index: i,
+                                    child: const Icon(Icons.drag_handle,
+                                        size: 20),
+                                  ),
+                                ]),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _play(t, replace: true);
+                            },
+                          );
+                        },
+                      ),
+              ),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+
+  Color cssPrimaryOf(BuildContext c) => Theme.of(c).colorScheme.primary;
+
+  // #3 立即播放队列下一首(片尾浮层「立即播放」)。
+  void _playNextNow() {
+    final q = _playQueue;
+    final cur = _current;
+    if (cur == null) return;
+    final i = q.indexWhere((x) => x.key == cur.key);
+    if (i >= 0 && i < q.length - 1) _play(q[i + 1], replace: true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -2662,6 +2827,7 @@ class _HomeShellState extends State<HomeShell> {
           isPlaying: PlayerHolder.i.playing.value,
           onPrev: _prev,
           onNext: _next,
+          onQueue: _current == null ? null : _showQueueSheet,
           onPlayPause: () {
             // 全局播放器已有内容→真正暂停/继续（后台也在播）；否则从头起播。
             if (PlayerHolder.i.current.value != null) {
@@ -3321,6 +3487,17 @@ class _HomeShellState extends State<HomeShell> {
                 (v as List).map((e) => (e as num).toInt()).toList());
       }
     } catch (_) {}
+    _viewMode = p.getString('view_mode') ?? 'list';
+    final rawDur = p.getString('resume_dur_v1');
+    if (rawDur != null) {
+      try {
+        final m = (jsonDecode(rawDur) as Map)
+            .map((k, v) => MapEntry(k as String, (v as num).toInt()));
+        _resumeDur
+          ..clear()
+          ..addAll(m);
+      } catch (_) {}
+    }
     final raw = p.getString('resume_v1');
     if (raw == null || !mounted) return;
     try {
@@ -3336,6 +3513,11 @@ class _HomeShellState extends State<HomeShell> {
     final p = await SharedPreferences.getInstance();
     await p.setString('resume_v1', jsonEncode(_resume));
     await p.setInt('watch_sec', _watchSec);
+  }
+
+  Future<void> _saveResumeDur() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('resume_dur_v1', jsonEncode(_resumeDur));
   }
 
   Future<void> _saveBookmarks() async {
@@ -4280,6 +4462,380 @@ class _HomeShellState extends State<HomeShell> {
     await p.setInt('accent_color', c);
   }
 
+  // #7 继续观看：历史里看了一半(5%~95%)、有总时长的视频。
+  List<({Track t, double pct})> _continueWatching() {
+    final out = <({Track t, double pct})>[];
+    for (final t in _history) {
+      final pos = _resume[t.key];
+      final dur = _resumeDur[t.key];
+      if (pos == null || dur == null || dur <= 0) continue;
+      final pct = pos / dur;
+      if (pct > 0.03 && pct < 0.95) out.add((t: t, pct: pct));
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+
+  Widget _continueShelf(ColorScheme cs) {
+    final items = _continueWatching();
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Container(
+      height: 96,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 4),
+            child: Text('继续观看',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          ),
+          Expanded(
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: items.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final it = items[i];
+                return InkWell(
+                  onTap: () => _play(it.t),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    width: 150,
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: cs.primary.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(it.t.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12)),
+                        Row(children: [
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(2),
+                              child: LinearProgressIndicator(
+                                value: it.pct,
+                                minHeight: 4,
+                                backgroundColor: Colors.black12,
+                                color: cs.primary,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text('${(it.pct * 100).round()}%',
+                              style: const TextStyle(
+                                  fontSize: 10, color: Colors.black54)),
+                        ]),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // #9 随便看看：从当前可见的平台/在线视频里随机播一个。
+  void _randomPlay() {
+    final pool = [
+      ..._platformTracks.where(_trackIsVideo),
+      ..._onlineTracks,
+      ..._hotTracks,
+    ];
+    if (pool.isEmpty) {
+      _snack('还没有可随机的视频，稍等加载~');
+      return;
+    }
+    final t = pool[Random().nextInt(pool.length)];
+    _snack('🎲 随便看看：${t.name}');
+    _play(t);
+  }
+
+  Future<void> _toggleViewMode() async {
+    setState(() => _viewMode = _viewMode == 'grid' ? 'list' : 'grid');
+    final p = await SharedPreferences.getInstance();
+    await p.setString('view_mode', _viewMode);
+  }
+
+  // #12 智能歌单：规则实时计算成员，随库变化保持最新。
+  List<Track> _smartList(String rule) {
+    final all = [..._localTracks, ..._platformTracks];
+    switch (rule) {
+      case 'music':
+        return all.where((t) => !_trackIsVideo(t)).toList();
+      case 'video':
+        return all.where(_trackIsVideo).toList();
+      case 'recent':
+        return _localTracks.take(50).toList();
+      case 'unfinished':
+        final out = <Track>[];
+        for (final t in _history) {
+          final pos = _resume[t.key], dur = _resumeDur[t.key];
+          if (pos != null && dur != null && dur > 0) {
+            final pct = pos / dur;
+            if (pct > 0.03 && pct < 0.95) out.add(t);
+          }
+        }
+        return out;
+      default:
+        return const [];
+    }
+  }
+
+  void _showSmartPlaylists() {
+    const rules = [
+      ('music', Icons.music_note, '全部音乐'),
+      ('video', Icons.movie, '全部视频'),
+      ('recent', Icons.fiber_new, '最近添加'),
+      ('unfinished', Icons.hourglass_bottom, '未看完'),
+    ];
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('智能歌单（自动更新）',
+                  style: TextStyle(fontWeight: FontWeight.w600))),
+          for (final r in rules)
+            ListTile(
+              leading: Icon(r.$2),
+              title: Text(r.$3),
+              trailing: Text('${_smartList(r.$1).length}',
+                  style: const TextStyle(color: Colors.black45)),
+              onTap: () {
+                Navigator.pop(context);
+                _openSmartList(r.$3, r.$1);
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
+  void _openSmartList(String title, String rule) {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) {
+        final list = _smartList(rule);
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(title),
+            actions: [
+              if (list.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _play(list.first);
+                  },
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('播放'),
+                ),
+            ],
+          ),
+          body: list.isEmpty
+              ? const Center(
+                  child: Text('暂无内容',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: list.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final t = list[i];
+                    return ListTile(
+                      leading: Icon(
+                          _trackIsVideo(t) ? Icons.movie : Icons.music_note),
+                      title: Text(t.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      onTap: () => _play(t),
+                    );
+                  },
+                ),
+        );
+      },
+    ));
+  }
+
+  // #13 新手引导：首启分步介绍，可跳过；设置里可重看。
+  Future<void> _loadOnboarding() async {
+    final p = await SharedPreferences.getInstance();
+    if (p.getBool('onboarded_v1') == true) return;
+    // 等首帧 + 免责声明之后再弹，避免对话框叠加。
+    await Future.delayed(const Duration(milliseconds: 1200));
+    if (mounted) _showOnboarding();
+  }
+
+  void _showOnboarding() {
+    const pages = [
+      ('🎬', '欢迎来到小李播放器',
+          '本地音视频、B站、共享平台一站全播。支持几乎所有格式（基于 libmpv）。'),
+      ('🔍', '搜索与发现',
+          '顶部搜索 B站/平台视频；媒体库里「🎲随便看看」随机来一个，右上角可切换列表/网格视图。'),
+      ('🪙', '小李兑换币与社交',
+          '签到、做任务赚币；给视频投币/点赞/收藏，打赏或发🧧红包给作者，去个人中心看成就、商城、关注动态。'),
+      ('⬇️', '离线与续播',
+          '长按/右键视频可缓存到本地离线看；看了一半的视频会出现在「继续观看」，点一下接着看。'),
+      ('🛠', '更多',
+          '播放页右上菜单有护眼色温、画面精调、夜间音频、字幕章节、金句截图等。设置里有无障碍选项。'),
+    ];
+    var page = 0;
+    final ctrl = PageController();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+          content: SizedBox(
+            width: 360,
+            height: 260,
+            child: Column(
+              children: [
+                Expanded(
+                  child: PageView.builder(
+                    controller: ctrl,
+                    itemCount: pages.length,
+                    onPageChanged: (i) => setD(() => page = i),
+                    itemBuilder: (_, i) {
+                      final p = pages[i];
+                      return Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(p.$1, style: const TextStyle(fontSize: 54)),
+                          const SizedBox(height: 14),
+                          Text(p.$2,
+                              style: const TextStyle(
+                                  fontSize: 17, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 10),
+                          Text(p.$3,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  fontSize: 13, color: Colors.black54)),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    for (var i = 0; i < pages.length; i++)
+                      Container(
+                        width: 7,
+                        height: 7,
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: i == page
+                              ? Theme.of(context).colorScheme.primary
+                              : Colors.black26,
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final p = await SharedPreferences.getInstance();
+                await p.setBool('onboarded_v1', true);
+                if (ctx.mounted) Navigator.pop(ctx);
+              },
+              child: const Text('跳过'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (page < pages.length - 1) {
+                  ctrl.nextPage(
+                      duration: A11y.motion(const Duration(milliseconds: 250)),
+                      curve: Curves.easeOut);
+                } else {
+                  final p = await SharedPreferences.getInstance();
+                  await p.setBool('onboarded_v1', true);
+                  if (ctx.mounted) Navigator.pop(ctx);
+                }
+              },
+              child: Text(page < pages.length - 1 ? '下一步' : '开始使用'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // #15 网格卡片
+  Widget _gridCard(ColorScheme cs, Track t, int i) {
+    final isVid = _trackIsVideo(t);
+    return GestureDetector(
+      onTap: () => _play(t),
+      onSecondaryTapDown: (d) => _showRowMenu(t, d.globalPosition),
+      onLongPress: () => _showRowMenu(
+          t,
+          Offset(MediaQuery.of(context).size.width / 2,
+              MediaQuery.of(context).size.height / 2)),
+      child: Container(
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  t.pic.isNotEmpty
+                      ? Image.network(t.pic, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                              Container(color: cs.primary.withValues(alpha: 0.15)))
+                      : Container(
+                          color: cs.primary.withValues(alpha: 0.12),
+                          child: Icon(isVid ? Icons.movie : Icons.music_note,
+                              color: cs.primary, size: 34)),
+                  Positioned(
+                    left: 4,
+                    top: 4,
+                    child: Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(4)),
+                      child: Text(
+                          t.tag.isNotEmpty ? t.tag : (t.isLocal ? '本地' : '在线'),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 9)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(6),
+              child: Text(t.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _libraryView(ColorScheme cs) {
     final q = _query.toLowerCase();
     List<Track> items;
@@ -4305,7 +4861,22 @@ class _HomeShellState extends State<HomeShell> {
     return Column(
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
-        if (_query.isEmpty) _typeFilterBar(cs),
+        if (_query.isEmpty)
+          Row(children: [
+            Expanded(child: _typeFilterBar(cs)),
+            IconButton(
+              tooltip: '随便看看',
+              icon: const Icon(Icons.casino_outlined),
+              onPressed: _randomPlay,
+            ),
+            IconButton(
+              tooltip: _viewMode == 'grid' ? '列表视图' : '网格视图',
+              icon: Icon(
+                  _viewMode == 'grid' ? Icons.view_list : Icons.grid_view),
+              onPressed: _toggleViewMode,
+            ),
+          ]),
+        if (_query.isEmpty) _continueShelf(cs),
         if (_query.isEmpty && _localTags.isNotEmpty) _tagFilterBar(cs),
         if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
         if (_query.isNotEmpty && _searchSuggestions.isNotEmpty)
@@ -4334,11 +4905,24 @@ class _HomeShellState extends State<HomeShell> {
                     ],
                   ),
                 )
-              : ListView.separated(
-                  itemCount: items.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (context, i) => _trackRow(cs, items[i], i),
-                ),
+              : _viewMode == 'grid'
+                  ? GridView.builder(
+                      padding: const EdgeInsets.all(10),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 180,
+                        mainAxisSpacing: 10,
+                        crossAxisSpacing: 10,
+                        childAspectRatio: 0.78,
+                      ),
+                      itemCount: items.length,
+                      itemBuilder: (context, i) => _gridCard(cs, items[i], i),
+                    )
+                  : ListView.separated(
+                      itemCount: items.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, i) => _trackRow(cs, items[i], i),
+                    ),
         ),
       ],
     );
@@ -4806,6 +5390,60 @@ class _HomeShellState extends State<HomeShell> {
             style: TextStyle(
                 fontSize: 20, fontWeight: FontWeight.bold, color: cs.primary)),
         const SizedBox(height: 16),
+        // 无障碍(#14)
+        StatefulBuilder(
+          builder: (ctx, setA) => Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ExpansionTile(
+              leading: const Icon(Icons.accessibility_new),
+              title: const Text('无障碍'),
+              childrenPadding: const EdgeInsets.only(bottom: 6),
+              children: [
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('减弱动效'),
+                  subtitle: const Text('关闭弹幕飞行/页面切换等动画，减少眩晕'),
+                  value: A11y.reduceMotion,
+                  onChanged: (v) async {
+                    await A11y.setReduceMotion(v);
+                    setA(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('触感反馈'),
+                  subtitle: const Text('快进/切歌/点赞时轻微震动'),
+                  value: A11y.haptics,
+                  onChanged: (v) async {
+                    await A11y.setHaptics(v);
+                    A11y.tap();
+                    setA(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('高对比文字'),
+                  subtitle: const Text('文字加粗加深，老人/弱视更易读'),
+                  value: A11y.highContrast.value,
+                  onChanged: (v) async {
+                    await A11y.setHighContrast(v);
+                    setA(() {});
+                  },
+                ),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.school_outlined),
+                  title: const Text('重看新手引导'),
+                  onTap: () async {
+                    final p = await SharedPreferences.getInstance();
+                    await p.remove('onboarded_v1');
+                    if (mounted) _showOnboarding();
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
         ListTile(
           leading: const Icon(Icons.info_outline),
           title: ValueListenableBuilder<String>(
@@ -4868,6 +5506,13 @@ class _HomeShellState extends State<HomeShell> {
                     onCacheTrack: _enqueueCache)));
             setState(() {});
           },
+        ),
+        ListTile(
+          leading: const Icon(Icons.auto_awesome),
+          title: const Text('智能歌单'),
+          subtitle: const Text('全部音乐/视频、最近添加、未看完——随库自动更新',
+              style: TextStyle(fontSize: 12)),
+          onTap: _showSmartPlaylists,
         ),
         ListTile(
           leading: const Icon(Icons.create_new_folder_outlined),
@@ -6419,6 +7064,54 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     );
   }
 
+  // #10 猜你喜欢：按你投币/点赞/收藏过的作者 + 高币视频推荐，排除已互动。
+  void _showRecommend() {
+    final interacted = <String>{
+      ...?_ids['coined'],
+      ...?_ids['liked'],
+      ...?_ids['faved'],
+    };
+    // 我互动过的视频的作者集合
+    final favUploaders = <String>{};
+    for (final id in interacted) {
+      final v = _byId[id];
+      if (v != null && v.uploader.isNotEmpty) favUploaders.add(v.uploader);
+    }
+    // 候选打分：同作者 +3，币数权重。排除已互动。
+    final scored = <({PlatformVideo v, num score})>[];
+    for (final v in _byId.values) {
+      if (interacted.contains(v.id)) continue;
+      num s = v.coins.toDouble();
+      if (favUploaders.contains(v.uploader)) s += 100;
+      if (s > 0) scored.add((v: v, score: s));
+    }
+    scored.sort((a, b) => b.score.compareTo(a.score));
+    final rec = scored.take(15).map((e) => e.v).toList();
+    _sheet(
+      title: '猜你喜欢',
+      child: rec.isEmpty
+          ? const _SheetEmpty('多投币/点赞几个视频，这里就有推荐啦~')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final v in rec)
+                  ListTile(
+                    leading: const Icon(Icons.recommend,
+                        color: Color(0xFFF26B21)),
+                    title: Text(v.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                        '${v.uploader.isNotEmpty ? '${v.uploader} · ' : ''}🪙 ${v.coins}  👍 ${v.likes}'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onPlay(v.id, v.title);
+                    },
+                  ),
+              ],
+            ),
+    );
+  }
+
   Future<void> _showCloudHistory() async {
     final items = await PlatformService.pullHistory();
     if (!mounted) return;
@@ -6905,6 +7598,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                         _showPlaylistSquare),
                     _entry(cs, Icons.cloud_sync, '云端历史',
                         _showCloudHistory),
+                    _entry(cs, Icons.recommend, '猜你喜欢', _showRecommend),
                     _entry(cs, Icons.support_agent, '联系管理员',
                         _contactAdmin),
                   ],

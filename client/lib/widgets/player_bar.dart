@@ -9,6 +9,7 @@ class PlayerBar extends StatelessWidget {
   final VoidCallback onNext;
   final VoidCallback onPlayPause;
   final VoidCallback? onTapInfo; // 点曲目信息区→恢复/打开播放页
+  final VoidCallback? onQueue; // #11 打开播放队列面板
 
   const PlayerBar({
     super.key,
@@ -19,6 +20,7 @@ class PlayerBar extends StatelessWidget {
     required this.onNext,
     required this.onPlayPause,
     this.onTapInfo,
+    this.onQueue,
   });
 
   @override
@@ -88,6 +90,13 @@ class PlayerBar extends StatelessWidget {
             width: 240,
             child: Row(
               children: [
+                if (onQueue != null)
+                  IconButton(
+                    tooltip: '播放队列',
+                    icon: const Icon(Icons.queue_music,
+                        color: Colors.white54, size: 20),
+                    onPressed: onQueue,
+                  ),
                 const Icon(Icons.volume_up, color: Colors.white54, size: 20),
                 const SizedBox(width: 8),
                 Expanded(

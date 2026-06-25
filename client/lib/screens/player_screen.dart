@@ -14,6 +14,7 @@ import '../player/player_holder.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
 import '../services/platform_service.dart';
+import '../services/a11y.dart';
 import '../text_scale.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -30,6 +31,10 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function(String message)? onPostComment; // 发评论(仅 B站)
   final Duration startAt; // 断点续播起点
   final void Function(int seconds)? onSavePos; // 保存播放进度
+  final void Function(int durSec)? onDuration; // 视频总时长(#7 继续观看算进度%)
+  final String? nextUpTitle; // #3 片尾浮层：下一首标题(null=无/随机/停止)
+  final VoidCallback? onPlayNext; // #3 立即播放下一首
+  final VoidCallback? onCancelNext; // #3 取消本次自动连播
   final Future<List<Danmaku>> Function()? onLoadDanmaku; // 加载弹幕(仅B站)
   final Future<String> Function(String msg, int progressMs, int color)?
       onPostDanmaku;
@@ -63,6 +68,10 @@ class PlayerScreen extends StatefulWidget {
     this.onPostComment,
     this.startAt = Duration.zero,
     this.onSavePos,
+    this.onDuration,
+    this.nextUpTitle,
+    this.onPlayNext,
+    this.onCancelNext,
     this.onLoadDanmaku,
     this.onPostDanmaku,
     this.onLike,
@@ -517,6 +526,10 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _nightAudio = false; // 夜间音频模式(动态压缩+人声清晰)
   int _picBright = 0, _picContrast = 0, _picSat = 0, _picGamma = 0; // 画面精调 -100~100
   List<Map<String, dynamic>> _timelineMarks = const []; // 时间轴留言 [{pos,text,name}]
+  bool _nextUpShown = false; // #3 片尾"下一个"浮层是否显示
+  bool _nextUpDismissed = false; // 本视频已取消/已触发过，不再弹
+  int _nextUpCountdown = 5; // 倒计时秒
+  Timer? _nextUpTimer;
   double? _vw, _vh;
   double _preLongRate = 1.0;
   bool _longPressing = false;
@@ -867,6 +880,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // F20: 左/右三分之一双击快退/快进，中间双击进全屏。
   void _handleDoubleTapZone() {
+    A11y.tap(); // 触感反馈(#14)
     final w = MediaQuery.of(context).size.width;
     final x = _doubleTapAt?.dx ?? w / 2;
     if (x < w * 0.34) {
@@ -1950,6 +1964,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _subs.add(_player.stream.position.listen((p) {
       if (!mounted) return;
       setState(() => _position = p);
+      _maybeShowNextUp(p);
       if (_desktopSub) _pushDesktopSub(p);
       if (_aPoint != null && _bPoint != null && p >= _bPoint!) {
         _player.seek(_aPoint!);
@@ -1983,6 +1998,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _subs.add(_player.stream.duration.listen((d) {
       if (!mounted) return;
       setState(() => _duration = d);
+      if (d > Duration.zero) widget.onDuration?.call(d.inSeconds);
       if (!_resumed &&
           d > Duration.zero &&
           widget.startAt > const Duration(seconds: 3) &&
@@ -2132,6 +2148,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
+    _nextUpTimer?.cancel();
     if (_paletteApplied) accentNotifier.value = _savedAccent; // F39 还原主题色
     if (Platform.isAndroid) WakelockPlus.disable(); // F45
     if (_desktopSub) _dsChannel.invokeMethod('hide');
@@ -2588,6 +2605,48 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  // #3 片尾"即将播放下一个"浮层：末 6 秒弹，5 秒倒计时自动连播。
+  void _maybeShowNextUp(Duration p) {
+    if (widget.nextUpTitle == null || _nextUpDismissed) return;
+    if (_loop || _stopAtEnd) return;
+    if (_duration <= Duration.zero) return;
+    final rem = (_duration - p).inMilliseconds;
+    if (!_nextUpShown && rem > 0 && rem <= 6000) {
+      _nextUpShown = true;
+      _nextUpCountdown = 5;
+      _nextUpTimer?.cancel();
+      _nextUpTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        setState(() => _nextUpCountdown--);
+        if (_nextUpCountdown <= 0) {
+          t.cancel();
+          _playNextUpNow();
+        }
+      });
+    }
+  }
+
+  void _cancelNextUp() {
+    _nextUpTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _nextUpShown = false;
+        _nextUpDismissed = true;
+      });
+    }
+    widget.onCancelNext?.call();
+  }
+
+  void _playNextUpNow() {
+    _nextUpTimer?.cancel();
+    _nextUpShown = false;
+    _nextUpDismissed = true;
+    widget.onPlayNext?.call();
+  }
+
   // 拉取时间轴留言标记(有 pos 的评论)。
   Future<void> _loadTimelineMarks() async {
     final id = widget.platformId;
@@ -2866,7 +2925,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       IconData icon, bool active, int count, Color cs, VoidCallback? onTap) {
     final color = active ? cs : Colors.white70;
     return InkWell(
-      onTap: onTap,
+      onTap: onTap == null
+          ? null
+          : () {
+              A11y.tap(); // 触感反馈(#14)
+              onTap();
+            },
       borderRadius: BorderRadius.circular(10),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
@@ -3559,6 +3623,60 @@ class _PlayerScreenState extends State<PlayerScreen>
                             child: Container(
                                 color: const Color(0xFFFF9500)
                                     .withValues(alpha: _warmth)),
+                          ),
+                        if (_nextUpShown && widget.nextUpTitle != null)
+                          Positioned(
+                            right: 16,
+                            bottom: 70,
+                            child: Container(
+                              width: 260,
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.82),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text('$_nextUpCountdown 秒后播放下一个',
+                                      style: const TextStyle(
+                                          color: Colors.white70, fontSize: 12)),
+                                  const SizedBox(height: 6),
+                                  Text(widget.nextUpTitle!,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600)),
+                                  const SizedBox(height: 10),
+                                  Row(children: [
+                                    Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: _cancelNextUp,
+                                        style: OutlinedButton.styleFrom(
+                                            foregroundColor: Colors.white,
+                                            side: const BorderSide(
+                                                color: Colors.white38),
+                                            padding: EdgeInsets.zero),
+                                        child: const Text('取消'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: FilledButton(
+                                        onPressed: _playNextUpNow,
+                                        style: FilledButton.styleFrom(
+                                            backgroundColor: cs.primary,
+                                            padding: EdgeInsets.zero),
+                                        child: const Text('立即播放'),
+                                      ),
+                                    ),
+                                  ]),
+                                ],
+                              ),
+                            ),
                           ),
                         if (_isDragSeeking && _dragPreview != null)
                           Center(
