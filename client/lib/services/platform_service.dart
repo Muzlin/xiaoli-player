@@ -476,12 +476,21 @@ class PlatformService {
     return [];
   }
 
-  /// 发评论。
-  static Future<bool> comment(String videoId, String text, String name) async {
+  /// 发评论。pos>=0 为时间轴留言（进度条标记），缺省=普通评论。
+  static Future<bool> comment(String videoId, String text, String name,
+      {int pos = -1}) async {
+    final p = pos >= 0 ? '&pos=$pos' : '';
     final d = await _g(
-        '/comment?id=$videoId&text=${Uri.encodeComponent(text)}&name=${Uri.encodeComponent(name)}',
+        '/comment?id=$videoId&text=${Uri.encodeComponent(text)}&name=${Uri.encodeComponent(name)}$p',
         withUid: true);
     return d is Map && d['ok'] == true;
+  }
+
+  /// 某上传者的全部公开作品（创作者目录页）。
+  static Future<List<PlatformVideo>> byUploader(String name,
+      {String sort = 'time'}) async {
+    final d = await _g('/by-uploader?name=${Uri.encodeComponent(name)}&sort=$sort');
+    return _toVideos(d is List ? d : null);
   }
 
   /// 站内通知 [{type,from,vid,ts,...}]；clear=true 拉完即清空。
@@ -646,6 +655,15 @@ class PlatformService {
     return false;
   }
 
+  /// 给视频作者发红包：扣己方余额，进对方"待领红包"池。
+  /// 返回 {ok, amount, balance} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> sendRedPacket(
+      String videoId, int amount, String msg) async {
+    final m = msg.trim().isEmpty ? '' : '&msg=${Uri.encodeComponent(msg.trim())}';
+    final d = await _g('/redpacket?id=$videoId&amount=$amount$m', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 领取后台空投的"红包"(返回本次金额，服务器随即清零)。0=没有。
   static Future<int> claimGift() async {
     final uid = await walletUid();
@@ -760,7 +778,7 @@ class PlatformService {
     return null;
   }
 
-  /// 取 App 内显示名（后台设的；空则用默认）。
+  /// 取 App 内显示名（后台设的；空则用默认）。隧道挂了→GitHub 兜底。
   static Future<String> getAppName() async {
     for (final base in {current, baseUrl}) {
       try {
@@ -770,10 +788,11 @@ class PlatformService {
         return (jsonDecode(r.body)['app_name'] ?? '') as String;
       } catch (_) {}
     }
-    return '';
+    return ((await configFromGitHub())['app_name'] ?? '') as String; // #1
   }
 
-  /// 拉 /version 全量（app_name / download_url 等后台可改项）。失败 null。
+  /// 拉 /version 全量（app_name / download_url 等后台可改项）。
+  /// 隧道全挂→用 GitHub config_public.json 兜底(含 maintenance/app_name 等)。
   static Future<Map<String, dynamic>?> fetchVersionInfo() async {
     for (final base in {current, baseUrl}) {
       try {
@@ -784,10 +803,11 @@ class PlatformService {
         if (d is Map<String, dynamic>) return d;
       } catch (_) {}
     }
-    return null;
+    final g = await configFromGitHub(); // #1 GitHub 兜底
+    return g.isEmpty ? null : g;
   }
 
-  /// 取免责声明（后台设的；空则 app 用内置默认）。
+  /// 取免责声明（后台设的；空则 app 用内置默认）。隧道挂了→GitHub 兜底。
   static Future<String> getDisclaimer() async {
     for (final base in {current, baseUrl}) {
       try {
@@ -797,7 +817,7 @@ class PlatformService {
         return (jsonDecode(r.body)['disclaimer'] ?? '') as String;
       } catch (_) {}
     }
-    return '';
+    return ((await configFromGitHub())['disclaimer'] ?? '') as String; // #1
   }
 
   /// 后台：上传下一版应用文件(which=mac|apk|win)覆盖官网下载。仅局域网+口令。
@@ -815,7 +835,7 @@ class PlatformService {
     return false;
   }
 
-  /// 取平台公告（管理员在后台设的，公开可读）。
+  /// 取平台公告（管理员在后台设的，公开可读）。隧道挂了→GitHub 兜底。
   static Future<String> getNotice() async {
     for (final base in {current, baseUrl}) {
       try {
@@ -826,7 +846,36 @@ class PlatformService {
         return (d['notice'] ?? '') as String;
       } catch (_) {}
     }
-    return '';
+    return ((await configFromGitHub())['notice'] ?? '') as String; // #1
+  }
+
+  // ===== #1 管理改动全网生效：从 GitHub 读公共配置 =====
+  /// 后台一改设置就发布 config_public.json 到 GitHub；隧道挂了/限流时
+  /// 所有设备仍能从 api.github.com(国内可达)拿到最新 App名/公告/价格/维护等。
+  static const _cfgPointer =
+      'https://api.github.com/repos/Muzlin/xiaoli-player/contents/config_public.json?ref=flutter-client';
+  static Map<String, dynamic>? _ghCfgCache;
+  static int _ghCfgTs = 0;
+  static Future<Map<String, dynamic>> configFromGitHub() async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (_ghCfgCache != null && now - _ghCfgTs < 60000) return _ghCfgCache!;
+    try {
+      final r = await http.get(Uri.parse(_cfgPointer), headers: {
+        'Accept': 'application/vnd.github+json',
+        'User-Agent': 'xiaoli-player',
+      }).timeout(const Duration(seconds: 8));
+      if (r.statusCode == 200) {
+        final m = jsonDecode(r.body) as Map<String, dynamic>;
+        final c = ((m['content'] ?? '') as String).replaceAll('\n', '');
+        final d = jsonDecode(utf8.decode(base64.decode(c)));
+        if (d is Map<String, dynamic>) {
+          _ghCfgCache = d;
+          _ghCfgTs = now;
+          return d;
+        }
+      }
+    } catch (_) {}
+    return _ghCfgCache ?? {};
   }
 
   /// 后台管理软口令（与 server.py ADMIN_TOKEN 一致）。

@@ -151,6 +151,7 @@ class _HomeShellState extends State<HomeShell> {
   final PlatformService _platform = PlatformService();
   final List<Track> _platformTracks = []; // 平台上传的视频(别人/自己)
   final Map<String, bool> _platIsVideo = {}; // 平台曲目 key→是否视频(服务器分类)
+  final Map<String, String> _platUploader = {}; // 平台曲目 key→上传者名(#8 作者作品页)
   final List<BiliUser> _accountResults = []; // 搜索到的 B站账号
   static const _winChannel = MethodChannel('xiaoli/window');
   bool _launchAtLogin = false;
@@ -459,7 +460,7 @@ class _HomeShellState extends State<HomeShell> {
             const SizedBox(height: 26),
             const Text('🧧', style: TextStyle(fontSize: 60)),
             const SizedBox(height: 6),
-            const Text('管理员给你发了一个红包',
+            const Text('你收到一个红包',
                 style: TextStyle(
                     color: Color(0xFFFFE2A8),
                     fontSize: 16,
@@ -2349,8 +2350,10 @@ class _HomeShellState extends State<HomeShell> {
   Track _platTrack(PlatformVideo v) {
     final star = v.rating > 0 ? '★${v.rating} ' : '';
     final base = v.uploader.isEmpty ? v.title : '${v.title} · ${v.uploader}';
-    return Track.online('$star$base', PlatformService.videoUrl(v.id),
+    final t = Track.online('$star$base', PlatformService.videoUrl(v.id),
         tag: '平台');
+    if (v.uploader.isNotEmpty) _platUploader[t.key] = v.uploader;
+    return t;
   }
 
   Future<void> _ratePlat(String url, int score) async {
@@ -2722,6 +2725,18 @@ class _HomeShellState extends State<HomeShell> {
   void _openPersonalCenter() {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => _PersonalCenterPage(
+        onPlay: (id, title) =>
+            _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+      ),
+    ));
+  }
+
+  // #8 作者作品页：列出某上传者的全部公开作品。
+  void _openUploaderPage(String name) {
+    if (name.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _UploaderPage(
+        uploader: name,
         onPlay: (id, title) =>
             _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
       ),
@@ -4394,6 +4409,10 @@ class _HomeShellState extends State<HomeShell> {
     if (t.tag == '平台' && t.url != null) {
       items.add(const PopupMenuItem(
           value: 'pdownload', child: Text('下载到本地')));
+      if (_platUploader[t.key]?.isNotEmpty ?? false) {
+        items.add(const PopupMenuItem(
+            value: 'puploader', child: Text('该作者更多作品')));
+      }
     }
     if (!t.isLocal && (t.bvid != null || t.url != null)) {
       if (DownloadManager.instance.isCached(t.key)) {
@@ -4423,6 +4442,8 @@ class _HomeShellState extends State<HomeShell> {
         _setTrackTag(t);
       } else if (v == 'pdownload') {
         _downloadPlatformVideo(t);
+      } else if (v == 'puploader') {
+        _openUploaderPage(_platUploader[t.key] ?? '');
       } else if (v == 'cache') {
         _cacheVideo(t);
       } else if (v == 'cloud') {
@@ -6986,6 +7007,94 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                 const SizedBox(height: 20),
               ],
             ),
+    );
+  }
+}
+
+/// #8 作者作品页：某上传者的全部公开作品。
+class _UploaderPage extends StatefulWidget {
+  final String uploader;
+  final void Function(String id, String title) onPlay;
+  const _UploaderPage({required this.uploader, required this.onPlay});
+  @override
+  State<_UploaderPage> createState() => _UploaderPageState();
+}
+
+class _UploaderPageState extends State<_UploaderPage> {
+  bool _loading = true;
+  List<PlatformVideo> _videos = [];
+  bool _following = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final vs = await PlatformService.byUploader(widget.uploader);
+    final fol = await PlatformService.following();
+    if (!mounted) return;
+    setState(() {
+      _videos = vs;
+      _following = fol.contains(widget.uploader);
+      _loading = false;
+    });
+  }
+
+  Future<void> _toggleFollow() async {
+    final on = !_following;
+    setState(() => _following = on);
+    final d = await PlatformService.follow(widget.uploader, on);
+    if (d == null && mounted) setState(() => _following = !on);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.uploader),
+        actions: [
+          TextButton.icon(
+            onPressed: _toggleFollow,
+            icon: Icon(
+                _following ? Icons.person_remove : Icons.person_add_alt_1,
+                size: 18,
+                color: _following ? Colors.grey : cs.primary),
+            label: Text(_following ? '已关注' : '关注',
+                style: TextStyle(color: _following ? Colors.grey : cs.primary)),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _videos.isEmpty
+              ? const Center(
+                  child: Text('该作者暂无公开作品',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: _videos.length + 1,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    if (i == 0) {
+                      return Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text('共 ${_videos.length} 个作品',
+                            style: const TextStyle(color: Colors.black54)),
+                      );
+                    }
+                    final v = _videos[i - 1];
+                    return ListTile(
+                      leading: const Icon(Icons.play_circle_outline),
+                      title: Text(v.title,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                          '▶ ${v.views}   🪙 ${v.coins}   👍 ${v.likes}   ⭐ ${v.favs}'),
+                      onTap: () => widget.onPlay(v.id, v.title),
+                    );
+                  },
+                ),
     );
   }
 }
