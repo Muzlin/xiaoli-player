@@ -1635,43 +1635,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            // 时间轴留言标记(#6)：进度条上方可点小圆点
-                            if (_timelineMarks.isNotEmpty && durMs > 0)
-                              SizedBox(
-                                height: 11,
-                                child: LayoutBuilder(builder: (_, bc) {
-                                  final w = bc.maxWidth;
-                                  return Stack(children: [
-                                    for (final m in _timelineMarks)
-                                      Positioned(
-                                        left: (((m['pos'] as int) * 1000) /
-                                                durMs *
-                                                w)
-                                            .clamp(0.0, w - 8),
-                                        top: 2,
-                                        child: GestureDetector(
-                                          onTap: () {
-                                            _player.seek(Duration(
-                                                seconds: m['pos'] as int));
-                                            _engageToast(
-                                                '💬 ${m['name']}：${m['text']}');
-                                          },
-                                          child: Container(
-                                            width: 8,
-                                            height: 8,
-                                            decoration: BoxDecoration(
-                                              color: const Color(0xFFFFC107),
-                                              shape: BoxShape.circle,
-                                              border: Border.all(
-                                                  color: Colors.black45,
-                                                  width: 0.5),
-                                            ),
-                                          ),
-                                        ),
-                                      ),
-                                  ]);
-                                }),
-                              ),
+                            _timelineMarkBar(durMs),
                             SliderTheme(
                               data: SliderThemeData(
                                 trackHeight: 3,
@@ -2498,6 +2462,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       final quote = hit.isNotEmpty ? hit.first.text : '';
       final codec = await ui.instantiateImageCodec(bytes);
       final frame = await codec.getNextFrame();
+      codec.dispose();
       final img = frame.image;
       final w = img.width.toDouble(), h = img.height.toDouble();
       final recorder = ui.PictureRecorder();
@@ -2537,6 +2502,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       final pic = recorder.endRecording();
       final outImg = await pic.toImage(img.width, img.height);
       final png = await outImg.toByteData(format: ui.ImageByteFormat.png);
+      // 释放原生图像/Picture，避免每次截图泄漏 GPU 内存。
+      img.dispose();
+      pic.dispose();
+      outImg.dispose();
       if (png == null) {
         _engageToast('生成失败');
         return;
@@ -2598,7 +2567,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         id, t, myName.isEmpty ? '匿名' : myName,
         pos: atSec);
     if (sent) {
-      _engageToast('已在 ${_fmtDur(_position)} 留言');
+      _engageToast('已在 ${_fmtDur(Duration(seconds: atSec))} 留言');
       _loadTimelineMarks();
     } else {
       _engageToast('留言失败（可能含违禁词/被封禁）');
@@ -2620,6 +2589,15 @@ class _PlayerScreenState extends State<PlayerScreen>
           t.cancel();
           return;
         }
+        // 倒计时途中用户回退/开循环/设停止 → 取消本次自动连播，允许临近结尾再弹。
+        if (_loop ||
+            _stopAtEnd ||
+            widget.nextUpTitle == null ||
+            (_duration - _position) > const Duration(seconds: 7)) {
+          t.cancel();
+          setState(() => _nextUpShown = false);
+          return;
+        }
         setState(() => _nextUpCountdown--);
         if (_nextUpCountdown <= 0) {
           t.cancel();
@@ -2627,6 +2605,39 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       });
     }
+  }
+
+  // #6 时间轴留言标记条(进度条上方可点小圆点)，全/非全屏共用。
+  Widget _timelineMarkBar(double durMs) {
+    if (_timelineMarks.isEmpty || durMs <= 0) return const SizedBox.shrink();
+    return SizedBox(
+      height: 11,
+      child: LayoutBuilder(builder: (_, bc) {
+        final w = bc.maxWidth;
+        return Stack(children: [
+          for (final m in _timelineMarks)
+            Positioned(
+              left: (((m['pos'] as int) * 1000) / durMs * w).clamp(0.0, w - 8),
+              top: 2,
+              child: GestureDetector(
+                onTap: () {
+                  _player.seek(Duration(seconds: m['pos'] as int));
+                  _engageToast('💬 ${m['name']}：${m['text']}');
+                },
+                child: Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFC107),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.black45, width: 0.5),
+                  ),
+                ),
+              ),
+            ),
+        ]);
+      }),
+    );
   }
 
   void _cancelNextUp() {
@@ -3731,6 +3742,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           onSeek: (sec) =>
                               _player.seek(Duration(seconds: sec)),
                         ),
+                      _timelineMarkBar(durMs),
                       SliderTheme(
                         data: SliderThemeData(
                           trackHeight: 3,

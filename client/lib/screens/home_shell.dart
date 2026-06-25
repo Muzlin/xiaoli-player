@@ -285,7 +285,6 @@ class _HomeShellState extends State<HomeShell> {
     _loadPlayHistory();
     _loadAutoNext();
     A11y.load(); // 无障碍设置(#14)
-    _loadOnboarding(); // 新手引导(#13)
     DownloadManager.instance.loadCache(); // 加载离线缓存索引
     DownloadManager.instance.onComplete = (t) {
       if (!mounted) return;
@@ -303,7 +302,10 @@ class _HomeShellState extends State<HomeShell> {
     _initOpenFileChannel(); // 「打开方式」用本 app 打开音视频文件
     _loadAppName(); // App 内显示名（后台可改）
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _showDisclaimer();
+      // 免责声明关闭后再弹新手引导(#13)，避免对话框叠加。
+      _showDisclaimer().then((_) {
+        if (mounted) _maybeOnboard();
+      });
       _silentCheckUpdate();
     });
     _checkBan(); // 启动登记设备 + 查封号
@@ -1727,9 +1729,12 @@ class _HomeShellState extends State<HomeShell> {
       valueListenable: A11y.highContrast,
       builder: (context, hc, child) {
         if (!hc) return child!;
+        // 按主题明暗选对比色，避免深色背景上强制黑字看不见。
+        final dark = Theme.of(context).brightness == Brightness.dark;
         return DefaultTextStyle.merge(
-          style: const TextStyle(
-              color: Colors.black, fontWeight: FontWeight.w600),
+          style: TextStyle(
+              color: dark ? Colors.white : Colors.black,
+              fontWeight: FontWeight.w700),
           child: child!,
         );
       },
@@ -2757,7 +2762,8 @@ class _HomeShellState extends State<HomeShell> {
                                 children: [
                                   IconButton(
                                     icon: const Icon(Icons.close, size: 18),
-                                    onPressed: queue.length <= 1
+                                    // 不能删正在播放的(否则上/下一首失效)，也不能删到空。
+                                    onPressed: (queue.length <= 1 || playing)
                                         ? null
                                         : () {
                                             setSheet(() => queue.removeAt(i));
@@ -4665,11 +4671,10 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   // #13 新手引导：首启分步介绍，可跳过；设置里可重看。
-  Future<void> _loadOnboarding() async {
+  // 由免责声明对话框关闭后链式触发(见 initState 的 postFrameCallback)，不与之叠加。
+  Future<void> _maybeOnboard() async {
     final p = await SharedPreferences.getInstance();
     if (p.getBool('onboarded_v1') == true) return;
-    // 等首帧 + 免责声明之后再弹，避免对话框叠加。
-    await Future.delayed(const Duration(milliseconds: 1200));
     if (mounted) _showOnboarding();
   }
 
@@ -7740,7 +7745,11 @@ class _UploaderPageState extends State<_UploaderPage> {
     final on = !_following;
     setState(() => _following = on);
     final d = await PlatformService.follow(widget.uploader, on);
-    if (d == null && mounted) setState(() => _following = !on);
+    // 仅 ok:true 视为成功，否则回滚乐观状态。
+    final ok = d != null && d['ok'] == true;
+    if (mounted && !ok) {
+      setState(() => _following = !on);
+    }
   }
 
   @override
