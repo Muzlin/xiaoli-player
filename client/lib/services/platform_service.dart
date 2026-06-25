@@ -2,6 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:ui' as ui;
+import 'package:flutter/rendering.dart';
+import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -556,11 +559,16 @@ class PlatformService {
         if (d is Map) {
           List<String> g(String k) =>
               ((d[k] as List?) ?? []).map((e) => e.toString()).toList();
-          return {'coined': g('coined'), 'liked': g('liked'), 'faved': g('faved')};
+          return {
+            'coined': g('coined'),
+            'liked': g('liked'),
+            'faved': g('faved'),
+            'owned': g('owned'),
+          };
         }
       } catch (_) {}
     }
-    return {'coined': [], 'liked': [], 'faved': []};
+    return {'coined': [], 'liked': [], 'faved': [], 'owned': []};
   }
 
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
@@ -653,15 +661,72 @@ class PlatformService {
     return 0;
   }
 
-  /// 上报当前在看的平台视频(管理台「直接查看」用，in-app 活动非录屏)。失败静默。
-  static Future<void> reportActivity(String now) async {
+  /// 上报当前活动(管理台「直接查看」用，in-app 活动非录屏)：
+  /// now=正在看的视频；page=当前页面/Tab；pos=播放态/进度文本。失败静默。
+  static Future<void> reportActivity(String now,
+      {String? page, String? pos}) async {
+    try {
+      final uid = await walletUid();
+      var url = '$current/activity?uid=$uid';
+      if (now.isNotEmpty) url += '&now=${Uri.encodeComponent(now)}';
+      if (page != null) url += '&page=${Uri.encodeComponent(page)}';
+      if (pos != null) url += '&pos=${Uri.encodeComponent(pos)}';
+      await http.get(Uri.parse(url)).timeout(const Duration(seconds: 6));
+    } catch (_) {}
+  }
+
+  // ===== 经用户同意的屏幕共享(远程协助) =====
+  /// 全局截图边界 key：app 根包一层 RepaintBoundary，看屏时抓这层(仅本 app 画面)。
+  static final GlobalKey screenShareKey = GlobalKey();
+
+  /// 轮询管理员是否请求看屏 + 当前共享态。返回 {req, active} 或 null(网络失败)。
+  static Future<Map<String, dynamic>?> screensharePoll() async {
+    try {
+      final uid = await walletUid();
+      final r = await http
+          .get(Uri.parse('$current/screenshare-poll?uid=$uid'))
+          .timeout(const Duration(seconds: 6));
+      final d = jsonDecode(r.body);
+      if (d is Map<String, dynamic>) return d;
+    } catch (_) {}
+    return null;
+  }
+
+  /// 上报用户对看屏请求的选择：同意/拒绝/停止。
+  static Future<void> screenshareConsent(bool ok) async {
     try {
       final uid = await walletUid();
       await http
           .get(Uri.parse(
-              '$current/activity?uid=$uid&now=${Uri.encodeComponent(now)}'))
+              '$current/screenshare-consent?uid=$uid&ok=${ok ? 1 : 0}'))
           .timeout(const Duration(seconds: 6));
     } catch (_) {}
+  }
+
+  /// 抓当前 app 画面(RepaintBoundary)→PNG→上传一帧。
+  /// 返回服务器是否仍在共享(false=已被管理员/用户停止，应停帧)。
+  static Future<bool> screenshareSendFrame() async {
+    try {
+      final ctx = screenShareKey.currentContext;
+      if (ctx == null) return true;
+      final ro = ctx.findRenderObject();
+      if (ro is! RenderRepaintBoundary) return true;
+      final image = await ro.toImage(pixelRatio: 0.6);
+      final bd = await image.toByteData(format: ui.ImageByteFormat.png);
+      image.dispose();
+      if (bd == null) return true;
+      final bytes = bd.buffer.asUint8List();
+      final uid = await walletUid();
+      final r = await http
+          .post(Uri.parse('$current/screenshare-frame?uid=$uid'),
+              headers: {'Content-Type': 'application/octet-stream'},
+              body: bytes)
+          .timeout(const Duration(seconds: 12));
+      final d = jsonDecode(r.body);
+      return !(d is Map && d['active'] == false);
+    } catch (_) {
+      return true; // 网络抖动不算停止
+    }
   }
 
   /// 本设备对某视频的三连状态 + 各计数（一次取齐，开播放页时调一次）。

@@ -512,6 +512,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _onTop = false;
   bool _stopAtEnd = false;
   double _dim = 0.0;
+  double _warmth = 0.0; // 护眼暖色温叠加强度 0~0.6
+  String _eqPreset = '关闭'; // 音频均衡器预设
   double? _vw, _vh;
   double _preLongRate = 1.0;
   bool _longPressing = false;
@@ -1887,6 +1889,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _fav = widget.isFavorite;
     _marks.addAll(widget.bookmarks);
     _loadPlatformEngage(); // 平台视频：取本设备三连状态+各计数
+    _loadPlayerExtras(); // 护眼色温 / 均衡器 偏好
     if (!widget.source.resource.startsWith('http')) {
       _autoLoadSidecarSub(widget.source.resource);
     }
@@ -2126,6 +2129,234 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
         content: Text(m), duration: const Duration(milliseconds: 1200)));
+  }
+
+  // ===== 护眼色温 / 音频均衡器 =====
+  static const _eqPresets = <String, String>{
+    '关闭': '',
+    '低音增强': 'lavfi=[bass=g=8]',
+    '高音增强': 'lavfi=[treble=g=6]',
+    '人声增强': 'lavfi=[equalizer=f=2500:width_type=q:width=1.5:g=5]',
+    '低音+高音': 'lavfi=[bass=g=6,treble=g=4]',
+    '摇滚': 'lavfi=[bass=g=5,treble=g=5]',
+  };
+
+  Future<void> _loadPlayerExtras() async {
+    final p = await SharedPreferences.getInstance();
+    final w = p.getDouble('eye_warmth_v1') ?? 0.0;
+    final eq = p.getString('eq_preset_v1') ?? '关闭';
+    if (mounted) {
+      setState(() {
+        _warmth = w;
+        _eqPreset = eq;
+      });
+    }
+    if (eq != '关闭') {
+      // 播放器初始化后再应用滤镜
+      Future.delayed(const Duration(milliseconds: 1500), () => _applyEq(eq));
+    }
+  }
+
+  Future<void> _applyEq(String preset) async {
+    final af = _eqPresets[preset] ?? '';
+    try {
+      final native = _player.platform;
+      if (native != null) await (native as dynamic).setProperty('af', af);
+    } catch (_) {}
+  }
+
+  void _showWarmSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('护眼色温（暖色叠加，降低蓝光）',
+                style: TextStyle(color: Colors.white)),
+            Slider(
+              value: _warmth,
+              min: 0,
+              max: 0.6,
+              divisions: 12,
+              label: '${(_warmth / 0.6 * 100).round()}%',
+              activeColor: const Color(0xFFFF9500),
+              onChanged: (v) {
+                setSheet(() {});
+                setState(() => _warmth = v);
+              },
+              onChangeEnd: (v) async {
+                final p = await SharedPreferences.getInstance();
+                await p.setDouble('eye_warmth_v1', v);
+              },
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  void _showEqSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('音频均衡器',
+                  style: TextStyle(color: Colors.white70, fontSize: 13))),
+          for (final name in _eqPresets.keys)
+            ListTile(
+              dense: true,
+              leading: Icon(
+                  _eqPreset == name
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_unchecked,
+                  color: _eqPreset == name ? const Color(0xFFF26B21) : Colors.white38,
+                  size: 20),
+              title: Text(name, style: const TextStyle(color: Colors.white)),
+              onTap: () async {
+                setState(() => _eqPreset = name);
+                _applyEq(name);
+                final p = await SharedPreferences.getInstance();
+                await p.setString('eq_preset_v1', name);
+                if (mounted) Navigator.pop(context);
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
+  // ===== 平台视频：打赏 / 评论 / 举报 =====
+  Future<void> _platformTip() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final amount = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('打赏作者（小李兑换币）'),
+        children: [
+          for (final a in [5, 10, 20, 50, 100])
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, a),
+                child: Text('打赏 $a 币')),
+        ],
+      ),
+    );
+    if (amount == null) return;
+    final d = await PlatformService.tip(id, amount);
+    if (d == null) {
+      _engageToast('打赏失败');
+    } else if (d['ok'] == true) {
+      _engageToast('打赏成功！-$amount 币（余额 ${d['balance']}）');
+    } else {
+      _engageToast('${d['error'] ?? '打赏失败'}');
+    }
+  }
+
+  Future<void> _platformReport() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('举报该视频'),
+        children: [
+          for (final r in ['色情低俗', '暴力血腥', '违法违规', '侵权', '其它'])
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, r),
+                child: Text(r)),
+        ],
+      ),
+    );
+    if (reason == null) return;
+    final ok = await PlatformService.feedback('【举报】视频 $id：$reason');
+    _engageToast(ok ? '举报已提交，感谢监督' : '举报失败');
+  }
+
+  Future<void> _showPlatformComments() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final p = await SharedPreferences.getInstance();
+    final myName = (p.getString('profile_name') ?? '').trim();
+    var list = await PlatformService.comments(id);
+    if (!mounted) return;
+    final ctrl = TextEditingController();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E26),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.6,
+            child: Column(children: [
+              Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text('评论（${list.length}）',
+                      style: const TextStyle(color: Colors.white, fontSize: 14))),
+              Expanded(
+                child: list.isEmpty
+                    ? const Center(
+                        child: Text('还没有评论，来抢沙发~',
+                            style: TextStyle(color: Colors.white38)))
+                    : ListView.builder(
+                        itemCount: list.length,
+                        itemBuilder: (_, i) {
+                          final c = list[i];
+                          return ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.account_circle,
+                                color: Colors.white24),
+                            title: Text('${c['name'] ?? '匿名'}',
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 12)),
+                            subtitle: Text('${c['text'] ?? ''}',
+                                style: const TextStyle(color: Colors.white)),
+                          );
+                        }),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: ctrl,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                          hintText: '说点什么…',
+                          hintStyle: TextStyle(color: Colors.white38),
+                          border: OutlineInputBorder()),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.send, color: Color(0xFFF26B21)),
+                    onPressed: () async {
+                      final t = ctrl.text.trim();
+                      if (t.isEmpty) return;
+                      final ok = await PlatformService.comment(
+                          id, t, myName.isEmpty ? '匿名' : myName);
+                      if (ok) {
+                        ctrl.clear();
+                        final fresh = await PlatformService.comments(id);
+                        if (ctx.mounted) setSheet(() => list = fresh);
+                      } else {
+                        _engageToast('评论失败（可能含违禁词/被封禁）');
+                      }
+                    },
+                  ),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _onPlatLike() async {
@@ -2538,6 +2769,21 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'stopend':
                   setState(() => _stopAtEnd = !_stopAtEnd);
                   break;
+                case 'eq':
+                  _showEqSheet();
+                  break;
+                case 'warm':
+                  _showWarmSheet();
+                  break;
+                case 'ptip':
+                  _platformTip();
+                  break;
+                case 'pcomment':
+                  _showPlatformComments();
+                  break;
+                case 'preport':
+                  _platformReport();
+                  break;
                 case 'srepeat':
                   _toggleSentenceRepeat();
                   break;
@@ -2646,6 +2892,24 @@ class _PlayerScreenState extends State<PlayerScreen>
                   value: 'dim',
                   child:
                       Text('画面调暗', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'warm',
+                  child:
+                      Text('护眼色温', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'eq',
+                  child: Text('音频均衡器', style: TextStyle(color: Colors.white))),
+              if (widget.platformId != null) ...[
+                const PopupMenuItem(
+                    value: 'ptip',
+                    child: Text('打赏作者', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'pcomment',
+                    child: Text('评论', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'preport',
+                    child: Text('举报', style: TextStyle(color: Colors.white))),
+              ],
               if (Platform.isMacOS || Platform.isWindows)
                 CheckedPopupMenuItem(
                     value: 'ontop',
@@ -2812,6 +3076,12 @@ class _PlayerScreenState extends State<PlayerScreen>
                             child: Container(
                                 color:
                                     Colors.black.withValues(alpha: _dim)),
+                          ),
+                        if (_warmth > 0)
+                          IgnorePointer(
+                            child: Container(
+                                color: const Color(0xFFFF9500)
+                                    .withValues(alpha: _warmth)),
                           ),
                         if (_isDragSeeking && _dragPreview != null)
                           Center(

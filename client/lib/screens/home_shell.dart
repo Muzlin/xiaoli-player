@@ -17,9 +17,11 @@ import '../services/transcribe_service.dart';
 import '../services/platform_service.dart';
 import '../services/update_service.dart';
 import '../services/download_manager.dart';
+import '../services/coin_ledger.dart';
 import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
+import 'store_page.dart';
 import 'stats_screen.dart';
 
 /// 一首曲目：本地文件、内置热门、或 B站联网搜索结果。
@@ -197,6 +199,10 @@ class _HomeShellState extends State<HomeShell> {
   bool _fadeOut = false; // 结束淡出
   Timer? _urlTimer; // 定时重读本机平台地址
   Timer? _banTimer; // 每5秒查封号状态(封/解封即时生效)
+  Timer? _shareFrameTimer; // 屏幕共享传帧
+  bool _sharing = false; // 正在共享屏幕给管理员
+  bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
+  OverlayEntry? _shareBanner; // 顶部「正在共享屏幕」横幅
   bool _publicHealthy = true;
   bool _useLan = false;
   final UpdateService _update = UpdateService();
@@ -297,7 +303,135 @@ class _HomeShellState extends State<HomeShell> {
     _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _checkBan();
       _checkGift();
+      _checkScreenshare(); // B: 经同意的屏幕共享
+      _reportActivity(); // A: 上报当前页面/播放态
     });
+  }
+
+  // A: 上报当前页面 + 播放态(透明，用户 App 主动报；管理台「直接查看」)。
+  void _reportActivity() {
+    if (_banned) return;
+    const names = {0: '媒体库', 1: '收藏', 2: '视频', 3: '设置', 4: '历史'};
+    final page = PlayerHolder.i.screenOpen.value
+        ? '播放器'
+        : (names[_navIndex] ?? '');
+    String? pos;
+    if (PlayerHolder.i.current.value != null) {
+      final playing = PlayerHolder.i.playing.value;
+      String fmt(Duration x) =>
+          '${x.inMinutes.toString().padLeft(2, '0')}:${(x.inSeconds % 60).toString().padLeft(2, '0')}';
+      final p = PlayerHolder.i.player.state.position;
+      final d = PlayerHolder.i.player.state.duration;
+      pos = '${playing ? '▶播放中' : '⏸暂停'} ${fmt(p)}/${fmt(d)}';
+    }
+    PlatformService.reportActivity('', page: page, pos: pos);
+  }
+
+  // B: 轮询管理员看屏请求；经用户同意才共享，全程顶部红色横幅可随时停止。
+  Future<void> _checkScreenshare() async {
+    if (_banned) return;
+    final d = await PlatformService.screensharePoll();
+    if (d == null) return;
+    final req = d['req'] == true, active = d['active'] == true;
+    if (!req) {
+      if (_sharing) _stopSharing(); // 管理员停止了
+      return;
+    }
+    if (active && !_sharing) {
+      _startSharing(); // 已同意，开始传帧
+    } else if (req && !active && !_sharing && !_shareDialogOpen) {
+      _askScreenshareConsent(); // 弹同意框
+    }
+  }
+
+  Future<void> _askScreenshareConsent() async {
+    if (!mounted) return;
+    _shareDialogOpen = true;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        title: const Text('管理员请求查看你的屏幕'),
+        content: const Text('管理员申请实时查看你当前的 App 画面（仅本 App 界面，'
+            '不含其它软件、桌面或摄像头）。\n同意后顶部会一直显示「正在共享屏幕」，'
+            '你可随时点它停止。是否同意？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false), child: const Text('拒绝')),
+          FilledButton(
+              onPressed: () => Navigator.pop(c, true), child: const Text('同意')),
+        ],
+      ),
+    );
+    _shareDialogOpen = false;
+    if (ok == true) {
+      await PlatformService.screenshareConsent(true);
+      _startSharing();
+    } else {
+      await PlatformService.screenshareConsent(false);
+    }
+  }
+
+  void _startSharing() {
+    if (_sharing) return;
+    _sharing = true;
+    _showShareBanner();
+    _shareFrameTimer?.cancel();
+    _shareFrameTimer =
+        Timer.periodic(const Duration(milliseconds: 1500), (_) async {
+      final cont = await PlatformService.screenshareSendFrame();
+      if (!cont) _stopSharing();
+    });
+  }
+
+  void _stopSharing() {
+    if (!_sharing && _shareFrameTimer == null && _shareBanner == null) return;
+    _sharing = false;
+    _shareFrameTimer?.cancel();
+    _shareFrameTimer = null;
+    _removeShareBanner();
+    PlatformService.screenshareConsent(false); // 通知服务器停止
+  }
+
+  void _showShareBanner() {
+    if (_shareBanner != null || !mounted) return;
+    final overlay = Navigator.of(context, rootNavigator: true).overlay;
+    if (overlay == null) return;
+    _shareBanner = OverlayEntry(
+      builder: (c) => Positioned(
+        top: MediaQuery.of(c).padding.top,
+        left: 0,
+        right: 0,
+        child: Material(
+          color: Colors.transparent,
+          child: GestureDetector(
+            onTap: _stopSharing,
+            child: Container(
+              color: const Color(0xFFD32F2F),
+              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.screen_share, color: Colors.white, size: 16),
+                  SizedBox(width: 8),
+                  Text('正在共享屏幕给管理员 · 点此停止',
+                      style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600)),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    overlay.insert(_shareBanner!);
+  }
+
+  void _removeShareBanner() {
+    _shareBanner?.remove();
+    _shareBanner = null;
   }
 
   // 查后台空投的红包；有就弹「管理员给你发了一个红包」。
@@ -3652,6 +3786,20 @@ class _HomeShellState extends State<HomeShell> {
     _history.insert(0, t);
     if (_history.length > 40) _history.removeRange(40, _history.length);
     _savePlayHistory();
+    _cloudSyncHistory(); // v2.39.22 云端历史同步(尽力，失败忽略)
+  }
+
+  void _cloudSyncHistory() {
+    final items = _history
+        .take(40)
+        .map((t) => {
+              'name': t.name,
+              if (t.url != null) 'url': t.url,
+              if (t.bvid != null) 'bvid': t.bvid,
+              'tag': t.tag,
+            })
+        .toList();
+    PlatformService.pushHistory(items); // fire-and-forget
   }
 
   Future<void> _openUrl() async {
@@ -5983,6 +6131,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   List<Map<String, dynamic>> _rich = []; // 富豪榜
   String _customTitle = ''; // 自定义称号(本地存)
   String _notice = ''; // 后台公告
+  List<String> _following = []; // 已关注的UP主(名字)
 
   @override
   void initState() {
@@ -6001,6 +6150,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     final tasks = await PlatformService.getTasks();
     final rich = await PlatformService.richlist();
     final notice = await PlatformService.getNotice();
+    final following = await PlatformService.following();
     if (!mounted) return;
     _byId.clear();
     for (final v in all) {
@@ -6013,8 +6163,363 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
       _tasks = tasks;
       _rich = rich;
       _notice = notice;
+      _following = following;
       _loading = false;
     });
+  }
+
+  // ===== v2.39.22 个人中心新功能：成就/币流水/商城/周榜/关注动态/通知/歌单广场/云端历史 =====
+
+  Future<void> _toggleFollow(String up) async {
+    if (up.isEmpty) return;
+    final on = !_following.contains(up);
+    setState(() {
+      if (on) {
+        _following = [..._following, up];
+      } else {
+        _following = _following.where((x) => x != up).toList();
+      }
+    });
+    final d = await PlatformService.follow(up, on);
+    if (d == null) {
+      _toast('操作失败，请检查网络');
+      // 回滚
+      setState(() {
+        if (on) {
+          _following = _following.where((x) => x != up).toList();
+        } else {
+          _following = [..._following, up];
+        }
+      });
+      return;
+    }
+    _toast(on ? '已关注 $up' : '已取关 $up');
+  }
+
+  Future<void> _showAchievements() async {
+    final list = await PlatformService.achievements();
+    if (!mounted) return;
+    final got = list.where((a) => a['unlocked'] == true).length;
+    _sheet(
+      title: '我的成就（$got/${list.length}）',
+      child: list.isEmpty
+          ? const _SheetEmpty('暂无成就数据')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final a in list)
+                  ListTile(
+                    leading: Icon(
+                        a['unlocked'] == true
+                            ? Icons.emoji_events
+                            : Icons.lock_outline,
+                        color: a['unlocked'] == true
+                            ? const Color(0xFFF26B21)
+                            : Colors.black26),
+                    title: Text('${a['name'] ?? ''}'),
+                    subtitle: a['desc'] != null
+                        ? Text('${a['desc']}',
+                            style: const TextStyle(fontSize: 12))
+                        : null,
+                    trailing: a['unlocked'] == true
+                        ? const Text('已解锁',
+                            style: TextStyle(
+                                color: Color(0xFFF26B21),
+                                fontWeight: FontWeight.w600))
+                        : const Text('未解锁',
+                            style: TextStyle(color: Colors.black38)),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showLedger() async {
+    final entries = await CoinLedger.entries();
+    if (!mounted) return;
+    _sheet(
+      title: '兑换币流水（近 ${entries.length} 笔）',
+      child: entries.isEmpty
+          ? const _SheetEmpty('还没有收支记录')
+          : ListView.builder(
+              shrinkWrap: true,
+              itemCount: entries.length,
+              itemBuilder: (_, i) {
+                final e = entries[i];
+                final delta = (e['delta'] as num?)?.toInt() ?? 0;
+                final ts = (e['ts'] as num?)?.toInt() ?? 0;
+                final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+                final when =
+                    '${dt.month}-${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+                return ListTile(
+                  dense: true,
+                  title: Text('${e['reason'] ?? ''}'),
+                  subtitle: Text(when,
+                      style: const TextStyle(fontSize: 11)),
+                  trailing: Text('${delta > 0 ? '+' : ''}$delta',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: delta > 0
+                              ? const Color(0xFF2E9E5B)
+                              : Colors.redAccent)),
+                );
+              },
+            ),
+    );
+  }
+
+  Future<void> _showWeekly() async {
+    final list = await PlatformService.rankWeekly(by: 'coins');
+    if (!mounted) return;
+    _sheet(
+      title: '本周热门榜 🔥',
+      child: list.isEmpty
+          ? const _SheetEmpty('本周还没有数据')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (var i = 0; i < list.length; i++)
+                  ListTile(
+                    leading: CircleAvatar(
+                      radius: 13,
+                      backgroundColor: i < 3
+                          ? const Color(0xFFF26B21)
+                          : Colors.black12,
+                      child: Text('${i + 1}',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: i < 3 ? Colors.white : Colors.black54)),
+                    ),
+                    title: Text(list[i].title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                        '🪙 ${list[i].coins}  👍 ${list[i].likes}  ▶ ${list[i].views}'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onPlay(list[i].id, list[i].title);
+                    },
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showFeed() async {
+    final list = await PlatformService.feed();
+    if (!mounted) return;
+    _sheet(
+      title: '关注动态（${_following.length} 位UP主）',
+      child: list.isEmpty
+          ? const _SheetEmpty('还没动态~ 在热门榜里点 + 关注UP主，新作品就出现在这里')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final v in list)
+                  ListTile(
+                    leading: const Icon(Icons.play_circle_outline),
+                    title: Text(v.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text('${v.uploader} · ▶ ${v.views}  🪙 ${v.coins}'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onPlay(v.id, v.title);
+                    },
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showNotifs() async {
+    final list = await PlatformService.notifs(clear: true);
+    if (!mounted) return;
+    String label(String k) => const {
+          'follow': '关注了你',
+          'tip': '打赏了你',
+          'gift': '送你红包',
+          'coin': '给你投币',
+          'comment': '评论了你',
+        }[k] ??
+        k;
+    _sheet(
+      title: '通知中心',
+      child: list.isEmpty
+          ? const _SheetEmpty('暂无新通知')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final n in list)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.notifications_active_outlined,
+                        color: Color(0xFFF26B21)),
+                    title: Text(label('${n['kind'] ?? ''}')),
+                    subtitle: n['extra'] != null
+                        ? Text('${n['extra']}',
+                            style: const TextStyle(fontSize: 12))
+                        : null,
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showPlaylistSquare() async {
+    final list = await PlatformService.sharedPlaylists();
+    if (!mounted) return;
+    _sheet(
+      title: '歌单广场',
+      child: list.isEmpty
+          ? const _SheetEmpty('还没有人发布歌单')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final pl in list)
+                  ListTile(
+                    leading: const Icon(Icons.queue_music,
+                        color: Color(0xFFF26B21)),
+                    title: Text('${pl['title'] ?? '未命名歌单'}'),
+                    subtitle: Text('分享码：${pl['pid'] ?? ''}',
+                        style: const TextStyle(fontSize: 12)),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.copy, size: 18),
+                      tooltip: '复制分享码',
+                      onPressed: () {
+                        Clipboard.setData(
+                            ClipboardData(text: '${pl['pid'] ?? ''}'));
+                        _toast('已复制分享码，在「导入歌单」里粘贴即可');
+                      },
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showCloudHistory() async {
+    final items = await PlatformService.pullHistory();
+    if (!mounted) return;
+    _sheet(
+      title: '云端历史（跨设备同步）',
+      child: items.isEmpty
+          ? const _SheetEmpty('云端还没有历史记录')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final h in items)
+                  Builder(builder: (_) {
+                    final url = '${h['url'] ?? ''}';
+                    final isPlat = url.contains('/video/');
+                    return ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.history),
+                      title: Text('${h['name'] ?? ''}',
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: isPlat
+                          ? const Icon(Icons.play_arrow, size: 18)
+                          : null,
+                      onTap: isPlat
+                          ? () {
+                              Navigator.pop(context);
+                              widget.onPlay(
+                                  url.split('/').last, '${h['name'] ?? ''}');
+                            }
+                          : null,
+                    );
+                  }),
+              ],
+            ),
+    );
+  }
+
+  // 功能入口小格子。
+  Widget _entry(
+      ColorScheme cs, IconData icon, String label, VoidCallback onTap) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+                color: cs.primary.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12)),
+            child: Icon(icon, color: cs.primary, size: 22),
+          ),
+          const SizedBox(height: 5),
+          Text(label,
+              style: const TextStyle(fontSize: 11),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
+        ],
+      ),
+    );
+  }
+
+  // 直接给管理员发消息（进管理台的「用户反馈」面板）。
+  Future<void> _contactAdmin() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('给管理员发消息'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 4,
+          maxLength: 500,
+          decoration: const InputDecoration(
+              hintText: '反馈问题、建议，或联系客服…',
+              border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('发送')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = ctrl.text.trim();
+    if (msg.isEmpty) return;
+    final sent = await PlatformService.feedback('【留言】$msg');
+    _toast(sent ? '已发送给管理员，感谢反馈~' : '发送失败，请检查网络');
+  }
+
+  // 通用底部弹窗骨架。
+  void _sheet({required String title, required Widget child}) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.4,
+        builder: (_, sc) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 10),
+              child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(title,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w600))),
+            ),
+            Expanded(
+                child: PrimaryScrollController(
+                    controller: sc, child: child)),
+          ],
+        ),
+      ),
+    );
   }
 
   // 花兑换币设置专属称号（覆盖自动称号）。
@@ -6353,6 +6858,34 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                     ),
                   ),
                 ),
+                const SizedBox(height: 14),
+                // v2.39.22 功能入口：成就/币流水/商城/周榜/关注/通知/歌单/云端历史
+                GridView.count(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 4,
+                  crossAxisSpacing: 4,
+                  childAspectRatio: 0.92,
+                  children: [
+                    _entry(cs, Icons.emoji_events, '成就', _showAchievements),
+                    _entry(cs, Icons.receipt_long, '币流水', _showLedger),
+                    _entry(cs, Icons.storefront, '兑换商城', () async {
+                      await Navigator.of(context).push(MaterialPageRoute<void>(
+                          builder: (_) => const StorePage()));
+                      _load();
+                    }),
+                    _entry(cs, Icons.calendar_view_week, '周榜', _showWeekly),
+                    _entry(cs, Icons.dynamic_feed, '关注动态', _showFeed),
+                    _entry(cs, Icons.notifications, '通知', _showNotifs),
+                    _entry(cs, Icons.queue_music, '歌单广场',
+                        _showPlaylistSquare),
+                    _entry(cs, Icons.cloud_sync, '云端历史',
+                        _showCloudHistory),
+                    _entry(cs, Icons.support_agent, '联系管理员',
+                        _contactAdmin),
+                  ],
+                ),
                 if (_notice.isNotEmpty) ...[
                   const SizedBox(height: 12),
                   Container(
@@ -6429,7 +6962,23 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                       title: Text(v.title,
                           maxLines: 1, overflow: TextOverflow.ellipsis),
                       subtitle: Text(
-                          '▶ ${v.views}   🪙 ${v.coins}   👍 ${v.likes}   ⭐ ${v.favs}'),
+                          '${v.uploader.isNotEmpty ? '${v.uploader} · ' : ''}▶ ${v.views}   🪙 ${v.coins}   👍 ${v.likes}   ⭐ ${v.favs}'),
+                      trailing: v.uploader.isNotEmpty
+                          ? IconButton(
+                              tooltip: _following.contains(v.uploader)
+                                  ? '取关'
+                                  : '关注UP主',
+                              icon: Icon(
+                                  _following.contains(v.uploader)
+                                      ? Icons.person_remove
+                                      : Icons.person_add_alt_1,
+                                  size: 20,
+                                  color: _following.contains(v.uploader)
+                                      ? Colors.black38
+                                      : cs.primary),
+                              onPressed: () => _toggleFollow(v.uploader),
+                            )
+                          : null,
                       onTap: () => widget.onPlay(v.id, v.title),
                     ),
                 const SizedBox(height: 20),
@@ -6437,6 +6986,20 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
             ),
     );
   }
+}
+
+/// 弹窗空状态占位。
+class _SheetEmpty extends StatelessWidget {
+  final String text;
+  const _SheetEmpty(this.text);
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.all(40),
+        child: Center(
+            child: Text(text,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.black38))),
+      );
 }
 
 /// 创作中心：上传作品、我的视频、数据统计、平台播放榜。
