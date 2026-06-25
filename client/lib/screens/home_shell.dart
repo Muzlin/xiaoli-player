@@ -654,6 +654,8 @@ class _HomeShellState extends State<HomeShell> {
     _suggestDebounce?.cancel();
     _urlTimer?.cancel();
     _banTimer?.cancel();
+    _shareFrameTimer?.cancel();
+    _shareBanner?.remove();
     _sleepTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
