@@ -209,8 +209,8 @@ class _HomeShellState extends State<HomeShell> {
   Timer? _shareFrameTimer; // 屏幕共享传帧
   bool _sharing = false; // 正在共享屏幕给管理员
   bool _shareApproved = false; // 本机用户亲自点过「同意」(服务器 active 被伪造也不自动开始)
-  int _shareInterval = 600; // #1 帧率(ms，管理员可调；越小越像视频)
-  double _shareQuality = 0.5; // #2 画质(pixelRatio)
+  int _shareInterval = 700; // #1 帧率(ms，管理员可调；越小越像视频)
+  double _shareQuality = 0.4; // #2 画质(pixelRatio)
   bool _frameInFlight = false; // 防抓帧重叠堆积
   bool _sharePaused = false; // #3 管理员暂停录制
   bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)

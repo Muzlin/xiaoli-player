@@ -895,7 +895,7 @@ class PlatformService {
   /// 抓当前 app 画面(RepaintBoundary)→PNG→上传一帧。
   /// 返回服务器是否仍在共享(false=已被管理员/用户停止，应停帧)。
   static Future<bool> screenshareSendFrame(
-      {double pixelRatio = 0.5, int maxSide = 800, int quality = 50}) async {
+      {double pixelRatio = 0.4, int maxSide = 560, int quality = 45}) async {
     try {
       final ctx = screenShareKey.currentContext;
       if (ctx == null) return true;
