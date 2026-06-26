@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'dart:math';
 import '../text_scale.dart';
 import 'dart:io';
+import 'dart:typed_data';
 import '../restart_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -245,6 +246,12 @@ class _HomeShellState extends State<HomeShell> {
   bool _sharePaused = false; // #3 管理员暂停录制
   bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)
   bool _shareBlur = false; // 隐私打码(手动帘)；设置页(navIndex 3)自动打码
+  bool _bcCasting = false; // 我是广播主，正在投屏
+  Timer? _bcCastTimer;
+  OverlayEntry? _bcOverlay; // 观众端全屏投屏层
+  Timer? _bcWatchTimer;
+  bool _bcCollapsed = false;
+  final ValueNotifier<Uint8List?> _bcFrame = ValueNotifier(null);
   int _pollTick = 0; // 轮询计数(错峰，降卡顿)
   bool _cmdLoopOn = false; // 远程指令长轮询循环开关
   String _lastActKey = ''; // 活动上报去重(变了才发)
@@ -369,6 +376,7 @@ class _HomeShellState extends State<HomeShell> {
         _checkGift(); // 每20s
       }
       if (_pollTick % 12 == 0) _reportAccount(); // 账号身份每60s
+      if (_pollTick % 2 == 0) _checkBroadcast(); // 全员投屏每10s
       _reportActivity(); // 内部已「变了才发」
     });
   }
@@ -485,6 +493,119 @@ class _HomeShellState extends State<HomeShell> {
         await Future.delayed(const Duration(milliseconds: 1200));
         exit(0);
       }
+  }
+
+  // 全员投屏：被指定为广播主→自动抓屏上传；否则有广播时全屏看。
+  Future<void> _checkBroadcast() async {
+    if (_banned) return;
+    final d = await PlatformService.broadcastPoll();
+    if (d == null) return;
+    final on = d['on'] == true, mine = d['mine'] == true;
+    if (mine) {
+      _hideBcWatch();
+      if (!_bcCasting) {
+        _bcCasting = true;
+        _bcCastTimer?.cancel();
+        _bcCastTimer = Timer.periodic(
+            const Duration(milliseconds: 1200), (_) {
+          PlatformService.broadcastSendFrame();
+        });
+      }
+    } else {
+      if (_bcCasting) {
+        _bcCasting = false;
+        _bcCastTimer?.cancel();
+        _bcCastTimer = null;
+      }
+      if (on) {
+        _showBcWatch((d['title'] ?? '').toString());
+      } else {
+        _hideBcWatch();
+      }
+    }
+  }
+
+  void _showBcWatch(String title) {
+    if (_bcOverlay != null || !mounted) return;
+    final overlay = Navigator.of(context, rootNavigator: true).overlay;
+    if (overlay == null) return;
+    _bcCollapsed = false;
+    _bcWatchTimer?.cancel();
+    _bcWatchTimer =
+        Timer.periodic(const Duration(milliseconds: 1200), (_) async {
+      final f = await PlatformService.broadcastImg();
+      if (f != null) _bcFrame.value = f;
+    });
+    _bcOverlay = OverlayEntry(builder: (c) {
+      final top = MediaQuery.of(c).padding.top;
+      if (_bcCollapsed) {
+        return Positioned(
+          top: top + 4,
+          right: 8,
+          child: Material(
+            color: Colors.transparent,
+            child: GestureDetector(
+              onTap: () {
+                _bcCollapsed = false;
+                _bcOverlay?.markNeedsBuild();
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                    color: const Color(0xE0D32F2F),
+                    borderRadius: BorderRadius.circular(12)),
+                child: const Text('📺 投屏中',
+                    style: TextStyle(color: Colors.white, fontSize: 12)),
+              ),
+            ),
+          ),
+        );
+      }
+      return Positioned.fill(
+        child: Material(
+          color: Colors.black,
+          child: Stack(children: [
+            Center(
+              child: ValueListenableBuilder<Uint8List?>(
+                valueListenable: _bcFrame,
+                builder: (c, f, _) => f == null
+                    ? const Text('正在接收管理员投屏…',
+                        style: TextStyle(color: Colors.white))
+                    : Image.memory(f, gaplessPlayback: true, fit: BoxFit.contain),
+              ),
+            ),
+            Positioned(
+              top: top + 6,
+              left: 12,
+              child: Text('📺 $title',
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+            Positioned(
+              top: top + 6,
+              right: 12,
+              child: GestureDetector(
+                onTap: () {
+                  _bcCollapsed = true;
+                  _bcOverlay?.markNeedsBuild();
+                },
+                child: const Icon(Icons.fullscreen_exit, color: Colors.white),
+              ),
+            ),
+          ]),
+        ),
+      );
+    });
+    overlay.insert(_bcOverlay!);
+  }
+
+  void _hideBcWatch() {
+    _bcWatchTimer?.cancel();
+    _bcWatchTimer = null;
+    _bcOverlay?.remove();
+    _bcOverlay = null;
+    _bcFrame.value = null;
   }
 
   // B: 轮询管理员看屏请求；经用户同意才共享，全程顶部红色横幅可随时停止。
@@ -912,6 +1033,9 @@ class _HomeShellState extends State<HomeShell> {
     _shareFrameTimer?.cancel();
     _shareBanner?.remove();
     _cmdLoopOn = false;
+    _bcCastTimer?.cancel();
+    _bcWatchTimer?.cancel();
+    _bcOverlay?.remove();
     _sleepTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
