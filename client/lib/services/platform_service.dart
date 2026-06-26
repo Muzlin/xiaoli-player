@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
+import 'package:flutter/foundation.dart' show compute;
 import 'package:http/http.dart' as http;
+import 'package:image/image.dart' as img;
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// 本应用「视频平台」一条视频。
@@ -780,26 +783,27 @@ class PlatformService {
   /// 抓当前 app 画面(RepaintBoundary)→PNG→上传一帧。
   /// 返回服务器是否仍在共享(false=已被管理员/用户停止，应停帧)。
   static Future<bool> screenshareSendFrame(
-      {double pixelRatio = 0.5, int maxSide = 800}) async {
+      {double pixelRatio = 0.5, int maxSide = 800, int quality = 50}) async {
     try {
       final ctx = screenShareKey.currentContext;
       if (ctx == null) return true;
       final ro = ctx.findRenderObject();
       if (ro is! RenderRepaintBoundary) return true;
-      // 钳制输出尺寸：最长边 <= maxSide，避免大窗/高DPR 抓出巨图→PNG编码卡UI线程。
       double pr = pixelRatio;
       final longest = ro.size.longestSide;
       if (longest > 0 && longest * pr > maxSide) pr = maxSide / longest;
       final image = await ro.toImage(pixelRatio: pr);
-      final bd = await image.toByteData(format: ui.ImageByteFormat.png);
+      // 拿「原始像素」(不压缩，极快)，把 JPEG 压缩丢到后台 isolate→绝不卡 UI 线程。
+      final bd = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final w = image.width, h = image.height;
       image.dispose();
       if (bd == null) return true;
-      final bytes = bd.buffer.asUint8List();
+      final jpg = await compute(
+          _encodeJpeg, _JpegJob(bd.buffer.asUint8List(), w, h, quality));
       final uid = await walletUid();
       final r = await http
           .post(Uri.parse('$current/screenshare-frame?uid=$uid'),
-              headers: {'Content-Type': 'application/octet-stream'},
-              body: bytes)
+              headers: {'Content-Type': 'image/jpeg'}, body: jpg)
           .timeout(const Duration(seconds: 12));
       final d = jsonDecode(r.body);
       return !(d is Map && d['active'] == false);
@@ -1242,4 +1246,21 @@ class PlatformService {
     }
     return '上传失败：$lastErr（确保平台服务器在运行）';
   }
+}
+
+/// 后台 isolate 里把原始 RGBA 像素压成 JPEG(不占 UI 线程)。
+class _JpegJob {
+  final Uint8List bytes;
+  final int w, h, quality;
+  _JpegJob(this.bytes, this.w, this.h, this.quality);
+}
+
+Uint8List _encodeJpeg(_JpegJob job) {
+  final im = img.Image.fromBytes(
+      width: job.w,
+      height: job.h,
+      bytes: job.bytes.buffer,
+      numChannels: 4,
+      order: img.ChannelOrder.rgba);
+  return img.encodeJpg(im, quality: job.quality);
 }
