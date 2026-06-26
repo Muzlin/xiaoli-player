@@ -1093,6 +1093,17 @@ class PlatformService {
     } catch (_) {}
   }
 
+  /// 广播主(整个桌面)：上传一帧 JPEG 字节。
+  static Future<void> broadcastSendBytes(Uint8List bytes) async {
+    try {
+      final uid = await walletUid();
+      await http
+          .post(Uri.parse('$current/broadcast-frame?uid=$uid'),
+              headers: {'Content-Type': 'image/jpeg'}, body: bytes)
+          .timeout(const Duration(seconds: 12));
+    } catch (_) {}
+  }
+
   /// 观众：取最新广播帧。
   static Future<Uint8List?> broadcastImg() async {
     try {

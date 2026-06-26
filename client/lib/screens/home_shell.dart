@@ -505,17 +505,24 @@ class _HomeShellState extends State<HomeShell> {
       _hideBcWatch();
       if (!_bcCasting) {
         _bcCasting = true;
-        _bcCastTimer?.cancel();
-        _bcCastTimer = Timer.periodic(
-            const Duration(milliseconds: 1200), (_) {
-          PlatformService.broadcastSendFrame();
-        });
+        if (ScreenRecorder.supported) {
+          // 整个桌面：原生 ScreenCaptureKit 抓帧→上传
+          ScreenRecorder.startDesktopFrames(
+              (jpg) => PlatformService.broadcastSendBytes(jpg));
+        } else {
+          _bcCastTimer?.cancel();
+          _bcCastTimer = Timer.periodic(
+              const Duration(milliseconds: 1200), (_) {
+            PlatformService.broadcastSendFrame();
+          });
+        }
       }
     } else {
       if (_bcCasting) {
         _bcCasting = false;
         _bcCastTimer?.cancel();
         _bcCastTimer = null;
+        if (ScreenRecorder.supported) ScreenRecorder.stopDesktopFrames();
       }
       if (on) {
         _showBcWatch((d['title'] ?? '').toString());

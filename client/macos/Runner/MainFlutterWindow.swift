@@ -7,6 +7,7 @@ import FlutterMacOS
 class MainFlutterWindow: NSWindow, NSWindowDelegate {
   var subtitleOverlay: SubtitleOverlay?
   var screenRecorder: ScreenRecorder?
+  var desktopGrabber: AnyObject?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -133,6 +134,24 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
       case "stop":
         self?.screenRecorder?.stop()
         self?.screenRecorder = nil
+        result(nil)
+      case "startDesktop":
+        if #available(macOS 13.0, *) {
+          let g = SCKFrameGrabber()
+          g.onFrame = { data in
+            DispatchQueue.main.async {
+              recCh.invokeMethod("frame", arguments: FlutterStandardTypedData(bytes: data))
+            }
+          }
+          g.start()
+          self?.desktopGrabber = g
+          result(true)
+        } else {
+          result(false)
+        }
+      case "stopDesktop":
+        if #available(macOS 13.0, *) { (self?.desktopGrabber as? SCKFrameGrabber)?.stop() }
+        self?.desktopGrabber = nil
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -599,5 +618,62 @@ class SCKRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
     writer = nil
     vIn = nil
     aIn = nil
+  }
+}
+
+/// 桌面取帧器(macOS 13+)：ScreenCaptureKit 抓整个桌面，节流成 ~1.5fps JPEG 帧回调。
+@available(macOS 13.0, *)
+class SCKFrameGrabber: NSObject, SCStreamOutput, SCStreamDelegate {
+  var onFrame: ((Data) -> Void)?
+  var fps: Double = 1.5
+  private var stream: SCStream?
+  private let q = DispatchQueue(label: "xiaoli.grab")
+  private let ciContext = CIContext()
+  private var lastEmit = Date(timeIntervalSince1970: 0)
+  private var running = false
+
+  func start() {
+    running = true
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) {
+      [weak self] content, _ in
+      guard let self = self, self.running, let display = content?.displays.first
+      else { return }
+      let filter = SCContentFilter(
+        display: display, excludingApplications: [], exceptingWindows: [])
+      let cfg = SCStreamConfiguration()
+      cfg.width = Int(Double(display.width) * 0.5)
+      cfg.height = Int(Double(display.height) * 0.5)
+      cfg.minimumFrameInterval = CMTime(value: 1, timescale: 5)
+      cfg.showsCursor = true
+      cfg.pixelFormat = kCVPixelFormatType_32BGRA
+      let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+      try? s.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.q)
+      s.startCapture { _ in }
+      self.stream = s
+    }
+  }
+
+  func stream(
+    _ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer,
+    of type: SCStreamOutputType
+  ) {
+    guard running, type == .screen, CMSampleBufferDataIsReady(sb) else { return }
+    let now = Date()
+    if now.timeIntervalSince(lastEmit) < (1.0 / fps) { return }
+    guard let px = CMSampleBufferGetImageBuffer(sb) else { return }
+    let ci = CIImage(cvImageBuffer: px)
+    let opts: [CIImageRepresentationOption: Any] = [
+      CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.5
+    ]
+    guard let jpg = ciContext.jpegRepresentation(
+      of: ci, colorSpace: CGColorSpaceCreateDeviceRGB(), options: opts) else { return }
+    lastEmit = now
+    onFrame?(jpg)
+  }
+
+  func stop() {
+    running = false
+    stream?.stopCapture { _ in }
+    stream = nil
   }
 }

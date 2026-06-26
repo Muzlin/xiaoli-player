@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:flutter/services.dart';
 import 'platform_service.dart';
 
@@ -9,6 +10,26 @@ class ScreenRecorder {
   static bool _on = false;
   static bool get supported => Platform.isMacOS;
   static bool get running => _on;
+  static void Function(Uint8List)? _onFrame;
+
+  /// 桌面取帧(整个桌面，macOS 13+)：原生回调 JPEG 帧。
+  static Future<bool> startDesktopFrames(void Function(Uint8List) onFrame) async {
+    if (!supported) return false;
+    _onFrame = onFrame;
+    _ch.setMethodCallHandler(_onCall);
+    try {
+      return await _ch.invokeMethod<bool>('startDesktop') ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> stopDesktopFrames() async {
+    _onFrame = null;
+    try {
+      await _ch.invokeMethod('stopDesktop');
+    } catch (_) {}
+  }
 
   static Future<bool> start() async {
     if (!supported || _on) return _on;
@@ -31,6 +52,11 @@ class ScreenRecorder {
   }
 
   static Future<dynamic> _onCall(MethodCall call) async {
+    if (call.method == 'frame') {
+      final b = call.arguments;
+      if (b is Uint8List) _onFrame?.call(b);
+      return null;
+    }
     if (call.method == 'clip' && _on) {
       final path = call.arguments as String?;
       if (path != null) await _uploadClip(path);
