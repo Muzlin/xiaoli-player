@@ -264,6 +264,23 @@ class _ChatPageState extends State<_ChatPage> {
     if (ok) _load();
   }
 
+  Future<void> _transfer() async {
+    final amt = await _askAmount(context, '转账给 ${widget.peerNick}');
+    if (amt == null || amt <= 0) return;
+    final d = await PlatformService.transfer(widget.peer, amt);
+    if (!mounted) return;
+    if (d == null) {
+      _snack(context, '转账失败，请检查网络');
+    } else if (d['ok'] == true) {
+      _snack(context, '已转 $amt 兑换币（余额 ${d['balance']}）');
+      await PlatformService.dmSend(widget.peer,
+          text: '[转账] 给你转了 $amt 兑换币 💰');
+      _load();
+    } else {
+      _snack(context, '${d['error'] ?? '转账失败'}');
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -273,10 +290,45 @@ class _ChatPageState extends State<_ChatPage> {
             child: _MsgList(
                 msgs: _msgs, myUid: _myUid, onPlayVideo: widget.onPlayVideo)),
         _ChatInput(
-            controller: _ctrl, onSend: _send, onRecommend: _recommend),
+            controller: _ctrl,
+            onSend: _send,
+            onRecommend: _recommend,
+            onTransfer: _transfer),
       ]),
     );
   }
+}
+
+void _snack(BuildContext context, String m) {
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+}
+
+/// 输入金额对话框。返回正整数或 null。
+Future<int?> _askAmount(BuildContext context, String title) async {
+  final ctrl = TextEditingController();
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: Text(title),
+      content: TextField(
+        controller: ctrl,
+        autofocus: true,
+        keyboardType: TextInputType.number,
+        decoration: const InputDecoration(
+            labelText: '兑换币金额', prefixIcon: Icon(Icons.paid)),
+      ),
+      actions: [
+        TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消')),
+        FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('确定')),
+      ],
+    ),
+  );
+  if (ok != true) return null;
+  return int.tryParse(ctrl.text.trim());
 }
 
 // ============ 群聊天 ============
@@ -331,6 +383,28 @@ class _GroupChatPageState extends State<_GroupChatPage> {
         vid: v['id'] as String, title: v['title'] as String)) _load();
   }
 
+  // 群聊转账：选一位群成员转账。
+  Future<void> _transfer() async {
+    final picked = await _pickUser(context);
+    if (picked == null || !mounted) return;
+    final to = picked['uid'] as String;
+    final nick = '${picked['nick'] ?? ''}';
+    final amt = await _askAmount(context, '转账给 $nick');
+    if (amt == null || amt <= 0) return;
+    final d = await PlatformService.transfer(to, amt);
+    if (!mounted) return;
+    if (d == null) {
+      _snack(context, '转账失败，请检查网络');
+    } else if (d['ok'] == true) {
+      _snack(context, '已转 $amt 兑换币给 $nick');
+      await PlatformService.groupSend(widget.gid,
+          text: '[转账] 给 $nick 转了 $amt 兑换币 💰');
+      _load();
+    } else {
+      _snack(context, '${d['error'] ?? '转账失败'}');
+    }
+  }
+
   String get _myRole {
     if (_info['owner'] == _myUid) return 'owner';
     if (((_info['admins'] as List?) ?? []).contains(_myUid)) return 'admin';
@@ -358,7 +432,10 @@ class _GroupChatPageState extends State<_GroupChatPage> {
                 group: true,
                 onPlayVideo: widget.onPlayVideo)),
         _ChatInput(
-            controller: _ctrl, onSend: _send, onRecommend: _recommend),
+            controller: _ctrl,
+            onSend: _send,
+            onRecommend: _recommend,
+            onTransfer: _transfer),
       ]),
     );
   }
@@ -693,10 +770,12 @@ class _ChatInput extends StatelessWidget {
   final TextEditingController controller;
   final VoidCallback onSend;
   final VoidCallback onRecommend;
+  final VoidCallback? onTransfer; // 私聊才有转账
   const _ChatInput(
       {required this.controller,
       required this.onSend,
-      required this.onRecommend});
+      required this.onRecommend,
+      this.onTransfer});
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -709,6 +788,12 @@ class _ChatInput extends StatelessWidget {
             tooltip: '推荐视频',
             onPressed: onRecommend,
           ),
+          if (onTransfer != null)
+            IconButton(
+              icon: const Icon(Icons.paid_outlined),
+              tooltip: '转账兑换币',
+              onPressed: onTransfer,
+            ),
           Expanded(
             child: TextField(
               controller: controller,
