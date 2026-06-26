@@ -1487,6 +1487,8 @@ class BotPage extends StatefulWidget {
 class _BotPageState extends State<BotPage> {
   bool _loading = true;
   List<Map<String, dynamic>> _bots = [];
+  List<Map<String, dynamic>> _groups = [];
+  List<Map<String, dynamic>> _users = [];
 
   @override
   void initState() {
@@ -1496,8 +1498,12 @@ class _BotPageState extends State<BotPage> {
 
   Future<void> _load() async {
     final b = await PlatformService.botList();
+    final g = await PlatformService.groupList();
+    final u = await PlatformService.users();
     if (mounted) setState(() {
       _bots = b;
+      _groups = g;
+      _users = u.where((x) => !'${x['uid']}'.startsWith('bot')).toList();
       _loading = false;
     });
   }
@@ -1506,7 +1512,9 @@ class _BotPageState extends State<BotPage> {
     final nameCtrl = TextEditingController();
     final wordCtrl = TextEditingController();
     final textCtrl = TextEditingController(text: '你好呀，我是机器人~');
+    final everyCtrl = TextEditingController(text: '0');
     String kind = 'text';
+    String? target;
     Map<String, dynamic>? vid;
     final ok = await showDialog<bool>(
       context: context,
@@ -1551,6 +1559,46 @@ class _BotPageState extends State<BotPage> {
                     if (v != null) setD(() => vid = v);
                   },
                 ),
+              const Divider(),
+              const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('⏰ 定时发送（选填）',
+                      style: TextStyle(fontWeight: FontWeight.w600))),
+              TextField(
+                  controller: everyCtrl,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                      labelText: '每几分钟发一次（0=不定时）')),
+              if (_groups.isEmpty && _users.isEmpty)
+                const Padding(
+                    padding: EdgeInsets.only(top: 6),
+                    child: Text('（先建群或加联系人，定时机器人发给他们）',
+                        style: TextStyle(fontSize: 12, color: Colors.black45)))
+              else
+                Row(children: [
+                  const Text('发给：'),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: target,
+                      hint: const Text('选群或用户'),
+                      items: [
+                        for (final g in _groups)
+                          DropdownMenuItem(
+                              value: g['gid'] as String,
+                              child: Text('👥 ${g['name']}',
+                                  overflow: TextOverflow.ellipsis)),
+                        for (final u in _users)
+                          DropdownMenuItem(
+                              value: u['uid'] as String,
+                              child: Text('👤 ${u['nick']}',
+                                  overflow: TextOverflow.ellipsis)),
+                      ],
+                      onChanged: (v) => setD(() => target = v),
+                    ),
+                  ),
+                ]),
             ]),
           ),
           actions: [
@@ -1567,6 +1615,7 @@ class _BotPageState extends State<BotPage> {
     if (ok != true) return;
     final name = nameCtrl.text.trim();
     if (name.isEmpty) return;
+    final every = int.tryParse(everyCtrl.text.trim()) ?? 0;
     final d = await PlatformService.botCreate(
       name: name,
       word: wordCtrl.text.trim(),
@@ -1575,6 +1624,8 @@ class _BotPageState extends State<BotPage> {
       vid: vid?['id'] as String? ?? '',
       title: vid?['title'] as String? ?? '',
       item: kind == 'coupon' ? 'coupon_10' : '',
+      scheduleMin: (every > 0 && target != null) ? every : 0,
+      target: target ?? '',
     );
     if (d != null && d['ok'] == true) _load();
   }
