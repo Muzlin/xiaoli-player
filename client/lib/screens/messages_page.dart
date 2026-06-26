@@ -59,6 +59,32 @@ class _MessagesPageState extends State<MessagesPage> {
                       builder: (_) =>
                           MomentsPage(onPlayVideo: widget.onPlayVideo))),
             ),
+            IconButton(
+              icon: const Icon(Icons.smart_toy_outlined),
+              tooltip: '机器人',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const BotPage())),
+            ),
+            PopupMenuButton<String>(
+              tooltip: '更多',
+              onSelected: (v) async {
+                if (v == 'test') {
+                  final nowTest = await PlatformService.onTestAccount();
+                  await PlatformService.switchTestAccount();
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                        content: Text(nowTest
+                            ? '已切回主账号'
+                            : '已切到测试账号（再点一次切回）')));
+                    Navigator.of(context).pop();
+                  }
+                }
+              },
+              itemBuilder: (_) => [
+                const PopupMenuItem(
+                    value: 'test', child: Text('切换测试账号')),
+              ],
+            ),
           ],
           bottom: const TabBar(tabs: [
             Tab(text: '私信', icon: Icon(Icons.chat_bubble_outline)),
@@ -1447,6 +1473,162 @@ class _MomentTileState extends State<_MomentTile> {
                 ]),
           ),
       ]),
+    );
+  }
+}
+
+// ============ 机器人管理 ============
+class BotPage extends StatefulWidget {
+  const BotPage({super.key});
+  @override
+  State<BotPage> createState() => _BotPageState();
+}
+
+class _BotPageState extends State<BotPage> {
+  bool _loading = true;
+  List<Map<String, dynamic>> _bots = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final b = await PlatformService.botList();
+    if (mounted) setState(() {
+      _bots = b;
+      _loading = false;
+    });
+  }
+
+  Future<void> _create() async {
+    final nameCtrl = TextEditingController();
+    final wordCtrl = TextEditingController();
+    final textCtrl = TextEditingController(text: '你好呀，我是机器人~');
+    String kind = 'text';
+    Map<String, dynamic>? vid;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('创建机器人'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: nameCtrl,
+                  maxLength: 20,
+                  decoration: const InputDecoration(labelText: '机器人名字')),
+              TextField(
+                  controller: wordCtrl,
+                  maxLength: 40,
+                  decoration: const InputDecoration(
+                      labelText: '触发词（留空=任何消息都回）')),
+              const SizedBox(height: 8),
+              Row(children: [
+                const Text('回复：'),
+                const SizedBox(width: 8),
+                DropdownButton<String>(
+                  value: kind,
+                  items: const [
+                    DropdownMenuItem(value: 'text', child: Text('文字')),
+                    DropdownMenuItem(value: 'video', child: Text('视频')),
+                    DropdownMenuItem(value: 'coupon', child: Text('送优惠券')),
+                  ],
+                  onChanged: (v) => setD(() => kind = v ?? 'text'),
+                ),
+              ]),
+              TextField(
+                  controller: textCtrl,
+                  maxLength: 200,
+                  decoration: const InputDecoration(labelText: '回复文字')),
+              if (kind == 'video')
+                TextButton.icon(
+                  icon: const Icon(Icons.video_library_outlined, size: 18),
+                  label: Text(vid == null ? '选个视频' : '已选：${vid!['title']}'),
+                  onPressed: () async {
+                    final v = await _pickVideo(ctx);
+                    if (v != null) setD(() => vid = v);
+                  },
+                ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('创建')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final name = nameCtrl.text.trim();
+    if (name.isEmpty) return;
+    final d = await PlatformService.botCreate(
+      name: name,
+      word: wordCtrl.text.trim(),
+      kind: kind,
+      text: textCtrl.text.trim(),
+      vid: vid?['id'] as String? ?? '',
+      title: vid?['title'] as String? ?? '',
+      item: kind == 'coupon' ? 'coupon_10' : '',
+    );
+    if (d != null && d['ok'] == true) _load();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('我的机器人')),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: _create,
+        icon: const Icon(Icons.smart_toy_outlined),
+        label: const Text('建机器人'),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : Column(children: [
+              const Padding(
+                padding: EdgeInsets.all(12),
+                child: Text(
+                    '机器人会出现在通讯录里。在「消息→找人」搜机器人名字即可和它聊天，命中触发词就自动回复。',
+                    style: TextStyle(fontSize: 12, color: Colors.black54)),
+              ),
+              Expanded(
+                child: _bots.isEmpty
+                    ? const Center(
+                        child: Text('还没有机器人，点下面建一个~',
+                            style: TextStyle(color: Colors.black38)))
+                    : ListView.separated(
+                        itemCount: _bots.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (_, i) {
+                          final b = _bots[i];
+                          final k = '${b['kind']}';
+                          return ListTile(
+                            leading: const CircleAvatar(
+                                backgroundColor: Color(0xFF07C160),
+                                child: Icon(Icons.smart_toy,
+                                    color: Colors.white)),
+                            title: Text('🤖${b['name']}'),
+                            subtitle: Text(
+                                '触发词：${(b['word'] as String).isEmpty ? '任何消息' : b['word']} → ${k == 'video' ? '回视频' : k == 'coupon' ? '送券' : '回文字'}'),
+                            trailing: IconButton(
+                              icon: const Icon(Icons.delete_outline,
+                                  color: Colors.red),
+                              onPressed: () async {
+                                if (await PlatformService.botDelete(
+                                    '${b['id']}')) _load();
+                              },
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ]),
     );
   }
 }

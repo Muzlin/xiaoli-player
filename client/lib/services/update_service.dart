@@ -13,7 +13,7 @@ class UpdateInfo {
 /// 检查更新：优先问自建平台 /version（国内直连稳），拿不到再退 GitHub Releases。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.39.40';
+  static const currentVersion = '2.39.41';
 
   /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';

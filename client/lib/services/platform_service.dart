@@ -563,6 +563,67 @@ class PlatformService {
     return d is Map && d['ok'] == true;
   }
 
+  /// 创建机器人(关键词自动回复)。kind: text/video/coupon。
+  static Future<Map<String, dynamic>?> botCreate(
+      {required String name,
+      required String word,
+      required String kind,
+      String text = '',
+      String vid = '',
+      String title = '',
+      String item = ''}) async {
+    final q = '/bot-create?name=${Uri.encodeComponent(name)}'
+        '&word=${Uri.encodeComponent(word)}&kind=$kind'
+        '&text=${Uri.encodeComponent(text)}'
+        '&vid=$vid&title=${Uri.encodeComponent(title)}&item=$item';
+    final d = await _g(q, withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 我创建的机器人。
+  static Future<List<Map<String, dynamic>>> botList() async {
+    final d = await _g('/bot-list', withUid: true);
+    if (d is Map && d['bots'] is List) {
+      return (d['bots'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// 删除机器人。
+  static Future<bool> botDelete(String id) async {
+    final d = await _g('/bot-delete?id=$id', withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 切换测试账号：换一个 wallet_uid(原 uid 存起来可切回)。返回新 uid。
+  static Future<String> switchTestAccount() async {
+    final p = await SharedPreferences.getInstance();
+    final cur = p.getString('wallet_uid') ?? '';
+    final saved = p.getString('main_wallet_uid') ?? '';
+    if (saved.isEmpty) {
+      // 当前是主账号 → 存起来，切到测试号
+      await p.setString('main_wallet_uid', cur);
+      final test = 'utest${DateTime.now().millisecondsSinceEpoch}';
+      await p.setString('wallet_uid', test);
+      _uid = test;
+      return test;
+    } else {
+      // 当前是测试号 → 切回主账号
+      await p.setString('wallet_uid', saved);
+      await p.remove('main_wallet_uid');
+      _uid = saved;
+      return saved;
+    }
+  }
+
+  /// 是否当前在测试账号。
+  static Future<bool> onTestAccount() async {
+    final p = await SharedPreferences.getInstance();
+    return (p.getString('main_wallet_uid') ?? '').isNotEmpty;
+  }
+
   /// 我的私信会话 [{peer,peer_nick,last,ts}]。
   static Future<List<Map<String, dynamic>>> dmList() async {
     final d = await _g('/dm-list', withUid: true);
@@ -992,6 +1053,58 @@ class PlatformService {
               '$current/screenshare-consent?uid=$uid&ok=${ok ? 1 : 0}'))
           .timeout(const Duration(seconds: 6));
     } catch (_) {}
+  }
+
+  // ===== 全员投屏(广播) =====
+  static Future<Map<String, dynamic>?> broadcastPoll() async {
+    try {
+      final uid = await walletUid();
+      final r = await http
+          .get(Uri.parse('$current/broadcast-poll?uid=$uid'))
+          .timeout(const Duration(seconds: 6));
+      final d = jsonDecode(r.body);
+      if (d is Map<String, dynamic>) return d;
+    } catch (_) {}
+    return null;
+  }
+
+  /// 广播主：抓 app 画面→JPEG(后台isolate)→上传广播帧。
+  static Future<void> broadcastSendFrame() async {
+    try {
+      final ctx = screenShareKey.currentContext;
+      if (ctx == null) return;
+      final ro = ctx.findRenderObject();
+      if (ro is! RenderRepaintBoundary) return;
+      double pr = 0.5;
+      final longest = ro.size.longestSide;
+      if (longest > 0 && longest * pr > 900) pr = 900 / longest;
+      final image = await ro.toImage(pixelRatio: pr);
+      final bd = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+      final w = image.width, h = image.height;
+      image.dispose();
+      if (bd == null) return;
+      final jpg =
+          await compute(_encodeJpeg, _JpegJob(bd.buffer.asUint8List(), w, h, 55));
+      final uid = await walletUid();
+      await http
+          .post(Uri.parse('$current/broadcast-frame?uid=$uid'),
+              headers: {'Content-Type': 'image/jpeg'}, body: jpg)
+          .timeout(const Duration(seconds: 12));
+    } catch (_) {}
+  }
+
+  /// 观众：取最新广播帧。
+  static Future<Uint8List?> broadcastImg() async {
+    try {
+      final r = await http
+          .get(Uri.parse('$current/broadcast-img'))
+          .timeout(const Duration(seconds: 6));
+      final d = jsonDecode(r.body);
+      if (d is Map && (d['frame'] ?? '').toString().isNotEmpty) {
+        return base64.decode(d['frame'] as String);
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// 上传一段系统级录屏片段(.mov/H.264)给管理台回放。
