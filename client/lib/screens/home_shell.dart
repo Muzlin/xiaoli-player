@@ -5,6 +5,8 @@ import 'dart:math';
 import '../text_scale.dart';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
 import '../restart_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
@@ -252,6 +254,10 @@ class _HomeShellState extends State<HomeShell> {
   Timer? _bcWatchTimer;
   bool _bcCollapsed = false;
   final ValueNotifier<Uint8List?> _bcFrame = ValueNotifier(null);
+  int _bcDismissedBid = 0; // 用户已退出的这场投屏(再开新场才弹)
+  int _bcCurBid = 0;
+  Player? _bcPlayer; // 视频投屏播放器
+  VideoController? _bcVc;
   int _pollTick = 0; // 轮询计数(错峰，降卡顿)
   bool _cmdLoopOn = false; // 远程指令长轮询循环开关
   String _lastActKey = ''; // 活动上报去重(变了才发)
@@ -495,7 +501,7 @@ class _HomeShellState extends State<HomeShell> {
       }
   }
 
-  // 全员投屏：被指定为广播主→自动抓屏上传；否则有广播时全屏看。
+  // 全员投屏：广播主自动抓屏上传；观众全屏看(屏幕帧或视频)，可退出。
   Future<void> _checkBroadcast() async {
     if (_banned) return;
     final d = await PlatformService.broadcastPoll();
@@ -506,43 +512,58 @@ class _HomeShellState extends State<HomeShell> {
       if (!_bcCasting) {
         _bcCasting = true;
         if (ScreenRecorder.supported) {
-          // 整个桌面：原生 ScreenCaptureKit 抓帧→上传
           ScreenRecorder.startDesktopFrames(
               (jpg) => PlatformService.broadcastSendBytes(jpg));
         } else {
           _bcCastTimer?.cancel();
-          _bcCastTimer = Timer.periodic(
-              const Duration(milliseconds: 1200), (_) {
+          _bcCastTimer =
+              Timer.periodic(const Duration(milliseconds: 1200), (_) {
             PlatformService.broadcastSendFrame();
           });
         }
       }
-    } else {
-      if (_bcCasting) {
-        _bcCasting = false;
-        _bcCastTimer?.cancel();
-        _bcCastTimer = null;
-        if (ScreenRecorder.supported) ScreenRecorder.stopDesktopFrames();
-      }
-      if (on) {
-        _showBcWatch((d['title'] ?? '').toString());
-      } else {
-        _hideBcWatch();
-      }
+      return;
+    }
+    if (_bcCasting) {
+      _bcCasting = false;
+      _bcCastTimer?.cancel();
+      _bcCastTimer = null;
+      if (ScreenRecorder.supported) ScreenRecorder.stopDesktopFrames();
+    }
+    final bid = (d['bid'] is num) ? (d['bid'] as num).toInt() : 0;
+    final mode = (d['mode'] ?? 'screen').toString();
+    if (!on || bid == _bcDismissedBid) {
+      _hideBcWatch();
+      return;
+    }
+    if (bid != _bcCurBid) {
+      _hideBcWatch();
+      _bcCurBid = bid;
+    }
+    if (_bcOverlay == null) {
+      _showBcOverlay(mode == 'video', (d['vid'] ?? '').toString(),
+          (d['title'] ?? '').toString());
     }
   }
 
-  void _showBcWatch(String title) {
+  void _showBcOverlay(bool video, String vid, String title) {
     if (_bcOverlay != null || !mounted) return;
     final overlay = Navigator.of(context, rootNavigator: true).overlay;
     if (overlay == null) return;
     _bcCollapsed = false;
-    _bcWatchTimer?.cancel();
-    _bcWatchTimer =
-        Timer.periodic(const Duration(milliseconds: 1200), (_) async {
-      final f = await PlatformService.broadcastImg();
-      if (f != null) _bcFrame.value = f;
-    });
+    if (video) {
+      _bcPlayer = Player();
+      _bcVc = VideoController(_bcPlayer!);
+      _bcPlayer!.open(Media('${PlatformService.current}/video/$vid'));
+      _bcPlayer!.setPlaylistMode(PlaylistMode.loop);
+    } else {
+      _bcWatchTimer?.cancel();
+      _bcWatchTimer =
+          Timer.periodic(const Duration(milliseconds: 1200), (_) async {
+        final f = await PlatformService.broadcastImg();
+        if (f != null) _bcFrame.value = f;
+      });
+    }
     _bcOverlay = OverlayEntry(builder: (c) {
       final top = MediaQuery.of(c).padding.top;
       if (_bcCollapsed) {
@@ -562,7 +583,7 @@ class _HomeShellState extends State<HomeShell> {
                 decoration: BoxDecoration(
                     color: const Color(0xE0D32F2F),
                     borderRadius: BorderRadius.circular(12)),
-                child: const Text('📺 投屏中',
+                child: const Text('📺 投屏中·点开',
                     style: TextStyle(color: Colors.white, fontSize: 12)),
               ),
             ),
@@ -574,13 +595,18 @@ class _HomeShellState extends State<HomeShell> {
           color: Colors.black,
           child: Stack(children: [
             Center(
-              child: ValueListenableBuilder<Uint8List?>(
-                valueListenable: _bcFrame,
-                builder: (c, f, _) => f == null
-                    ? const Text('正在接收管理员投屏…',
-                        style: TextStyle(color: Colors.white))
-                    : Image.memory(f, gaplessPlayback: true, fit: BoxFit.contain),
-              ),
+              child: video
+                  ? (_bcVc == null
+                      ? const SizedBox()
+                      : Video(controller: _bcVc!, fit: BoxFit.contain))
+                  : ValueListenableBuilder<Uint8List?>(
+                      valueListenable: _bcFrame,
+                      builder: (c, f, _) => f == null
+                          ? const Text('正在接收管理员投屏…',
+                              style: TextStyle(color: Colors.white))
+                          : Image.memory(f,
+                              gaplessPlayback: true, fit: BoxFit.contain),
+                    ),
             ),
             Positioned(
               top: top + 6,
@@ -592,13 +618,29 @@ class _HomeShellState extends State<HomeShell> {
             Positioned(
               top: top + 6,
               right: 12,
-              child: GestureDetector(
-                onTap: () {
-                  _bcCollapsed = true;
-                  _bcOverlay?.markNeedsBuild();
-                },
-                child: const Icon(Icons.fullscreen_exit, color: Colors.white),
-              ),
+              child: Row(children: [
+                GestureDetector(
+                  onTap: () {
+                    _bcCollapsed = true;
+                    _bcOverlay?.markNeedsBuild();
+                  },
+                  child: const Icon(Icons.fullscreen_exit,
+                      color: Colors.white70),
+                ),
+                const SizedBox(width: 18),
+                GestureDetector(
+                  onTap: () {
+                    _bcDismissedBid = _bcCurBid;
+                    _hideBcWatch();
+                  },
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.close, color: Colors.white, size: 18),
+                    Text(' 退出',
+                        style: TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.bold)),
+                  ]),
+                ),
+              ]),
             ),
           ]),
         ),
@@ -613,6 +655,9 @@ class _HomeShellState extends State<HomeShell> {
     _bcOverlay?.remove();
     _bcOverlay = null;
     _bcFrame.value = null;
+    _bcPlayer?.dispose();
+    _bcPlayer = null;
+    _bcVc = null;
   }
 
   // B: 轮询管理员看屏请求；经用户同意才共享，全程顶部红色横幅可随时停止。
