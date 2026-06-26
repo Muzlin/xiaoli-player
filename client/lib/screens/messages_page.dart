@@ -603,6 +603,39 @@ class _GroupManageSheetState extends State<_GroupManageSheet> {
     }
   }
 
+  Future<void> _rename() async {
+    final ctrl =
+        TextEditingController(text: '${widget.info['name'] ?? ''}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修改群名'),
+        content: TextField(
+            controller: ctrl, autofocus: true, maxLength: 30),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final name = ctrl.text.trim();
+    if (name.isEmpty) return;
+    setState(() => _busy = true);
+    final d = await PlatformService.groupOp(widget.gid, 'rename', name: name);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (d != null && d['ok'] == true) {
+      widget.onChanged();
+    } else {
+      _toast('${d?['error'] ?? '改名失败'}');
+    }
+  }
+
   Future<void> _invite() async {
     if (_busy) return;
     final picked = await _pickUser(context);
@@ -641,6 +674,13 @@ class _GroupManageSheetState extends State<_GroupManageSheet> {
             child: Text('群管理',
                 style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
           ),
+          if (isAdmin)
+            ListTile(
+              leading: const Icon(Icons.drive_file_rename_outline),
+              title: const Text('修改群名'),
+              subtitle: Text('${widget.info['name'] ?? ''}'),
+              onTap: _busy ? null : _rename,
+            ),
           if (isOwner)
             SwitchListTile(
               title: const Text('禁止成员退群'),

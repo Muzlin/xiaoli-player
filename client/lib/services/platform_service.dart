@@ -624,11 +624,12 @@ class PlatformService {
     return d is Map && d['ok'] == true;
   }
 
-  /// 群治理：op=kick/admin/leave/disband/noleave。返回服务器结果。
+  /// 群治理：op=kick/admin/leave/disband/noleave/rename。返回服务器结果。
   static Future<Map<String, dynamic>?> groupOp(String gid, String op,
-      {String target = '', bool on = true}) async {
+      {String target = '', bool on = true, String name = ''}) async {
     final t = target.isNotEmpty ? '&target=$target' : '';
-    final d = await _g('/group-op?gid=$gid&op=$op$t&on=${on ? 1 : 0}',
+    final n = name.isNotEmpty ? '&name=${Uri.encodeComponent(name)}' : '';
+    final d = await _g('/group-op?gid=$gid&op=$op$t&on=${on ? 1 : 0}$n',
         withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
