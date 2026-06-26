@@ -514,12 +514,51 @@ class PlatformService {
 
   /// 私信：发文字(text)或推荐视频(vid+title)。
   static Future<bool> dmSend(String to,
-      {String text = '', String vid = '', String title = ''}) async {
+      {String text = '', String vid = '', String title = '',
+      String card = ''}) async {
+    var extra = vid.isNotEmpty
+        ? '&vid=$vid&title=${Uri.encodeComponent(title)}'
+        : '';
+    if (card.isNotEmpty) extra += '&card=$card';
+    final d = await _g(
+        '/dm-send?to=$to&text=${Uri.encodeComponent(text)}$extra',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 发动态(朋友圈)：文字 + 可选推荐视频。
+  static Future<bool> momentPost(String text,
+      {String vid = '', String title = ''}) async {
     final extra = vid.isNotEmpty
         ? '&vid=$vid&title=${Uri.encodeComponent(title)}'
         : '';
     final d = await _g(
-        '/dm-send?to=$to&text=${Uri.encodeComponent(text)}$extra',
+        '/moment-post?text=${Uri.encodeComponent(text)}$extra',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 朋友圈动态列表。
+  static Future<List<Map<String, dynamic>>> moments() async {
+    final d = await _g('/moments', withUid: true);
+    if (d is Map && d['moments'] is List) {
+      return (d['moments'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// 给动态点赞(toggle)。返回 {liked,likes}。
+  static Future<Map<String, dynamic>?> momentLike(String id) async {
+    final d = await _g('/moment-like?id=$id', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 评论动态。
+  static Future<bool> momentComment(String id, String text) async {
+    final d = await _g(
+        '/moment-comment?id=$id&text=${Uri.encodeComponent(text)}',
         withUid: true);
     return d is Map && d['ok'] == true;
   }
@@ -565,12 +604,14 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
-  /// 群发消息：文字或推荐视频。
+  /// 群发消息：文字 / 推荐视频 / 名片。
   static Future<bool> groupSend(String gid,
-      {String text = '', String vid = '', String title = ''}) async {
-    final extra = vid.isNotEmpty
+      {String text = '', String vid = '', String title = '',
+      String card = ''}) async {
+    var extra = vid.isNotEmpty
         ? '&vid=$vid&title=${Uri.encodeComponent(title)}'
         : '';
+    if (card.isNotEmpty) extra += '&card=$card';
     final d = await _g(
         '/group-send?gid=$gid&text=${Uri.encodeComponent(text)}$extra',
         withUid: true);

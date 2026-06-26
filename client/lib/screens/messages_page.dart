@@ -50,6 +50,16 @@ class _MessagesPageState extends State<MessagesPage> {
       child: Scaffold(
         appBar: AppBar(
           title: const Text('消息'),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.camera_outlined),
+              tooltip: '朋友圈',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) =>
+                          MomentsPage(onPlayVideo: widget.onPlayVideo))),
+            ),
+          ],
           bottom: const TabBar(tabs: [
             Tab(text: '私信', icon: Icon(Icons.chat_bubble_outline)),
             Tab(text: '群聊', icon: Icon(Icons.groups_outlined)),
@@ -297,6 +307,22 @@ class _ChatPageState extends State<_ChatPage> {
     if (ok) _load();
   }
 
+  Future<void> _sendCard() async {
+    final picked = await _pickUser(context);
+    if (picked == null) return;
+    final ok =
+        await PlatformService.dmSend(widget.peer, card: picked['uid'] as String);
+    if (ok) _load();
+  }
+
+  void _openCard(String uid, String nick) {
+    if (uid.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _ChatPage(
+          peer: uid, peerNick: nick, onPlayVideo: widget.onPlayVideo),
+    ));
+  }
+
   Future<void> _transfer() async {
     final amt = await _askAmount(context, '转账给 ${widget.peerNick}');
     if (amt == null || amt <= 0) return;
@@ -326,12 +352,16 @@ class _ChatPageState extends State<_ChatPage> {
       body: Column(children: [
         Expanded(
             child: _MsgList(
-                msgs: _msgs, myUid: _myUid, onPlayVideo: widget.onPlayVideo)),
+                msgs: _msgs,
+                myUid: _myUid,
+                onPlayVideo: widget.onPlayVideo,
+                onCard: _openCard)),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
             onRecommend: _recommend,
-            onTransfer: _transfer),
+            onTransfer: _transfer,
+            onCard: _sendCard),
       ]),
     );
   }
@@ -421,6 +451,22 @@ class _GroupChatPageState extends State<_GroupChatPage> {
         vid: v['id'] as String, title: v['title'] as String)) _load();
   }
 
+  Future<void> _sendCard() async {
+    final picked = await _pickUser(context);
+    if (picked == null) return;
+    final ok =
+        await PlatformService.groupSend(widget.gid, card: picked['uid'] as String);
+    if (ok) _load();
+  }
+
+  void _openCard(String uid, String nick) {
+    if (uid.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _ChatPage(
+          peer: uid, peerNick: nick, onPlayVideo: widget.onPlayVideo),
+    ));
+  }
+
   // 群聊转账：选一位群成员转账。
   Future<void> _transfer() async {
     final picked = await _pickUser(context);
@@ -472,12 +518,14 @@ class _GroupChatPageState extends State<_GroupChatPage> {
                 msgs: _msgs,
                 myUid: _myUid,
                 group: true,
-                onPlayVideo: widget.onPlayVideo)),
+                onPlayVideo: widget.onPlayVideo,
+                onCard: _openCard)),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
             onRecommend: _recommend,
-            onTransfer: _transfer),
+            onTransfer: _transfer,
+            onCard: _sendCard),
       ]),
     );
   }
@@ -712,10 +760,12 @@ class _MsgList extends StatelessWidget {
   final String? myUid;
   final bool group;
   final void Function(String id, String title) onPlayVideo;
+  final void Function(String uid, String nick)? onCard;
   const _MsgList(
       {required this.msgs,
       required this.myUid,
       required this.onPlayVideo,
+      this.onCard,
       this.group = false});
 
   @override
@@ -732,7 +782,40 @@ class _MsgList extends StatelessWidget {
         final m = msgs[i];
         final mine = m['from'] == myUid;
         final isVideo = m['kind'] == 'video';
-        final bubble = isVideo
+        final isCard = m['kind'] == 'card';
+        final bubble = isCard
+            ? InkWell(
+                onTap: () => onCard?.call(
+                    '${m['card']}', '${m['card_nick'] ?? ''}'),
+                child: Container(
+                  width: 210,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(6)),
+                  child: Row(children: [
+                    const CircleAvatar(
+                        radius: 20,
+                        backgroundColor: Color(0xFF07C160),
+                        child: Icon(Icons.contact_page,
+                            color: Colors.white, size: 22)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                          Text('${m['card_nick'] ?? ''}',
+                              style: const TextStyle(
+                                  color: Colors.black87,
+                                  fontWeight: FontWeight.w600)),
+                          const Text('个人名片',
+                              style: TextStyle(
+                                  fontSize: 11, color: Colors.black45)),
+                        ])),
+                  ]),
+                ),
+              )
+            : isVideo
             ? InkWell(
                 onTap: () => onPlayVideo(
                     '${m['vid']}', '${m['title'] ?? '推荐视频'}'),
@@ -818,11 +901,13 @@ class _ChatInput extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback onRecommend;
   final VoidCallback? onTransfer; // 私聊才有转账
+  final VoidCallback? onCard; // 发个人名片
   const _ChatInput(
       {required this.controller,
       required this.onSend,
       required this.onRecommend,
-      this.onTransfer});
+      this.onTransfer,
+      this.onCard});
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -842,6 +927,13 @@ class _ChatInput extends StatelessWidget {
                 icon: const Icon(Icons.paid_outlined, color: Colors.black54),
                 tooltip: '转账兑换币',
                 onPressed: onTransfer,
+              ),
+            if (onCard != null)
+              IconButton(
+                icon: const Icon(Icons.contact_page_outlined,
+                    color: Colors.black54),
+                tooltip: '发名片',
+                onPressed: onCard,
               ),
             Expanded(
               child: TextField(
@@ -1050,4 +1142,271 @@ Future<bool> _confirm(BuildContext context, String title, String body) async {
     ),
   );
   return r == true;
+}
+
+// ============ 朋友圈(动态) ============
+class MomentsPage extends StatefulWidget {
+  final void Function(String id, String title) onPlayVideo;
+  const MomentsPage({super.key, required this.onPlayVideo});
+  @override
+  State<MomentsPage> createState() => _MomentsPageState();
+}
+
+class _MomentsPageState extends State<MomentsPage> {
+  bool _loading = true;
+  List<Map<String, dynamic>> _list = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final m = await PlatformService.moments();
+    if (mounted) setState(() {
+      _list = m;
+      _loading = false;
+    });
+  }
+
+  Future<void> _compose() async {
+    final ctrl = TextEditingController();
+    Map<String, dynamic>? vid;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('发动态'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            TextField(
+                controller: ctrl,
+                autofocus: true,
+                maxLines: 4,
+                maxLength: 500,
+                decoration: const InputDecoration(hintText: '这一刻的想法…')),
+            if (vid != null)
+              ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.play_circle, color: Color(0xFFF26B21)),
+                  title: Text('${vid!['title']}',
+                      maxLines: 1, overflow: TextOverflow.ellipsis)),
+            TextButton.icon(
+              icon: const Icon(Icons.video_library_outlined, size: 18),
+              label: Text(vid == null ? '附带一个视频' : '换个视频'),
+              onPressed: () async {
+                final v = await _pickVideo(ctx);
+                if (v != null) setD(() => vid = v);
+              },
+            ),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('发布')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final text = ctrl.text.trim();
+    if (text.isEmpty && vid == null) return;
+    final sent = await PlatformService.momentPost(text,
+        vid: vid?['id'] as String? ?? '', title: vid?['title'] as String? ?? '');
+    if (sent) _load();
+  }
+
+  String _ago(int ts) {
+    final d = DateTime.now()
+        .difference(DateTime.fromMillisecondsSinceEpoch(ts * 1000));
+    if (d.inMinutes < 1) return '刚刚';
+    if (d.inHours < 1) return '${d.inMinutes}分钟前';
+    if (d.inDays < 1) return '${d.inHours}小时前';
+    return '${d.inDays}天前';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('朋友圈')),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _compose,
+        tooltip: '发动态',
+        child: const Icon(Icons.add_a_photo_outlined),
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _list.isEmpty
+              ? const Center(
+                  child: Text('还没有动态，发第一条吧~',
+                      style: TextStyle(color: Colors.black38)))
+              : RefreshIndicator(
+                  onRefresh: _load,
+                  child: ListView.separated(
+                    itemCount: _list.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, i) => _MomentTile(
+                        m: _list[i],
+                        ago: _ago,
+                        onPlayVideo: widget.onPlayVideo,
+                        onChanged: _load),
+                  ),
+                ),
+    );
+  }
+}
+
+class _MomentTile extends StatefulWidget {
+  final Map<String, dynamic> m;
+  final String Function(int) ago;
+  final void Function(String id, String title) onPlayVideo;
+  final VoidCallback onChanged;
+  const _MomentTile(
+      {required this.m,
+      required this.ago,
+      required this.onPlayVideo,
+      required this.onChanged});
+  @override
+  State<_MomentTile> createState() => _MomentTileState();
+}
+
+class _MomentTileState extends State<_MomentTile> {
+  late bool _liked = widget.m['liked'] == true;
+  late int _likes = (widget.m['likes'] as num?)?.toInt() ?? 0;
+  late List<dynamic> _comments = (widget.m['comments'] as List?) ?? [];
+
+  Future<void> _like() async {
+    final d = await PlatformService.momentLike('${widget.m['id']}');
+    if (d != null && d['ok'] == true && mounted) {
+      setState(() {
+        _liked = d['liked'] == true;
+        _likes = (d['likes'] as num).toInt();
+      });
+    }
+  }
+
+  Future<void> _comment() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('评论'),
+        content: TextField(controller: ctrl, autofocus: true, maxLength: 200),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('发送')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final t = ctrl.text.trim();
+    if (t.isEmpty) return;
+    if (await PlatformService.momentComment('${widget.m['id']}', t)) {
+      widget.onChanged();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final m = widget.m;
+    final vid = '${m['vid'] ?? ''}';
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          CircleAvatar(
+              radius: 18,
+              backgroundColor: cs.primary,
+              child: const Icon(Icons.person, color: Colors.white, size: 20)),
+          const SizedBox(width: 10),
+          Text('${m['nick'] ?? ''}',
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+          const Spacer(),
+          Text(widget.ago((m['ts'] as num?)?.toInt() ?? 0),
+              style: const TextStyle(fontSize: 11, color: Colors.black38)),
+        ]),
+        if ('${m['text'] ?? ''}'.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 46, top: 4),
+            child: Text('${m['text']}'),
+          ),
+        if (vid.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 46, top: 6),
+            child: InkWell(
+              onTap: () => widget.onPlayVideo(vid, '${m['title'] ?? '视频'}'),
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(6)),
+                child: Row(children: [
+                  Icon(Icons.play_circle_fill, color: cs.primary),
+                  const SizedBox(width: 8),
+                  Expanded(
+                      child: Text('${m['title'] ?? '视频'}',
+                          maxLines: 1, overflow: TextOverflow.ellipsis)),
+                ]),
+              ),
+            ),
+          ),
+        Padding(
+          padding: const EdgeInsets.only(left: 40, top: 4),
+          child: Row(children: [
+            TextButton.icon(
+              onPressed: _like,
+              icon: Icon(_liked ? Icons.favorite : Icons.favorite_border,
+                  size: 18, color: _liked ? Colors.red : Colors.black45),
+              label: Text('$_likes',
+                  style: const TextStyle(color: Colors.black54)),
+            ),
+            TextButton.icon(
+              onPressed: _comment,
+              icon: const Icon(Icons.mode_comment_outlined,
+                  size: 18, color: Colors.black45),
+              label: Text('${_comments.length}',
+                  style: const TextStyle(color: Colors.black54)),
+            ),
+          ]),
+        ),
+        if (_comments.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(left: 46),
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.04),
+                borderRadius: BorderRadius.circular(6)),
+            child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  for (final c in _comments)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 2),
+                      child: RichText(
+                        text: TextSpan(
+                            style: const TextStyle(
+                                color: Colors.black87, fontSize: 13),
+                            children: [
+                              TextSpan(
+                                  text: '${c['nick'] ?? ''}：',
+                                  style: TextStyle(
+                                      color: cs.primary,
+                                      fontWeight: FontWeight.w600)),
+                              TextSpan(text: '${c['text'] ?? ''}'),
+                            ]),
+                      ),
+                    ),
+                ]),
+          ),
+      ]),
+    );
+  }
 }
