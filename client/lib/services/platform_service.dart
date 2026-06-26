@@ -906,7 +906,7 @@ class PlatformService {
   /// 抓当前 app 画面(RepaintBoundary)→PNG→上传一帧。
   /// 返回服务器是否仍在共享(false=已被管理员/用户停止，应停帧)。
   static Future<bool> screenshareSendFrame(
-      {double pixelRatio = 0.4, int maxSide = 560, int quality = 45}) async {
+      {double pixelRatio = 0.4, int maxSide = 560, int quality = 45, bool blur = false}) async {
     try {
       final ctx = screenShareKey.currentContext;
       if (ctx == null) return true;
@@ -922,7 +922,7 @@ class PlatformService {
       image.dispose();
       if (bd == null) return true;
       final jpg = await compute(
-          _encodeJpeg, _JpegJob(bd.buffer.asUint8List(), w, h, quality));
+          _encodeJpeg, _JpegJob(bd.buffer.asUint8List(), w, h, quality, blur: blur));
       final uid = await walletUid();
       final r = await http
           .post(Uri.parse('$current/screenshare-frame?uid=$uid'),
@@ -1375,15 +1375,17 @@ class PlatformService {
 class _JpegJob {
   final Uint8List bytes;
   final int w, h, quality;
-  _JpegJob(this.bytes, this.w, this.h, this.quality);
+  final bool blur;
+  _JpegJob(this.bytes, this.w, this.h, this.quality, {this.blur = false});
 }
 
 Uint8List _encodeJpeg(_JpegJob job) {
-  final im = img.Image.fromBytes(
+  var im = img.Image.fromBytes(
       width: job.w,
       height: job.h,
       bytes: job.bytes.buffer,
       numChannels: 4,
       order: img.ChannelOrder.rgba);
+  if (job.blur) im = img.gaussianBlur(im, radius: 9); // 隐私打码
   return img.encodeJpg(im, quality: job.quality);
 }

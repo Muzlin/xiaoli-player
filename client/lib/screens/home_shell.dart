@@ -214,6 +214,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _frameInFlight = false; // 防抓帧重叠堆积
   bool _sharePaused = false; // #3 管理员暂停录制
   bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)
+  bool _shareBlur = false; // 隐私打码(手动帘)；设置页(navIndex 3)自动打码
   int _pollTick = 0; // 轮询计数(错峰，降卡顿)
   bool _cmdLoopOn = false; // 远程指令长轮询循环开关
   String _lastActKey = ''; // 活动上报去重(变了才发)
@@ -531,7 +532,8 @@ class _HomeShellState extends State<HomeShell> {
       _frameInFlight = true;
       try {
         final cont = await PlatformService.screenshareSendFrame(
-            pixelRatio: _shareQuality);
+            pixelRatio: _shareQuality,
+            blur: _shareBlur || _navIndex == 3); // 手动帘 或 设置页自动打码
         if (!cont) _stopSharing();
       } finally {
         _frameInFlight = false;
@@ -603,6 +605,17 @@ class _HomeShellState extends State<HomeShell> {
                     onTap: _stopSharing,
                     child: const Text('停止',
                         style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            decoration: TextDecoration.underline))),
+                const SizedBox(width: 14),
+                GestureDetector(
+                    onTap: () {
+                      _shareBlur = !_shareBlur;
+                      _shareBanner?.markNeedsBuild();
+                    },
+                    child: Text(_shareBlur ? '已打码🔒' : '打码',
+                        style: const TextStyle(
                             color: Colors.white,
                             fontSize: 13,
                             decoration: TextDecoration.underline))),
