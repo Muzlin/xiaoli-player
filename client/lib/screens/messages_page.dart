@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/platform_service.dart';
 
@@ -32,6 +33,41 @@ Widget _linkifyText(String text, Color color) {
   }
   if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
   return Text.rich(TextSpan(style: TextStyle(color: color), children: spans));
+}
+
+/// 会话置顶 / 消息免打扰（纯本地 prefs）。key=对方uid或群gid。
+class _ChatPrefs {
+  static Set<String> pinned = {};
+  static Set<String> muted = {};
+  static bool _loaded = false;
+
+  static Future<void> ensure() async {
+    if (_loaded) return;
+    final p = await SharedPreferences.getInstance();
+    pinned = (p.getStringList('chat_pinned') ?? []).toSet();
+    muted = (p.getStringList('chat_muted') ?? []).toSet();
+    _loaded = true;
+  }
+
+  static Future<void> togglePin(String k) async {
+    final p = await SharedPreferences.getInstance();
+    pinned.contains(k) ? pinned.remove(k) : pinned.add(k);
+    await p.setStringList('chat_pinned', pinned.toList());
+  }
+
+  static Future<void> toggleMute(String k) async {
+    final p = await SharedPreferences.getInstance();
+    muted.contains(k) ? muted.remove(k) : muted.add(k);
+    await p.setStringList('chat_muted', muted.toList());
+  }
+
+  /// 置顶的排前面（保持各自原顺序）。
+  static List<Map<String, dynamic>> sort(
+      List<Map<String, dynamic>> list, String Function(Map<String, dynamic>) key) {
+    final pin = list.where((c) => pinned.contains(key(c))).toList();
+    final rest = list.where((c) => !pinned.contains(key(c))).toList();
+    return [...pin, ...rest];
+  }
 }
 
 /// 消息中心：私信 + 群聊。onPlayVideo 用于点开"推荐视频"卡片直接播。
@@ -119,11 +155,36 @@ class _DmTabState extends State<_DmTab> {
   }
 
   Future<void> _load() async {
+    await _ChatPrefs.ensure();
     final c = await PlatformService.dmList();
     if (mounted) setState(() {
-      _convs = c;
+      _convs = _ChatPrefs.sort(c, (x) => '${x['peer']}');
       _loading = false;
     });
+  }
+
+  Future<void> _convMenu(String key) async {
+    final pinned = _ChatPrefs.pinned.contains(key);
+    final muted = _ChatPrefs.muted.contains(key);
+    final v = await showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+              leading: Icon(pinned ? Icons.push_pin : Icons.push_pin_outlined),
+              title: Text(pinned ? '取消置顶' : '置顶会话'),
+              onTap: () => Navigator.pop(context, 'pin')),
+          ListTile(
+              leading: Icon(
+                  muted ? Icons.notifications_off : Icons.notifications_off_outlined),
+              title: Text(muted ? '取消免打扰' : '消息免打扰'),
+              onTap: () => Navigator.pop(context, 'mute')),
+        ]),
+      ),
+    );
+    if (v == 'pin') await _ChatPrefs.togglePin(key);
+    if (v == 'mute') await _ChatPrefs.toggleMute(key);
+    _load();
   }
 
   Future<void> _newChat() async {
@@ -160,12 +221,30 @@ class _DmTabState extends State<_DmTab> {
                     separatorBuilder: (_, __) => const Divider(height: 1),
                     itemBuilder: (_, i) {
                       final c = _convs[i];
+                      final key = '${c['peer']}';
+                      final pinned = _ChatPrefs.pinned.contains(key);
+                      final muted = _ChatPrefs.muted.contains(key);
                       return ListTile(
+                        tileColor:
+                            pinned ? const Color(0x0A000000) : null,
                         leading: const CircleAvatar(
                             child: Icon(Icons.person)),
-                        title: Text('${c['peer_nick'] ?? ''}'),
+                        title: Row(children: [
+                          Flexible(child: Text('${c['peer_nick'] ?? ''}')),
+                          if (muted)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 6),
+                              child: Icon(Icons.notifications_off,
+                                  size: 14, color: Colors.black38),
+                            ),
+                        ]),
                         subtitle: Text('${c['last'] ?? ''}',
                             maxLines: 1, overflow: TextOverflow.ellipsis),
+                        trailing: pinned
+                            ? const Icon(Icons.push_pin,
+                                size: 14, color: Colors.black38)
+                            : null,
+                        onLongPress: () => _convMenu(key),
                         onTap: () async {
                           await Navigator.of(context).push(
                               MaterialPageRoute<void>(
@@ -203,11 +282,37 @@ class _GroupTabState extends State<_GroupTab> {
   }
 
   Future<void> _load() async {
+    await _ChatPrefs.ensure();
     final g = await PlatformService.groupList();
     if (mounted) setState(() {
-      _groups = g;
+      _groups = _ChatPrefs.sort(g, (x) => '${x['gid']}');
       _loading = false;
     });
+  }
+
+  Future<void> _groupMenu(String key) async {
+    final pinned = _ChatPrefs.pinned.contains(key);
+    final muted = _ChatPrefs.muted.contains(key);
+    final v = await showModalBottomSheet<String>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+              leading: Icon(pinned ? Icons.push_pin : Icons.push_pin_outlined),
+              title: Text(pinned ? '取消置顶' : '置顶群聊'),
+              onTap: () => Navigator.pop(context, 'pin')),
+          ListTile(
+              leading: Icon(muted
+                  ? Icons.notifications_off
+                  : Icons.notifications_off_outlined),
+              title: Text(muted ? '取消免打扰' : '消息免打扰'),
+              onTap: () => Navigator.pop(context, 'mute')),
+        ]),
+      ),
+    );
+    if (v == 'pin') await _ChatPrefs.togglePin(key);
+    if (v == 'mute') await _ChatPrefs.toggleMute(key);
+    _load();
   }
 
   Future<void> _createGroup() async {
@@ -261,12 +366,30 @@ class _GroupTabState extends State<_GroupTab> {
                     itemBuilder: (_, i) {
                       final g = _groups[i];
                       final role = '${g['role']}';
+                      final key = '${g['gid']}';
+                      final pinned = _ChatPrefs.pinned.contains(key);
+                      final muted = _ChatPrefs.muted.contains(key);
                       return ListTile(
+                        tileColor:
+                            pinned ? const Color(0x0A000000) : null,
                         leading: const CircleAvatar(
                             child: Icon(Icons.groups)),
-                        title: Text('${g['name'] ?? ''}'),
+                        title: Row(children: [
+                          Flexible(child: Text('${g['name'] ?? ''}')),
+                          if (muted)
+                            const Padding(
+                              padding: EdgeInsets.only(left: 6),
+                              child: Icon(Icons.notifications_off,
+                                  size: 14, color: Colors.black38),
+                            ),
+                        ]),
                         subtitle: Text(
                             '${g['count']} 人${role == 'owner' ? ' · 群主' : role == 'admin' ? ' · 管理' : ''}${g['no_leave'] == true ? ' · 禁退' : ''}'),
+                        trailing: pinned
+                            ? const Icon(Icons.push_pin,
+                                size: 14, color: Colors.black38)
+                            : null,
+                        onLongPress: () => _groupMenu(key),
                         onTap: () async {
                           await Navigator.of(context).push(
                               MaterialPageRoute<void>(
@@ -333,6 +456,68 @@ class _ChatPageState extends State<_ChatPage> {
     if (ok) _load();
   }
 
+  // 在私聊里发红包（=转账 + 一条🧧消息，对方余额到账）。
+  Future<void> _redpacket() async {
+    var amount = 8;
+    final msgCtrl = TextEditingController(text: '恭喜发财，大吉大利');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: const Color(0xFFC0392B),
+          title: const Text('🧧 发红包', style: TextStyle(color: Color(0xFFFFE2A8))),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Wrap(spacing: 8, children: [
+              for (final a in [6, 8, 18, 66, 88])
+                ChoiceChip(
+                  label: Text('$a'),
+                  selected: amount == a,
+                  selectedColor: const Color(0xFFFFD24A),
+                  onSelected: (_) => setD(() => amount = a),
+                ),
+            ]),
+            const SizedBox(height: 10),
+            TextField(
+              controller: msgCtrl,
+              maxLength: 40,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                hintText: '写句祝福…',
+                hintStyle: TextStyle(color: Colors.white54),
+                counterStyle: TextStyle(color: Colors.white54),
+              ),
+            ),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child:
+                    const Text('取消', style: TextStyle(color: Colors.white70))),
+            FilledButton(
+                style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFFFD24A),
+                    foregroundColor: const Color(0xFF7A1F18)),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('塞钱进红包')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final d = await PlatformService.transfer(widget.peer, amount);
+    if (!mounted) return;
+    if (d == null) {
+      _snack(context, '发红包失败，请检查网络');
+    } else if (d['ok'] == true) {
+      _snack(context, '🧧 红包已发出！-$amount 币');
+      await PlatformService.dmSend(widget.peer,
+          text: '[🧧红包] ${msgCtrl.text.trim()}（$amount 币已到账）');
+      _load();
+    } else {
+      _snack(context, '${d['error'] ?? '发红包失败'}');
+    }
+  }
+
   Future<void> _sendCard() async {
     final picked = await _pickUser(context);
     if (picked == null) return;
@@ -387,6 +572,7 @@ class _ChatPageState extends State<_ChatPage> {
             onSend: _send,
             onRecommend: _recommend,
             onTransfer: _transfer,
+            onRedpacket: _redpacket,
             onCard: _sendCard),
       ]),
     );
@@ -967,12 +1153,14 @@ class _ChatInput extends StatelessWidget {
   final VoidCallback onSend;
   final VoidCallback onRecommend;
   final VoidCallback? onTransfer; // 私聊才有转账
+  final VoidCallback? onRedpacket; // 私聊才有发红包
   final VoidCallback? onCard; // 发个人名片
   const _ChatInput(
       {required this.controller,
       required this.onSend,
       required this.onRecommend,
       this.onTransfer,
+      this.onRedpacket,
       this.onCard});
   @override
   Widget build(BuildContext context) {
@@ -993,6 +1181,12 @@ class _ChatInput extends StatelessWidget {
                 icon: const Icon(Icons.paid_outlined, color: Colors.black54),
                 tooltip: '转账兑换币',
                 onPressed: onTransfer,
+              ),
+            if (onRedpacket != null)
+              IconButton(
+                icon: const Text('🧧', style: TextStyle(fontSize: 20)),
+                tooltip: '发红包',
+                onPressed: onRedpacket,
               ),
             if (onCard != null)
               IconButton(
