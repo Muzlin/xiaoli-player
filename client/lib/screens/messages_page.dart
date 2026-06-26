@@ -317,7 +317,12 @@ class _ChatPageState extends State<_ChatPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.peerNick)),
+      backgroundColor: const Color(0xFFEDEDED),
+      appBar: AppBar(
+          title: Text(widget.peerNick),
+          backgroundColor: const Color(0xFFEDEDED),
+          foregroundColor: Colors.black87,
+          elevation: 0),
       body: Column(children: [
         Expanded(
             child: _MsgList(
@@ -447,8 +452,12 @@ class _GroupChatPageState extends State<_GroupChatPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
         title: Text('${_info['name'] ?? '群聊'}'),
+        backgroundColor: const Color(0xFFEDEDED),
+        foregroundColor: Colors.black87,
+        elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.manage_accounts),
@@ -711,7 +720,6 @@ class _MsgList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
     if (msgs.isEmpty) {
       return const Center(
           child: Text('还没有消息，发一条吧~',
@@ -729,32 +737,27 @@ class _MsgList extends StatelessWidget {
                 onTap: () => onPlayVideo(
                     '${m['vid']}', '${m['title'] ?? '推荐视频'}'),
                 child: Container(
-                  width: 200,
+                  width: 210,
                   padding: const EdgeInsets.all(10),
                   decoration: BoxDecoration(
-                    color: mine ? cs.primary : Colors.black12,
-                    borderRadius: BorderRadius.circular(10),
+                    color: mine ? const Color(0xFF95EC69) : Colors.white,
+                    borderRadius: BorderRadius.circular(6),
                   ),
                   child: Row(children: [
-                    Icon(Icons.play_circle_fill,
-                        color: mine ? Colors.white : cs.primary),
+                    const Icon(Icons.play_circle_fill,
+                        color: Color(0xFF07C160), size: 30),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('推荐视频',
+                            const Text('推荐视频',
                                 style: TextStyle(
-                                    fontSize: 10,
-                                    color: mine
-                                        ? Colors.white70
-                                        : Colors.black54)),
+                                    fontSize: 10, color: Colors.black45)),
                             Text('${m['title'] ?? ''}',
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    color:
-                                        mine ? Colors.white : Colors.black87)),
+                                style: const TextStyle(color: Colors.black87)),
                           ]),
                     ),
                   ]),
@@ -762,35 +765,47 @@ class _MsgList extends StatelessWidget {
               )
             : Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
                 decoration: BoxDecoration(
-                  color: mine ? cs.primary : Colors.black12,
-                  borderRadius: BorderRadius.circular(12),
+                  // 微信风：自己=嫩绿，对方=白
+                  color: mine ? const Color(0xFF95EC69) : Colors.white,
+                  borderRadius: BorderRadius.circular(6),
                 ),
-                child: _linkifyText(
-                    '${m['text'] ?? ''}', mine ? Colors.white : Colors.black87),
+                child: _linkifyText('${m['text'] ?? ''}', Colors.black87),
               );
-        return Align(
-          alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 3),
-            child: Column(
-              crossAxisAlignment:
-                  mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-              children: [
-                if (group && !mine)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 4, bottom: 2),
-                    child: Text('${m['from_nick'] ?? ''}',
-                        style: const TextStyle(
-                            fontSize: 11, color: Colors.black45)),
-                  ),
-                ConstrainedBox(
-                    constraints: BoxConstraints(
-                        maxWidth: MediaQuery.of(context).size.width * 0.72),
-                    child: bubble),
-              ],
-            ),
+        // 微信风：对方头像在左、自己头像在右，气泡贴着头像。
+        final avatar = CircleAvatar(
+          radius: 18,
+          backgroundColor: mine ? const Color(0xFF07C160) : Colors.black26,
+          child: Icon(mine ? Icons.person : Icons.person_outline,
+              size: 20, color: Colors.white),
+        );
+        final bubbleCol = Column(
+          crossAxisAlignment:
+              mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+          children: [
+            if (group && !mine)
+              Padding(
+                padding: const EdgeInsets.only(left: 2, bottom: 2),
+                child: Text('${m['from_nick'] ?? ''}',
+                    style:
+                        const TextStyle(fontSize: 11, color: Colors.black45)),
+              ),
+            ConstrainedBox(
+                constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width * 0.64),
+                child: bubble),
+          ],
+        );
+        return Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: Row(
+            mainAxisAlignment:
+                mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: mine
+                ? [Flexible(child: bubbleCol), const SizedBox(width: 8), avatar]
+                : [avatar, const SizedBox(width: 8), Flexible(child: bubbleCol)],
           ),
         );
       },
@@ -810,40 +825,54 @@ class _ChatInput extends StatelessWidget {
       this.onTransfer});
   @override
   Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(8, 6, 8, 6),
-        child: Row(children: [
-          IconButton(
-            icon: const Icon(Icons.video_library_outlined),
-            tooltip: '推荐视频',
-            onPressed: onRecommend,
-          ),
-          if (onTransfer != null)
+    return Container(
+      color: const Color(0xFFF7F7F7), // 微信输入栏底色
+      child: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(6, 6, 6, 6),
+          child: Row(children: [
             IconButton(
-              icon: const Icon(Icons.paid_outlined),
-              tooltip: '转账兑换币',
-              onPressed: onTransfer,
+              icon: const Icon(Icons.video_library_outlined,
+                  color: Colors.black54),
+              tooltip: '推荐视频',
+              onPressed: onRecommend,
             ),
-          Expanded(
-            child: TextField(
-              controller: controller,
-              minLines: 1,
-              maxLines: 4,
-              decoration: const InputDecoration(
-                hintText: '说点什么…',
-                border: OutlineInputBorder(),
-                isDense: true,
+            if (onTransfer != null)
+              IconButton(
+                icon: const Icon(Icons.paid_outlined, color: Colors.black54),
+                tooltip: '转账兑换币',
+                onPressed: onTransfer,
               ),
-              onSubmitted: (_) => onSend(),
+            Expanded(
+              child: TextField(
+                controller: controller,
+                minLines: 1,
+                maxLines: 4,
+                decoration: InputDecoration(
+                  hintText: '说点什么…',
+                  filled: true,
+                  fillColor: Colors.white,
+                  isDense: true,
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12, vertical: 10),
+                  border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(6),
+                      borderSide: BorderSide.none),
+                ),
+                onSubmitted: (_) => onSend(),
+              ),
             ),
-          ),
-          IconButton(
-            icon: Icon(Icons.send, color: cs.primary),
-            onPressed: onSend,
-          ),
-        ]),
+            const SizedBox(width: 6),
+            FilledButton(
+              style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFF07C160),
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  minimumSize: const Size(0, 40)),
+              onPressed: onSend,
+              child: const Text('发送'),
+            ),
+          ]),
+        ),
       ),
     );
   }

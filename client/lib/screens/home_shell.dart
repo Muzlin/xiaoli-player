@@ -7616,6 +7616,134 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   }
 
   // 我的收款：展示收款ID + 复制收款链接(扫一扫待网络恢复加二维码)。
+  // 抢券广场：投券进池(从已购券) + 抢别人投的券。
+  Future<void> _showCouponPlaza() async {
+    var pools = await PlatformService.couponPoolList();
+    if (!mounted) return;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setS) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          maxChildSize: 0.9,
+          builder: (_, sc) => Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 12, 6),
+              child: Row(children: [
+                const Text('抢券广场',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await _dropCouponDialog();
+                    final fresh = await PlatformService.couponPoolList();
+                    if (ctx.mounted) setS(() => pools = fresh);
+                  },
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('投券'),
+                ),
+              ]),
+            ),
+            Expanded(
+              child: pools.isEmpty
+                  ? const Center(
+                      child: Text('还没有人投券，点「投券」发第一个~',
+                          style: TextStyle(color: Colors.black38)))
+                  : ListView.builder(
+                      controller: sc,
+                      itemCount: pools.length,
+                      itemBuilder: (_, i) {
+                        final p = pools[i];
+                        return Card(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 5),
+                          child: ListTile(
+                            leading: const Icon(Icons.local_activity,
+                                color: Color(0xFFF26B21)),
+                            title: Text(
+                                '${_couponNames[p['item']] ?? p['item']}'),
+                            subtitle: Text(
+                                '${p['msg'] ?? ''} · 剩 ${p['left']}/${p['count']}'),
+                            trailing: FilledButton(
+                              onPressed: () async {
+                                final d = await PlatformService.couponGrab(
+                                    '${p['id']}');
+                                if (d != null && d['ok'] == true) {
+                                  _toast('抢到一张优惠券！');
+                                } else {
+                                  _toast('${d?['error'] ?? '抢券失败'}');
+                                }
+                                final fresh =
+                                    await PlatformService.couponPoolList();
+                                if (ctx.mounted) setS(() => pools = fresh);
+                              },
+                              child: const Text('抢'),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _dropCouponDialog() async {
+    final cps = await PlatformService.myCoupons();
+    if (!mounted) return;
+    if (cps.isEmpty) {
+      _toast('你还没有优惠券，先去兑换商城兑换');
+      return;
+    }
+    String? item = cps.keys.first;
+    final countCtrl = TextEditingController(text: '1');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('投券进抢券池'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final e in cps.entries)
+              RadioListTile<String>(
+                dense: true,
+                value: e.key,
+                groupValue: item,
+                onChanged: (v) => setD(() => item = v),
+                title: Text(
+                    '${_couponNames[e.key] ?? e.key}（有 ${e.value} 张）'),
+              ),
+            TextField(
+                controller: countCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '投几张')),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('投出')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || item == null) return;
+    final count = int.tryParse(countCtrl.text.trim()) ?? 0;
+    final d = await PlatformService.couponDrop(item!, count, '快来抢券');
+    if (d != null && d['ok'] == true) {
+      _toast('已投 $count 张进抢券池');
+    } else {
+      _toast('${d?['error'] ?? '投券失败'}');
+    }
+  }
+
   Future<void> _showReceive() async {
     final uid = await PlatformService.walletUid();
     final p = await SharedPreferences.getInstance();
@@ -8497,6 +8625,8 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                     _entry(cs, Icons.palette, '红包皮肤', _showRedSkins),
                     _entry(cs, Icons.confirmation_num, '我的优惠券',
                         _showCoupons),
+                    _entry(cs, Icons.local_activity, '抢券广场',
+                        _showCouponPlaza),
                     _entry(cs, Icons.qr_code_2, '我的收款', _showReceive),
                     _entry(cs, Icons.support_agent, '联系管理员',
                         _contactAdmin),

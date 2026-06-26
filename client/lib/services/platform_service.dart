@@ -752,6 +752,31 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  /// 投一批优惠券进抢券池。返回 {ok,id,count}。
+  static Future<Map<String, dynamic>?> couponDrop(
+      String item, int count, String msg) async {
+    final m = msg.trim().isEmpty ? '' : '&msg=${Uri.encodeComponent(msg.trim())}';
+    final d = await _g('/coupon-drop?item=$item&count=$count$m', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 开放的抢券池 [{id,item,msg,left,count,ts}]。
+  static Future<List<Map<String, dynamic>>> couponPoolList() async {
+    final d = await _g('/coupon-pool-list');
+    if (d is Map && d['pools'] is List) {
+      return (d['pools'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// 抢一张优惠券。返回 {ok,item} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> couponGrab(String id) async {
+    final d = await _g('/coupon-grab?id=$id', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
   /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
   /// 比走隧道 /checkin 更可靠。
