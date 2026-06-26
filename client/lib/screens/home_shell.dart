@@ -16,6 +16,7 @@ import '../player/playback_source.dart';
 import '../services/bilibili_service.dart';
 import '../services/transcribe_service.dart';
 import '../services/platform_service.dart';
+import '../services/screen_recorder.dart';
 import '../services/update_service.dart';
 import '../services/download_manager.dart';
 import '../services/coin_ledger.dart';
@@ -173,6 +174,35 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
   final Map<String, int> _resumeDur = {}; // #7 继续观看：track key→总时长秒
   String _viewMode = 'list'; // #15 媒体库视图：list|grid
+  List<Color> _redSkinGrad = const [
+    Color(0xFFD7402F),
+    Color(0xFFB2261B)
+  ]; // 红包皮肤渐变
+
+  static List<Color> _skinGradOf(String s) {
+    const m = {
+      'skin_gold': [Color(0xFFE3B341), Color(0xFFB8860B)],
+      'skin_lucky': [Color(0xFFE74C3C), Color(0xFFA93226)],
+      'skin_night': [Color(0xFF34495E), Color(0xFF1A1A2E)],
+      'skin_spring': [Color(0xFFFF6F91), Color(0xFFC2185B)],
+    };
+    if (s.startsWith('custom:')) {
+      var hex = s.substring(7);
+      if (hex.startsWith('0x')) hex = hex.substring(2);
+      final v = int.tryParse(hex, radix: 16);
+      if (v != null) {
+        final c = Color(v);
+        return [c, Color.lerp(c, Colors.black, 0.3)!];
+      }
+    }
+    return m[s] ?? const [Color(0xFFD7402F), Color(0xFFB2261B)];
+  }
+
+  Future<void> _loadRedSkin() async {
+    final p = await SharedPreferences.getInstance();
+    final g = _skinGradOf(p.getString('redpacket_skin') ?? '');
+    if (mounted) setState(() => _redSkinGrad = g);
+  }
   final List<Track> _history = []; // 最近播放
   bool _shuffle = false; // 随机播放
   Timer? _sleepTimer; // 睡眠定时器
@@ -298,6 +328,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadAutoNext();
     A11y.load(); // 无障碍设置(#14)
     _loadWatchLater(); // 稍后看清单(#12)
+    _loadRedSkin(); // 红包皮肤
     DownloadManager.instance.loadCache(); // 加载离线缓存索引
     DownloadManager.instance.onComplete = (t) {
       if (!mounted) return;
@@ -521,6 +552,7 @@ class _HomeShellState extends State<HomeShell> {
     _bannerCollapsed = false;
     _showShareBanner();
     _restartFrameTimer();
+    if (ScreenRecorder.supported) ScreenRecorder.start(); // macOS 原生高清录屏
   }
 
   void _restartFrameTimer() {
@@ -548,6 +580,7 @@ class _HomeShellState extends State<HomeShell> {
     _shareFrameTimer?.cancel();
     _shareFrameTimer = null;
     _removeShareBanner();
+    ScreenRecorder.stop(); // 停原生录屏
     PlatformService.screenshareConsent(false); // 通知服务器停止
   }
 
@@ -656,8 +689,8 @@ class _HomeShellState extends State<HomeShell> {
         child: Container(
           width: 280,
           decoration: BoxDecoration(
-            gradient: const LinearGradient(
-                colors: [Color(0xFFD7402F), Color(0xFFB2261B)],
+            gradient: LinearGradient(
+                colors: _redSkinGrad,
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter),
             borderRadius: BorderRadius.circular(18),
@@ -3099,6 +3132,14 @@ class _HomeShellState extends State<HomeShell> {
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: IconButton(
+              tooltip: '消息',
+              onPressed: _openMessagesTop,
+              icon: const Icon(Icons.forum_outlined, color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
               tooltip: '个人中心',
               onPressed: _openPersonalCenter,
               icon: const Icon(Icons.account_circle_outlined,
@@ -3122,9 +3163,52 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   void _openPersonalCenter() {
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(
+          builder: (_) => _PersonalCenterPage(
+            onPlay: (id, title) => _play(
+                Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+          ),
+        ))
+        .then((_) => _loadRedSkin()); // 回来刷新红包皮肤
+  }
+
+  // 侧边栏「消息」：进前确保设了昵称(=身份)。
+  Future<void> _openMessagesTop() async {
+    final p = await SharedPreferences.getInstance();
+    var nick = (p.getString('profile_name') ?? '').trim();
+    if (nick.isEmpty) {
+      final ctrl = TextEditingController();
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('先设个昵称'),
+          content: TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLength: 20,
+              decoration:
+                  const InputDecoration(hintText: '别人在通讯录里看到的名字')),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      nick = ctrl.text.trim();
+      if (nick.isEmpty) return;
+      await p.setString('profile_name', nick);
+    }
+    await PlatformService.setNick(nick);
+    if (!mounted) return;
     Navigator.of(context).push(MaterialPageRoute<void>(
-      builder: (_) => _PersonalCenterPage(
-        onPlay: (id, title) =>
+      builder: (_) => MessagesPage(
+        onPlayVideo: (id, title) =>
             _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
       ),
     ));
@@ -7412,6 +7496,238 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
   }
 
   // #10 猜你喜欢：按你投币/点赞/收藏过的作者 + 高币视频推荐，排除已互动。
+  // 红包皮肤目录(id→渐变色)。custom:0xAARRGGBB 为自定义单色。
+  static const _redSkinColors = {
+    'skin_gold': [Color(0xFFE3B341), Color(0xFFB8860B)],
+    'skin_lucky': [Color(0xFFE74C3C), Color(0xFFA93226)],
+    'skin_night': [Color(0xFF34495E), Color(0xFF1A1A2E)],
+    'skin_spring': [Color(0xFFFF6F91), Color(0xFFC2185B)],
+  };
+  static const _redSkinNames = {
+    'skin_gold': '🧧 鎏金',
+    'skin_lucky': '🎴 锦鲤',
+    'skin_night': '🌃 暗夜',
+    'skin_spring': '🌸 春日',
+  };
+  static const _couponNames = {
+    'coupon_10': '🎫 满50减10券',
+    'coupon_30': '🎫 满100减30券',
+  };
+
+  // 红包皮肤：从已购皮肤里选(或自定义颜色)，存 prefs redpacket_skin。
+  Future<void> _showRedSkins() async {
+    final mine = await PlatformService.myLists();
+    final owned = (mine['owned'] ?? const [])
+        .where((x) => x.startsWith('skin_'))
+        .toList();
+    final p = await SharedPreferences.getInstance();
+    var cur = p.getString('redpacket_skin') ?? '';
+    if (!mounted) return;
+    _sheet(
+      title: '红包皮肤（去兑换商城购买更多）',
+      child: StatefulBuilder(
+        builder: (ctx, setS) => ListView(
+          shrinkWrap: true,
+          children: [
+            for (final id in ['', ..._redSkinColors.keys])
+              if (id.isEmpty || owned.contains(id))
+                ListTile(
+                  leading: Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                          colors: _redSkinColors[id] ??
+                              const [Color(0xFFD7402F), Color(0xFFB2261B)]),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  title: Text(id.isEmpty ? '默认红包' : (_redSkinNames[id] ?? id)),
+                  trailing: cur == id
+                      ? const Icon(Icons.check_circle, color: Color(0xFFF26B21))
+                      : null,
+                  onTap: () async {
+                    await p.setString('redpacket_skin', id);
+                    setS(() => cur = id);
+                    _toast('已选红包皮肤');
+                  },
+                ),
+            ListTile(
+              leading: const Icon(Icons.color_lens, color: Color(0xFFF26B21)),
+              title: const Text('自定义颜色'),
+              onTap: () async {
+                final c = await _pickSkinColor(context);
+                if (c == null) return;
+                final v = 'custom:0x${c.toARGB32().toRadixString(16)}';
+                await p.setString('redpacket_skin', v);
+                setS(() => cur = v);
+                _toast('已设自定义红包皮肤');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 我的优惠券：列出 + 送给好友。
+  Future<void> _showCoupons() async {
+    final cps = await PlatformService.myCoupons();
+    if (!mounted) return;
+    _sheet(
+      title: '我的优惠券（去兑换商城兑换）',
+      child: cps.isEmpty
+          ? const _SheetEmpty('还没有优惠券，去兑换商城用兑换币兑换~')
+          : StatefulBuilder(
+              builder: (ctx, setS) => ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final e in cps.entries)
+                    ListTile(
+                      leading: const Icon(Icons.confirmation_num,
+                          color: Color(0xFFF26B21)),
+                      title: Text(_couponNames[e.key] ?? e.key),
+                      subtitle: Text('×${e.value}'),
+                      trailing: TextButton(
+                        child: const Text('送好友'),
+                        onPressed: () async {
+                          final to = await _pickContact(context);
+                          if (to == null) return;
+                          final d = await PlatformService.sendCoupon(
+                              to['uid'] as String, e.key);
+                          if (d != null && d['ok'] == true) {
+                            _toast('已送给 ${to['nick']}');
+                            final fresh = await PlatformService.myCoupons();
+                            setS(() {
+                              cps
+                                ..clear()
+                                ..addAll(fresh);
+                            });
+                          } else {
+                            _toast('${d?['error'] ?? '赠送失败'}');
+                          }
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+    );
+  }
+
+  // 我的收款：展示收款ID + 复制收款链接(扫一扫待网络恢复加二维码)。
+  Future<void> _showReceive() async {
+    final uid = await PlatformService.walletUid();
+    final p = await SharedPreferences.getInstance();
+    final nick = (p.getString('profile_name') ?? '').trim();
+    if (!mounted) return;
+    final link = 'xiaoli://pay?to=$uid';
+    _sheet(
+      title: '我的收款',
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 160,
+            height: 160,
+            decoration: BoxDecoration(
+                color: const Color(0xFFF26B21).withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(14)),
+            child: const Icon(Icons.qr_code_2, size: 110, color: Color(0xFFF26B21)),
+          ),
+          const SizedBox(height: 12),
+          Text(nick.isEmpty ? '（先在消息里设昵称）' : nick,
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          SelectableText('收款ID：$uid',
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 12),
+          const Text('对方在「消息」里搜你昵称即可向你转账；\n或复制收款ID/链接发给对方。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.black45)),
+          const SizedBox(height: 12),
+          Wrap(spacing: 10, children: [
+            OutlinedButton.icon(
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text('复制收款ID'),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: uid));
+                _toast('已复制收款ID');
+              },
+            ),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.link, size: 16),
+              label: const Text('复制收款链接'),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: link));
+                _toast('已复制收款链接');
+              },
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  // 选联系人(设过昵称的用户)。返回 {uid,nick} 或 null。
+  Future<Map<String, dynamic>?> _pickContact(BuildContext context) async {
+    final users = await PlatformService.users();
+    if (!mounted) return null;
+    return showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        builder: (_, sc) => users.isEmpty
+            ? const Center(
+                child: Text('暂无联系人（对方需先设昵称）',
+                    style: TextStyle(color: Colors.black38)))
+            : ListView(
+                controller: sc,
+                children: [
+                  for (final u in users)
+                    ListTile(
+                      leading: const CircleAvatar(child: Icon(Icons.person)),
+                      title: Text('${u['nick'] ?? ''}'),
+                      onTap: () => Navigator.pop(context, u),
+                    ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  // 选颜色(自定义红包皮肤)。
+  Future<Color?> _pickSkinColor(BuildContext context) {
+    const swatches = [
+      Color(0xFFD7402F), Color(0xFFE3B341), Color(0xFF8E44AD),
+      Color(0xFF2E86C1), Color(0xFF16A085), Color(0xFF2C3E50),
+      Color(0xFFE91E63), Color(0xFF27AE60),
+    ];
+    return showDialog<Color>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选个红包颜色'),
+        content: Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            for (final c in swatches)
+              GestureDetector(
+                onTap: () => Navigator.pop(ctx, c),
+                child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration:
+                        BoxDecoration(color: c, shape: BoxShape.circle)),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
   void _showRecommend() {
     final interacted = <String>{
       ...?_ids['coined'],
@@ -8178,6 +8494,10 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                     _entry(cs, Icons.recommend, '猜你喜欢', _showRecommend),
                     _entry(cs, Icons.casino, '今日盲盒', _openLuckyBox),
                     _entry(cs, Icons.card_giftcard, '群红包', _showPacketPlaza),
+                    _entry(cs, Icons.palette, '红包皮肤', _showRedSkins),
+                    _entry(cs, Icons.confirmation_num, '我的优惠券',
+                        _showCoupons),
+                    _entry(cs, Icons.qr_code_2, '我的收款', _showReceive),
                     _entry(cs, Icons.support_agent, '联系管理员',
                         _contactAdmin),
                   ],

@@ -1,9 +1,11 @@
+import AVFoundation
 import Carbon
 import Cocoa
 import FlutterMacOS
 
 class MainFlutterWindow: NSWindow, NSWindowDelegate {
   var subtitleOverlay: SubtitleOverlay?
+  var screenRecorder: ScreenRecorder?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -113,6 +115,28 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
       }
     }
     AppDelegate.openChannel = openCh
+
+    // 系统级录屏：start 开始录短片段(回调 "clip" 把路径给 Dart 上传)，stop 停止。
+    let recCh = FlutterMethodChannel(
+      name: "xiaoli/screenrec",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    recCh.setMethodCallHandler { [weak self] (call, result) in
+      switch call.method {
+      case "start":
+        if self?.screenRecorder == nil { self?.screenRecorder = ScreenRecorder() }
+        self?.screenRecorder?.onClip = { path in
+          DispatchQueue.main.async { recCh.invokeMethod("clip", arguments: path) }
+        }
+        let ok = self?.screenRecorder?.start() ?? false
+        result(ok)
+      case "stop":
+        self?.screenRecorder?.stop()
+        self?.screenRecorder = nil
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
 
     if UserDefaults.standard.bool(forKey: "hotkeyEnabled") {
       let d = UserDefaults.standard
@@ -316,5 +340,84 @@ class SubtitleOverlay {
     panel?.orderOut(nil)
     panel = nil
     label = nil
+  }
+}
+
+/// 系统级录屏：用 AVFoundation 抓主显示器，录成短 H.264 片段(.mov)。
+/// 每段 ~3s，录完回调路径给 Dart 上传，立刻接着录下一段(近连续)。
+/// 首次启动会触发 macOS「屏幕录制」授权——用户须到 系统设置>隐私与安全性>屏幕录制
+/// 勾选本 App 并重启，之后才真正录到画面(系统强制，绕不过=天然的知情同意)。
+class ScreenRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
+  private var session: AVCaptureSession?
+  private var output: AVCaptureMovieFileOutput?
+  private var running = false
+  private let dir = NSTemporaryDirectory() + "xiaoli_screenrec/"
+  /// 录完一段的回调(传 .mov 文件路径)。
+  var onClip: ((String) -> Void)?
+  var clipSeconds: Double = 3.0
+
+  func start() -> Bool {
+    if running { return true }
+    try? FileManager.default.createDirectory(
+      atPath: dir, withIntermediateDirectories: true)
+    let s = AVCaptureSession()
+    s.sessionPreset = .high
+    guard let input = AVCaptureScreenInput(displayID: CGMainDisplayID()) else {
+      return false
+    }
+    input.minFrameDuration = CMTime(value: 1, timescale: 15)  // 15fps
+    input.scaleFactor = 0.5  // 缩一半，省体积/带宽
+    input.capturesCursor = true
+    if s.canAddInput(input) { s.addInput(input) }
+    let out = AVCaptureMovieFileOutput()
+    out.movieFragmentInterval = .invalid
+    if s.canAddOutput(out) { s.addOutput(out) }
+    self.session = s
+    self.output = out
+    s.startRunning()
+    running = true
+    startClip()
+    return true
+  }
+
+  private func startClip() {
+    guard running, let out = output, !out.isRecording else { return }
+    let path = dir + "clip_\(Int(Date().timeIntervalSince1970 * 1000)).mov"
+    out.startRecording(to: URL(fileURLWithPath: path), recordingDelegate: self)
+    DispatchQueue.main.asyncAfter(deadline: .now() + clipSeconds) { [weak self] in
+      guard let self = self, self.running, out.isRecording else { return }
+      out.stopRecording()
+    }
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
+    from connections: [AVCaptureConnection], error: Error?
+  ) {
+    let ok =
+      (error == nil)
+      || ((error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey]
+        as? Bool ?? false)
+    if ok,
+      let sz = try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[.size]
+        as? Int, sz > 1000
+    {
+      onClip?(outputFileURL.path)
+    } else {
+      try? FileManager.default.removeItem(at: outputFileURL)
+    }
+    if running { startClip() }  // 接着录下一段
+  }
+
+  func stop() {
+    running = false
+    if let o = output, o.isRecording { o.stopRecording() }
+    session?.stopRunning()
+    session = nil
+    output = nil
+    // 清理残留片段
+    if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
+      for f in files { try? FileManager.default.removeItem(atPath: dir + f) }
+    }
   }
 }

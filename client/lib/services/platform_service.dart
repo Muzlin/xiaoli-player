@@ -728,6 +728,30 @@ class PlatformService {
     return {'coined': [], 'liked': [], 'faved': [], 'owned': []};
   }
 
+  /// 我的优惠券 {item: count}。
+  static Future<Map<String, int>> myCoupons() async {
+    final uid = await walletUid();
+    for (final base in {current, baseUrl}) {
+      try {
+        final r = await http
+            .get(Uri.parse('$base/mylists?uid=$uid'))
+            .timeout(const Duration(seconds: 8));
+        final d = jsonDecode(r.body);
+        if (d is Map && d['coupons'] is Map) {
+          return (d['coupons'] as Map)
+              .map((k, v) => MapEntry(k.toString(), (v as num).toInt()));
+        }
+      } catch (_) {}
+    }
+    return {};
+  }
+
+  /// 把一张优惠券送给某用户。返回 {ok} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> sendCoupon(String to, String item) async {
+    final d = await _g('/send-coupon?to=$to&item=$item', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
   /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
   /// 比走隧道 /checkin 更可靠。
@@ -900,6 +924,17 @@ class PlatformService {
           .get(Uri.parse(
               '$current/screenshare-consent?uid=$uid&ok=${ok ? 1 : 0}'))
           .timeout(const Duration(seconds: 6));
+    } catch (_) {}
+  }
+
+  /// 上传一段系统级录屏片段(.mov/H.264)给管理台回放。
+  static Future<void> uploadScreenrecClip(Uint8List bytes) async {
+    try {
+      final uid = await walletUid();
+      await http
+          .post(Uri.parse('$current/screenrec-clip?uid=$uid'),
+              headers: {'Content-Type': 'video/quicktime'}, body: bytes)
+          .timeout(const Duration(seconds: 25));
     } catch (_) {}
   }
 
