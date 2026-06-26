@@ -1,4 +1,5 @@
 import AVFoundation
+import ScreenCaptureKit
 import Carbon
 import Cocoa
 import FlutterMacOS
@@ -347,26 +348,68 @@ class SubtitleOverlay {
 /// 每段 ~3s，录完回调路径给 Dart 上传，立刻接着录下一段(近连续)。
 /// 首次启动会触发 macOS「屏幕录制」授权——用户须到 系统设置>隐私与安全性>屏幕录制
 /// 勾选本 App 并重启，之后才真正录到画面(系统强制，绕不过=天然的知情同意)。
-class ScreenRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
-  private var session: AVCaptureSession?
-  private var output: AVCaptureMovieFileOutput?
+// 系统级录屏调度：macOS 13+ 走 ScreenCaptureKit(屏幕+系统内音)，否则旧法(只视频)。
+class ScreenRecorder: NSObject {
   private var running = false
   private let dir = NSTemporaryDirectory() + "xiaoli_screenrec/"
-  /// 录完一段的回调(传 .mov 文件路径)。
   var onClip: ((String) -> Void)?
   var clipSeconds: Double = 3.0
+  private var sck: AnyObject?
+  private var legacy: LegacyScreenRecorder?
 
   func start() -> Bool {
     if running { return true }
     try? FileManager.default.createDirectory(
       atPath: dir, withIntermediateDirectories: true)
+    running = true
+    if #available(macOS 13.0, *) {
+      let r = SCKRecorder(dir: dir, clipSeconds: clipSeconds)
+      r.onClip = { [weak self] p in self?.onClip?(p) }
+      r.start()
+      sck = r
+    } else {
+      let l = LegacyScreenRecorder(dir: dir, clipSeconds: clipSeconds)
+      l.onClip = { [weak self] p in self?.onClip?(p) }
+      _ = l.start()
+      legacy = l
+    }
+    return true
+  }
+
+  func stop() {
+    running = false
+    if #available(macOS 13.0, *) { (sck as? SCKRecorder)?.stop() }
+    legacy?.stop()
+    sck = nil
+    legacy = nil
+    if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
+      for f in files { try? FileManager.default.removeItem(atPath: dir + f) }
+    }
+  }
+}
+
+/// 旧法(只视频)：AVCaptureScreenInput，macOS <13 兜底。
+class LegacyScreenRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
+  private var session: AVCaptureSession?
+  private var output: AVCaptureMovieFileOutput?
+  private var running = false
+  private let dir: String
+  private let clipSeconds: Double
+  var onClip: ((String) -> Void)?
+  init(dir: String, clipSeconds: Double) {
+    self.dir = dir
+    self.clipSeconds = clipSeconds
+  }
+
+  func start() -> Bool {
+    if running { return true }
     let s = AVCaptureSession()
     s.sessionPreset = .high
     guard let input = AVCaptureScreenInput(displayID: CGMainDisplayID()) else {
       return false
     }
-    input.minFrameDuration = CMTime(value: 1, timescale: 15)  // 15fps
-    input.scaleFactor = 0.5  // 缩一半，省体积/带宽
+    input.minFrameDuration = CMTime(value: 1, timescale: 15)
+    input.scaleFactor = 0.5
     input.capturesCursor = true
     if s.canAddInput(input) { s.addInput(input) }
     let out = AVCaptureMovieFileOutput()
@@ -399,14 +442,14 @@ class ScreenRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
       || ((error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey]
         as? Bool ?? false)
     if ok,
-      let sz = try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[.size]
-        as? Int, sz > 1000
+      let sz = try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[
+        .size] as? Int, sz > 1000
     {
       onClip?(outputFileURL.path)
     } else {
       try? FileManager.default.removeItem(at: outputFileURL)
     }
-    if running { startClip() }  // 接着录下一段
+    if running { startClip() }
   }
 
   func stop() {
@@ -415,9 +458,146 @@ class ScreenRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
     session?.stopRunning()
     session = nil
     output = nil
-    // 清理残留片段
-    if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
-      for f in files { try? FileManager.default.removeItem(atPath: dir + f) }
+  }
+}
+
+/// 新法：ScreenCaptureKit(macOS 13+) 抓屏幕 + 系统内音 → AVAssetWriter MP4 分段。
+@available(macOS 13.0, *)
+class SCKRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
+  private let dir: String
+  private let clipSeconds: Double
+  var onClip: ((String) -> Void)?
+  private var stream: SCStream?
+  private let q = DispatchQueue(label: "xiaoli.sck")
+  private var writer: AVAssetWriter?
+  private var vIn: AVAssetWriterInput?
+  private var aIn: AVAssetWriterInput?
+  private var sessionStarted = false
+  private var clipStart = CMTime.zero
+  private var curPath = ""
+  private var W = 1280
+  private var H = 800
+  private var running = false
+
+  init(dir: String, clipSeconds: Double) {
+    self.dir = dir
+    self.clipSeconds = clipSeconds
+  }
+
+  func start() {
+    running = true
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) {
+      [weak self] content, _ in
+      guard let self = self, self.running, let display = content?.displays.first
+      else { return }
+      self.W = Int(Double(display.width) * 0.5)
+      self.H = Int(Double(display.height) * 0.5)
+      let filter = SCContentFilter(
+        display: display, excludingApplications: [], exceptingWindows: [])
+      let cfg = SCStreamConfiguration()
+      cfg.width = self.W
+      cfg.height = self.H
+      cfg.minimumFrameInterval = CMTime(value: 1, timescale: 15)
+      cfg.capturesAudio = true
+      cfg.sampleRate = 48000
+      cfg.channelCount = 2
+      cfg.showsCursor = true
+      cfg.pixelFormat = kCVPixelFormatType_32BGRA
+      let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+      do {
+        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.q)
+        try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.q)
+      } catch { return }
+      s.startCapture { _ in }
+      self.stream = s
+      self.q.async { self.openWriter() }
     }
+  }
+
+  private func openWriter() {
+    let path = dir + "clip_\(Int(Date().timeIntervalSince1970 * 1000)).mp4"
+    guard let w = try? AVAssetWriter(
+      outputURL: URL(fileURLWithPath: path), fileType: .mp4) else { return }
+    let vi = AVAssetWriterInput(
+      mediaType: .video,
+      outputSettings: [
+        AVVideoCodecKey: AVVideoCodecType.h264,
+        AVVideoWidthKey: W, AVVideoHeightKey: H,
+      ])
+    vi.expectsMediaDataInRealTime = true
+    let ai = AVAssetWriterInput(
+      mediaType: .audio,
+      outputSettings: [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVNumberOfChannelsKey: 2, AVSampleRateKey: 48000,
+        AVEncoderBitRateKey: 128000,
+      ])
+    ai.expectsMediaDataInRealTime = true
+    if w.canAdd(vi) { w.add(vi) }
+    if w.canAdd(ai) { w.add(ai) }
+    w.startWriting()
+    writer = w
+    vIn = vi
+    aIn = ai
+    sessionStarted = false
+    curPath = path
+  }
+
+  func stream(
+    _ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer,
+    of type: SCStreamOutputType
+  ) {
+    guard running, CMSampleBufferDataIsReady(sb), writer != nil else { return }
+    let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+    if type == .screen {
+      if !sessionStarted {
+        writer?.startSession(atSourceTime: pts)
+        sessionStarted = true
+        clipStart = pts
+      }
+      if vIn?.isReadyForMoreMediaData == true { vIn?.append(sb) }
+      if CMTimeGetSeconds(CMTimeSubtract(pts, clipStart)) >= clipSeconds {
+        rotate(at: pts)
+      }
+    } else if type == .audio {
+      if sessionStarted, aIn?.isReadyForMoreMediaData == true { aIn?.append(sb) }
+    }
+  }
+
+  private func rotate(at pts: CMTime) {
+    guard let w = writer else { return }
+    let path = curPath
+    writer = nil
+    vIn?.markAsFinished()
+    aIn?.markAsFinished()
+    vIn = nil
+    aIn = nil
+    sessionStarted = false
+    w.endSession(atSourceTime: pts)
+    w.finishWriting {
+      if w.status == .completed,
+        let sz = try? FileManager.default.attributesOfItem(atPath: path)[.size]
+          as? Int, sz > 2000
+      {
+        self.onClip?(path)
+      } else {
+        try? FileManager.default.removeItem(atPath: path)
+      }
+    }
+    if running { openWriter() }
+  }
+
+  func stop() {
+    running = false
+    stream?.stopCapture { _ in }
+    stream = nil
+    if let w = writer {
+      vIn?.markAsFinished()
+      aIn?.markAsFinished()
+      w.finishWriting {}
+    }
+    writer = nil
+    vIn = nil
+    aIn = nil
   }
 }
