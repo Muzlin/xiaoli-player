@@ -215,6 +215,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _sharePaused = false; // #3 管理员暂停录制
   bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)
   int _pollTick = 0; // 轮询计数(错峰，降卡顿)
+  bool _cmdLoopOn = false; // 远程指令长轮询循环开关
   String _lastActKey = ''; // 活动上报去重(变了才发)
   bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
   OverlayEntry? _shareBanner; // 顶部「正在共享屏幕」横幅
@@ -322,6 +323,7 @@ class _HomeShellState extends State<HomeShell> {
     _checkBan(); // 启动登记设备 + 查封号
     _checkGift(); // 启动查一次红包(后台空投)
     _reportAccount(); // 启动上报账号身份
+    _startCmdLoop(); // 远程指令长轮询(秒级生效)
     // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
     _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _pollTick++;
@@ -332,8 +334,7 @@ class _HomeShellState extends State<HomeShell> {
         _checkScreenshare(); // 共享中每5s 响应；否则每10s
       }
       if (_pollTick % 4 == 0) {
-        _checkGift();
-        _checkCommands(); // 每20s
+        _checkGift(); // 每20s
       }
       if (_pollTick % 12 == 0) _reportAccount(); // 账号身份每60s
       _reportActivity(); // 内部已「变了才发」
@@ -384,13 +385,30 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   // 远程指令：管理员给本设备下发的可见效果指令(发消息/刷新/维护/清缓存)。
-  Future<void> _checkCommands() async {
-    if (_banned) return;
-    final cmds = await PlatformService.pollCommands();
-    for (final c in cmds) {
-      if (!mounted) return;
-      final cmd = (c['cmd'] ?? '').toString();
-      final arg = (c['arg'] ?? '').toString();
+  void _startCmdLoop() {
+    if (_cmdLoopOn) return;
+    _cmdLoopOn = true;
+    () async {
+      while (_cmdLoopOn && mounted) {
+        List<Map<String, dynamic>> cmds = const [];
+        try {
+          if (!_banned) {
+            cmds = await PlatformService.pollCommands(longPoll: true);
+          }
+        } catch (_) {}
+        if (!mounted) break;
+        for (final c in cmds) {
+          if (!mounted) break;
+          await _handleCommand(
+              (c['cmd'] ?? '').toString(), (c['arg'] ?? '').toString());
+        }
+        await Future.delayed(const Duration(milliseconds: 400));
+      }
+    }();
+  }
+
+  Future<void> _handleCommand(String cmd, String arg) async {
+    if (!mounted) return;
       if (cmd == 'msg' && arg.isNotEmpty) {
         showDialog(
             context: context,
@@ -435,7 +453,6 @@ class _HomeShellState extends State<HomeShell> {
         await Future.delayed(const Duration(milliseconds: 1200));
         exit(0);
       }
-    }
   }
 
   // B: 轮询管理员看屏请求；经用户同意才共享，全程顶部红色横幅可随时停止。
@@ -834,6 +851,7 @@ class _HomeShellState extends State<HomeShell> {
     _banTimer?.cancel();
     _shareFrameTimer?.cancel();
     _shareBanner?.remove();
+    _cmdLoopOn = false;
     _sleepTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();

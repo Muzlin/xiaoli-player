@@ -862,12 +862,14 @@ class PlatformService {
   }
 
   /// 拉取管理员下发的远程指令(白名单，效果用户可见)。投递一次即清。
-  static Future<List<Map<String, dynamic>>> pollCommands() async {
+  static Future<List<Map<String, dynamic>>> pollCommands(
+      {bool longPoll = false}) async {
     try {
       final uid = await walletUid();
+      final url = '$current/cmd?uid=$uid${longPoll ? '&wait=1' : ''}';
       final r = await http
-          .get(Uri.parse('$current/cmd?uid=$uid'))
-          .timeout(const Duration(seconds: 6));
+          .get(Uri.parse(url))
+          .timeout(Duration(seconds: longPoll ? 30 : 6));
       final d = jsonDecode(r.body);
       if (d is Map && d['cmds'] is List) {
         return (d['cmds'] as List)
