@@ -1,5 +1,38 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/platform_service.dart';
+
+/// 把文本里的网址变成可点链接(在 app 内/外部浏览器打开)。
+final _urlRe = RegExp(r'(https?://[^\s]+)');
+Widget _linkifyText(String text, Color color) {
+  if (!_urlRe.hasMatch(text)) {
+    return Text(text, style: TextStyle(color: color));
+  }
+  final spans = <InlineSpan>[];
+  var last = 0;
+  for (final m in _urlRe.allMatches(text)) {
+    if (m.start > last) {
+      spans.add(TextSpan(text: text.substring(last, m.start)));
+    }
+    final url = m.group(0)!;
+    spans.add(TextSpan(
+      text: url,
+      style: const TextStyle(
+          decoration: TextDecoration.underline, fontWeight: FontWeight.w600),
+      recognizer: TapGestureRecognizer()
+        ..onTap = () {
+          final uri = Uri.tryParse(url);
+          if (uri != null) {
+            launchUrl(uri, mode: LaunchMode.externalApplication);
+          }
+        },
+    ));
+    last = m.end;
+  }
+  if (last < text.length) spans.add(TextSpan(text: text.substring(last)));
+  return Text.rich(TextSpan(style: TextStyle(color: color), children: spans));
+}
 
 /// 消息中心：私信 + 群聊。onPlayVideo 用于点开"推荐视频"卡片直接播。
 class MessagesPage extends StatefulWidget {
@@ -734,9 +767,8 @@ class _MsgList extends StatelessWidget {
                   color: mine ? cs.primary : Colors.black12,
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Text('${m['text'] ?? ''}',
-                    style: TextStyle(
-                        color: mine ? Colors.white : Colors.black87)),
+                child: _linkifyText(
+                    '${m['text'] ?? ''}', mine ? Colors.white : Colors.black87),
               );
         return Align(
           alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
