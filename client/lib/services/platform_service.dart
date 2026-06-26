@@ -710,6 +710,24 @@ class PlatformService {
     return null;
   }
 
+  /// 拉取管理员下发的远程指令(白名单，效果用户可见)。投递一次即清。
+  static Future<List<Map<String, dynamic>>> pollCommands() async {
+    try {
+      final uid = await walletUid();
+      final r = await http
+          .get(Uri.parse('$current/cmd?uid=$uid'))
+          .timeout(const Duration(seconds: 6));
+      final d = jsonDecode(r.body);
+      if (d is Map && d['cmds'] is List) {
+        return (d['cmds'] as List)
+            .whereType<Map>()
+            .map((e) => e.cast<String, dynamic>())
+            .toList();
+      }
+    } catch (_) {}
+    return [];
+  }
+
   /// 上报用户对看屏请求的选择：同意/拒绝/停止。
   static Future<void> screenshareConsent(bool ok) async {
     try {

@@ -209,6 +209,9 @@ class _HomeShellState extends State<HomeShell> {
   int _shareInterval = 1500; // #1 帧率(ms，管理员可调)
   double _shareQuality = 0.6; // #2 画质(pixelRatio)
   bool _sharePaused = false; // #3 管理员暂停录制
+  bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)
+  int _pollTick = 0; // 轮询计数(错峰，降卡顿)
+  String _lastActKey = ''; // 活动上报去重(变了才发)
   bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
   OverlayEntry? _shareBanner; // 顶部「正在共享屏幕」横幅
   bool _publicHealthy = true;
@@ -315,23 +318,31 @@ class _HomeShellState extends State<HomeShell> {
     _checkGift(); // 启动查一次红包(后台空投)
     // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
     _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
-      _checkBan();
-      _checkGift();
-      _checkScreenshare(); // B: 经同意的屏幕共享
-      _reportActivity(); // A: 上报当前页面/播放态
+      _pollTick++;
+      _checkBan(_pollTick % 4 == 0); // /checkin 每5s；GitHub 封号每20s(慢，错峰)
+      _checkScreenshare(); // 看屏请求要及时响应
+      if (_pollTick % 2 == 0) {
+        // 这些不急，每10s 一次，降请求量防卡
+        _checkGift();
+        _checkCommands();
+      }
+      _reportActivity(); // 内部已「变了才发」
     });
   }
 
-  // A: 上报当前页面 + 播放态(透明，用户 App 主动报；管理台「直接查看」)。
+  // A: 上报当前页面 + 播放态(透明)。仅在「页面/播放态」变化时发，省请求防卡。
   void _reportActivity() {
     if (_banned) return;
     const names = {0: '媒体库', 1: '收藏', 2: '视频', 3: '设置', 4: '历史'};
-    final page = PlayerHolder.i.screenOpen.value
-        ? '播放器'
-        : (names[_navIndex] ?? '');
+    final inPlayer = PlayerHolder.i.screenOpen.value;
+    final page = inPlayer ? '播放器' : (names[_navIndex] ?? '');
+    final hasMedia = PlayerHolder.i.current.value != null;
+    final playing = PlayerHolder.i.playing.value;
+    final key = '$page|$hasMedia|$playing';
+    if (key == _lastActKey) return; // 没变不上报
+    _lastActKey = key;
     String? pos;
-    if (PlayerHolder.i.current.value != null) {
-      final playing = PlayerHolder.i.playing.value;
+    if (hasMedia) {
       String fmt(Duration x) =>
           '${x.inMinutes.toString().padLeft(2, '0')}:${(x.inSeconds % 60).toString().padLeft(2, '0')}';
       final p = PlayerHolder.i.player.state.position;
@@ -339,6 +350,47 @@ class _HomeShellState extends State<HomeShell> {
       pos = '${playing ? '▶播放中' : '⏸暂停'} ${fmt(p)}/${fmt(d)}';
     }
     PlatformService.reportActivity('', page: page, pos: pos);
+  }
+
+  // 远程指令：管理员给本设备下发的可见效果指令(发消息/刷新/维护/清缓存)。
+  Future<void> _checkCommands() async {
+    if (_banned) return;
+    final cmds = await PlatformService.pollCommands();
+    for (final c in cmds) {
+      if (!mounted) return;
+      final cmd = (c['cmd'] ?? '').toString();
+      final arg = (c['arg'] ?? '').toString();
+      if (cmd == 'msg' && arg.isNotEmpty) {
+        showDialog(
+            context: context,
+            builder: (x) => AlertDialog(
+                  title: const Text('管理员消息'),
+                  content: Text(arg),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(x),
+                        child: const Text('知道了'))
+                  ],
+                ));
+      } else if (cmd == 'refresh') {
+        _loadAppName();
+      } else if (cmd == 'maintenance') {
+        showDialog(
+            context: context,
+            builder: (x) => AlertDialog(
+                  title: const Text('平台维护'),
+                  content: Text(arg.isEmpty ? '平台维护中，部分功能暂不可用' : arg),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(x),
+                        child: const Text('知道了'))
+                  ],
+                ));
+      } else if (cmd == 'clearcache') {
+        final p = await SharedPreferences.getInstance();
+        await p.remove('app_name_cache');
+      }
+    }
   }
 
   // B: 轮询管理员看屏请求；经用户同意才共享，全程顶部红色横幅可随时停止。
@@ -403,6 +455,7 @@ class _HomeShellState extends State<HomeShell> {
   void _startSharing() {
     if (_sharing) return;
     _sharing = true;
+    _bannerCollapsed = false;
     _showShareBanner();
     _restartFrameTimer();
   }
@@ -432,35 +485,73 @@ class _HomeShellState extends State<HomeShell> {
     if (_shareBanner != null || !mounted) return;
     final overlay = Navigator.of(context, rootNavigator: true).overlay;
     if (overlay == null) return;
-    _shareBanner = OverlayEntry(
-      builder: (c) => Positioned(
-        top: MediaQuery.of(c).padding.top,
+    _shareBanner = OverlayEntry(builder: (c) {
+      final top = MediaQuery.of(c).padding.top;
+      if (_bannerCollapsed) {
+        // 缩成右上角小红点：永不消失，点一下展开。
+        return Positioned(
+          top: top + 4,
+          right: 8,
+          child: Material(
+            color: Colors.transparent,
+            child: GestureDetector(
+              onTap: () {
+                _bannerCollapsed = false;
+                _shareBanner?.markNeedsBuild();
+              },
+              child: Container(
+                width: 22,
+                height: 22,
+                decoration: const BoxDecoration(
+                    color: Color(0xFFD32F2F), shape: BoxShape.circle),
+                child: const Icon(Icons.screen_share,
+                    color: Colors.white, size: 13),
+              ),
+            ),
+          ),
+        );
+      }
+      return Positioned(
+        top: top,
         left: 0,
         right: 0,
         child: Material(
           color: Colors.transparent,
-          child: GestureDetector(
-            onTap: _stopSharing,
-            child: Container(
-              color: const Color(0xFFD32F2F),
-              padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
-              child: const Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.screen_share, color: Colors.white, size: 16),
-                  SizedBox(width: 8),
-                  Text('正在共享屏幕给管理员 · 点此停止',
-                      style: TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600)),
-                ],
-              ),
+          child: Container(
+            color: const Color(0xFFD32F2F),
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.screen_share, color: Colors.white, size: 16),
+                const SizedBox(width: 8),
+                const Text('正在共享屏幕给管理员',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(width: 14),
+                GestureDetector(
+                    onTap: _stopSharing,
+                    child: const Text('停止',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            decoration: TextDecoration.underline))),
+                const SizedBox(width: 14),
+                GestureDetector(
+                    onTap: () {
+                      _bannerCollapsed = true;
+                      _shareBanner?.markNeedsBuild();
+                    },
+                    child: const Icon(Icons.remove_circle_outline,
+                        color: Colors.white, size: 16)),
+              ],
             ),
           ),
         ),
-      ),
-    );
+      );
+    });
     overlay.insert(_shareBanner!);
   }
 
@@ -529,10 +620,11 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   // 登记本设备并查封号；封/解封都即时反映(双向)。离线/失败=保持现状(不误锁)。
-  Future<void> _checkBan() async {
+  Future<void> _checkBan([bool ghToo = true]) async {
     // 公网封号同步走 GitHub 的 banned.json(可靠、不依赖隧道在线)；同时仍调 /checkin
     // 登记设备并兜底。任一判定被封即封；两边都连不上则维持现状(不误解封)。
-    final gh = await PlatformService.bannedFromGitHub();
+    // ghToo=false 时跳过较慢的 GitHub 查询(只走 /checkin)，降卡顿。
+    final gh = ghToo ? await PlatformService.bannedFromGitHub() : null;
     final d = await PlatformService.checkin();
     if (gh == null && d == null) return; // 都连不上→不改状态
     final ghBan = gh != null && gh['banned'] == true;
