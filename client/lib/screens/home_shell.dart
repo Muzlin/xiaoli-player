@@ -197,6 +197,7 @@ class _HomeShellState extends State<HomeShell> {
   bool _autoPalette = false; // F39 封面取色开关
   bool _guestMode = false; // F49 访客模式（不记录历史）
   int _watchSec = 0; // 累计观看秒
+  int _watchUnreported = 0; // #9 待上报观看秒(满60s发一次给服务器)
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
   bool _fadeIn = false; // 起播音量淡入
@@ -291,6 +292,7 @@ class _HomeShellState extends State<HomeShell> {
     _loadPlayHistory();
     _loadAutoNext();
     A11y.load(); // 无障碍设置(#14)
+    _loadWatchLater(); // 稍后看清单(#12)
     DownloadManager.instance.loadCache(); // 加载离线缓存索引
     DownloadManager.instance.onComplete = (t) {
       if (!mounted) return;
@@ -319,12 +321,15 @@ class _HomeShellState extends State<HomeShell> {
     // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
     _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _pollTick++;
-      _checkBan(_pollTick % 4 == 0); // /checkin 每5s；GitHub 封号每20s(慢，错峰)
-      _checkScreenshare(); // 看屏请求要及时响应
-      if (_pollTick % 2 == 0) {
-        // 这些不急，每10s 一次，降请求量防卡
+      if (_pollTick % 3 == 0) {
+        _checkBan(_pollTick % 12 == 0); // 封号查询每15s；GitHub 每60s(慢)
+      }
+      if (_sharing || _pollTick % 2 == 0) {
+        _checkScreenshare(); // 共享中每5s 响应；否则每10s
+      }
+      if (_pollTick % 4 == 0) {
         _checkGift();
-        _checkCommands();
+        _checkCommands(); // 每20s
       }
       _reportActivity(); // 内部已「变了才发」
     });
@@ -2676,8 +2681,14 @@ class _HomeShellState extends State<HomeShell> {
             t.bvid != null ? (msg) => _bili.postComment(t.bvid!, msg) : null,
         startAt: Duration(seconds: _resume[t.key] ?? _skipIntro),
         onSavePos: (sec) {
+          // 只把"正常前进(0<delta≤8s)"计入观看时长；跳转/快退不算(防刷成就)。
+          final prev = _resume[t.key] ?? sec;
+          final delta = sec - prev;
           _resume[t.key] = sec;
-          _watchSec += 5;
+          if (delta > 0 && delta <= 8) {
+            _watchSec += delta;
+            _reportWatchAccum(delta); // #9 观影时长上报(累计满60s才发一次)
+          }
           _saveResume();
         },
         onDuration: (durSec) {
@@ -4096,6 +4107,96 @@ class _HomeShellState extends State<HomeShell> {
         'history_v1', jsonEncode(_history.map(_trackToJson).toList()));
   }
 
+  // #12 稍后看清单（轻量待看队列，不下载，看完自动移出）。
+  final List<Track> _watchLater = [];
+  Future<void> _loadWatchLater() async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString('watch_later_v1');
+    if (raw == null) return;
+    try {
+      final list = (jsonDecode(raw) as List)
+          .map((e) => _trackFromJson(e as Map))
+          .whereType<Track>()
+          .toList();
+      if (mounted) setState(() => _watchLater..clear()..addAll(list));
+    } catch (_) {}
+  }
+
+  Future<void> _saveWatchLater() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(
+        'watch_later_v1', jsonEncode(_watchLater.map(_trackToJson).toList()));
+  }
+
+  void _toggleWatchLater(Track t) {
+    final i = _watchLater.indexWhere((x) => x.key == t.key);
+    setState(() {
+      if (i >= 0) {
+        _watchLater.removeAt(i);
+        _snack('已从稍后看移除');
+      } else {
+        _watchLater.insert(0, t);
+        _snack('已加入稍后看');
+      }
+    });
+    _saveWatchLater();
+  }
+
+  void _openWatchLater() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setP) => Scaffold(
+          appBar: AppBar(
+            title: Text('稍后看（${_watchLater.length}）'),
+            actions: [
+              if (_watchLater.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () {
+                    final q = List<Track>.from(_watchLater);
+                    setState(() => _queueOverride = q);
+                    if (q.isNotEmpty) _play(q.first);
+                    Navigator.pop(ctx);
+                  },
+                  icon: const Icon(Icons.playlist_play),
+                  label: const Text('全部连播'),
+                ),
+            ],
+          ),
+          body: _watchLater.isEmpty
+              ? const Center(
+                  child: Text('空空如也~ 在视频上右键/长按「稍后看」加进来',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: _watchLater.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final t = _watchLater[i];
+                    return ListTile(
+                      leading: Icon(
+                          _trackIsVideo(t) ? Icons.movie : Icons.music_note),
+                      title: Text(t.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          _toggleWatchLater(t);
+                          setP(() {});
+                        },
+                      ),
+                      onTap: () {
+                        // 看了就移出
+                        _toggleWatchLater(t);
+                        setP(() {});
+                        _play(t);
+                      },
+                    );
+                  },
+                ),
+        ),
+      ),
+    ));
+  }
+
   void _pushPlayHistory(Track t) {
     if (_guestMode) return; // F49 访客模式不记录
     _history.removeWhere((h) => h.key == t.key);
@@ -4103,6 +4204,17 @@ class _HomeShellState extends State<HomeShell> {
     if (_history.length > 40) _history.removeRange(40, _history.length);
     _savePlayHistory();
     _cloudSyncHistory(); // v2.39.22 云端历史同步(尽力，失败忽略)
+  }
+
+  // #9 观影时长累计上报：每满 60s 发一次(服务端每次≤600 防刷)。
+  void _reportWatchAccum(int sec) {
+    if (_guestMode) return;
+    _watchUnreported += sec;
+    if (_watchUnreported >= 60) {
+      final flush = _watchUnreported;
+      _watchUnreported = 0;
+      PlatformService.reportWatch(flush); // fire-and-forget
+    }
   }
 
   void _cloudSyncHistory() {
@@ -5098,6 +5210,11 @@ class _HomeShellState extends State<HomeShell> {
     final items = <PopupMenuEntry<String>>[
       PopupMenuItem(value: 'fav', child: Text(_isFav(t) ? '取消收藏' : '收藏')),
       const PopupMenuItem(value: 'playlist', child: Text('加入歌单')),
+      PopupMenuItem(
+          value: 'later',
+          child: Text(_watchLater.any((x) => x.key == t.key)
+              ? '从稍后看移除'
+              : '稍后看')),
       const PopupMenuItem(value: 'copyname', child: Text('复制名称')),
     ];
     if (t.isLocal) {
@@ -5153,6 +5270,8 @@ class _HomeShellState extends State<HomeShell> {
         _snack('已删除离线缓存');
       } else if (v == 'bgdl') {
         _bgDownload(t);
+      } else if (v == 'later') {
+        _toggleWatchLater(t);
       } else if (v == 'copyname') {
         Clipboard.setData(ClipboardData(text: t.name));
         ScaffoldMessenger.of(context)
@@ -5629,6 +5748,13 @@ class _HomeShellState extends State<HomeShell> {
           subtitle: const Text('全部音乐/视频、最近添加、未看完——随库自动更新',
               style: TextStyle(fontSize: 12)),
           onTap: _showSmartPlaylists,
+        ),
+        ListTile(
+          leading: const Icon(Icons.watch_later_outlined),
+          title: Text('稍后看（${_watchLater.length}）'),
+          subtitle: const Text('轻量待看清单，不下载，看完自动移出',
+              style: TextStyle(fontSize: 12)),
+          onTap: _openWatchLater,
         ),
         ListTile(
           leading: const Icon(Icons.create_new_folder_outlined),
@@ -7228,6 +7354,188 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     );
   }
 
+  // #7 今日运势盲盒：每日一次扭蛋。
+  Future<void> _openLuckyBox() async {
+    final d = await PlatformService.openBox();
+    if (!mounted) return;
+    if (d == null) {
+      _toast('开盲盒失败，请检查网络');
+      return;
+    }
+    if (d['ok'] != true) {
+      _toast('${d['error'] ?? '今天已开过'}');
+      return;
+    }
+    if (d['balance'] != null) {
+      setState(() => _balance = (d['balance'] as num).toInt());
+    }
+    final amount = (d['amount'] as num?)?.toInt() ?? 0;
+    final fortune = '${d['fortune'] ?? ''}';
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(children: [
+          Text('🎁 ', style: TextStyle(fontSize: 22)),
+          Text('今日运势盲盒'),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(amount > 0 ? '🪙 +$amount 兑换币' : '${d['label'] ?? ''}',
+              style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFFF26B21))),
+          const SizedBox(height: 12),
+          Text(fortune, textAlign: TextAlign.center),
+        ]),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('收下')),
+        ],
+      ),
+    );
+  }
+
+  // #6 拼手气群红包广场。
+  Future<void> _showPacketPlaza() async {
+    var list = await PlatformService.listPackets();
+    if (!mounted) return;
+    final grabbing = <String>{}; // 防重复点"抢"(同一包同时只发一次请求)
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          maxChildSize: 0.9,
+          builder: (_, sc) => Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 12, 6),
+              child: Row(children: [
+                const Text('拼手气群红包',
+                    style: TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await _dropPacketDialog();
+                    final fresh = await PlatformService.listPackets();
+                    setSheet(() => list = fresh);
+                  },
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('发红包'),
+                ),
+              ]),
+            ),
+            Expanded(
+              child: list.isEmpty
+                  ? const Center(
+                      child: Text('还没有人发群红包，来发第一个~',
+                          style: TextStyle(color: Colors.black38)))
+                  : ListView.builder(
+                      controller: sc,
+                      itemCount: list.length,
+                      itemBuilder: (_, i) {
+                        final p = list[i];
+                        return Card(
+                          color: const Color(0xFFC0392B),
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 5),
+                          child: ListTile(
+                            leading: const Text('🧧',
+                                style: TextStyle(fontSize: 28)),
+                            title: Text('${p['msg'] ?? '恭喜发财'}',
+                                style: const TextStyle(
+                                    color: Color(0xFFFFE2A8),
+                                    fontWeight: FontWeight.w600)),
+                            subtitle: Text(
+                                '总额 ${p['total']} · 剩 ${p['left']}/${p['parts']} 份',
+                                style: const TextStyle(color: Colors.white70)),
+                            trailing: FilledButton(
+                              style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFFFD24A),
+                                  foregroundColor: const Color(0xFF7A1F18)),
+                              onPressed: () async {
+                                final d = await PlatformService.grabPacket(
+                                    '${p['id']}');
+                                if (d == null) {
+                                  _toast('抢失败，请检查网络');
+                                } else if (d['ok'] == true) {
+                                  _toast(
+                                      '🧧 抢到 ${d['amount']} 兑换币！(余额 ${d['balance']})');
+                                  if (d['balance'] != null) {
+                                    setState(() => _balance =
+                                        (d['balance'] as num).toInt());
+                                  }
+                                } else {
+                                  _toast('${d['error'] ?? '抢失败'}');
+                                }
+                                final fresh =
+                                    await PlatformService.listPackets();
+                                setSheet(() => list = fresh);
+                              },
+                              child: const Text('抢'),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _dropPacketDialog() async {
+    final totalCtrl = TextEditingController(text: '20');
+    final partsCtrl = TextEditingController(text: '5');
+    final msgCtrl = TextEditingController(text: '恭喜发财');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('发拼手气群红包'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: totalCtrl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '总额(兑换币)')),
+          TextField(
+              controller: partsCtrl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '份数')),
+          TextField(
+              controller: msgCtrl,
+              maxLength: 40,
+              decoration: const InputDecoration(labelText: '祝福语')),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('塞钱发出')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final total = int.tryParse(totalCtrl.text.trim()) ?? 0;
+    final parts = int.tryParse(partsCtrl.text.trim()) ?? 0;
+    final d = await PlatformService.dropPacket(total, parts, msgCtrl.text);
+    if (d == null) {
+      _toast('发红包失败，请检查网络');
+    } else if (d['ok'] == true) {
+      _toast('🧧 群红包已发出！-$total 币（余额 ${d['balance']}）');
+      if (d['balance'] != null) {
+        setState(() => _balance = (d['balance'] as num).toInt());
+      }
+    } else {
+      _toast('${d['error'] ?? '发红包失败'}');
+    }
+  }
+
   Future<void> _showCloudHistory() async {
     final items = await PlatformService.pullHistory();
     if (!mounted) return;
@@ -7715,6 +8023,8 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                     _entry(cs, Icons.cloud_sync, '云端历史',
                         _showCloudHistory),
                     _entry(cs, Icons.recommend, '猜你喜欢', _showRecommend),
+                    _entry(cs, Icons.casino, '今日盲盒', _openLuckyBox),
+                    _entry(cs, Icons.card_giftcard, '群红包', _showPacketPlaza),
                     _entry(cs, Icons.support_agent, '联系管理员',
                         _contactAdmin),
                   ],

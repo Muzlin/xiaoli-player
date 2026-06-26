@@ -524,6 +524,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   double _warmth = 0.0; // 护眼暖色温叠加强度 0~0.6
   String _eqPreset = '关闭'; // 音频均衡器预设
   bool _nightAudio = false; // 夜间音频模式(动态压缩+人声清晰)
+  bool _loudnorm = false; // #1 跨视频响度均衡
+  bool _mono = false; // #2 合并为单声道
+  double _balance = 0.0; // #2 左右声道平衡 -1(全左)~1(全右)
   int _picBright = 0, _picContrast = 0, _picSat = 0, _picGamma = 0; // 画面精调 -100~100
   List<Map<String, dynamic>> _timelineMarks = const []; // 时间轴留言 [{pos,text,name}]
   bool _nextUpShown = false; // #3 片尾"下一个"浮层是否显示
@@ -1927,7 +1930,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _subs.add(_player.stream.position.listen((p) {
       if (!mounted) return;
-      setState(() => _position = p);
+      // 进度条重建限频到 ~5fps：每个 position 事件都重建整页会卡，节流到 200ms。
+      if ((p.inMilliseconds ~/ 200) != (_position.inMilliseconds ~/ 200)) {
+        setState(() => _position = p);
+      } else {
+        _position = p;
+      }
       _maybeShowNextUp(p);
       if (_desktopSub) _pushDesktopSub(p);
       if (_aPoint != null && _bPoint != null && p >= _bPoint!) {
@@ -2173,6 +2181,9 @@ class _PlayerScreenState extends State<PlayerScreen>
     final w = p.getDouble('eye_warmth_v1') ?? 0.0;
     final eq = p.getString('eq_preset_v1') ?? '关闭';
     final night = p.getBool('night_audio_v1') ?? false;
+    final loud = p.getBool('loudnorm_v1') ?? false;
+    final mono = p.getBool('audio_mono_v1') ?? false;
+    final bal = p.getDouble('audio_balance_v1') ?? 0.0;
     final pb = p.getInt('pic_bright_v1') ?? 0;
     final pc = p.getInt('pic_contrast_v1') ?? 0;
     final ps = p.getInt('pic_sat_v1') ?? 0;
@@ -2182,6 +2193,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _warmth = w;
         _eqPreset = eq;
         _nightAudio = night;
+        _loudnorm = loud;
+        _mono = mono;
+        _balance = bal;
         _picBright = pb;
         _picContrast = pc;
         _picSat = ps;
@@ -2189,7 +2203,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       });
     }
     // 播放器初始化后再应用 mpv 滤镜/画质属性。
-    if (eq != '关闭' || night ||
+    if (eq != '关闭' || night || loud || mono || bal.abs() > 0.01 ||
         pb != 0 || pc != 0 || ps != 0 || pg != 0) {
       Future.delayed(const Duration(milliseconds: 1500), () {
         _applyAudio();
@@ -2198,7 +2212,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
-  // 组合音频滤镜：均衡器预设 + 夜间音频，逗号串成 mpv af 链。
+  // 组合音频滤镜：均衡器预设 + 夜间音频 + 响度均衡 + 声道平衡/单声道，逗号串成 mpv af 链。
   String _audioAf() {
     final parts = <String>[];
     final eq = _eqPresets[_eqPreset] ?? '';
@@ -2206,6 +2220,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_nightAudio) {
       parts.add(
           'lavfi=[dynaudnorm=f=150:g=15:p=0.9,acompressor=threshold=-18dB:ratio=3]');
+    }
+    if (_loudnorm) parts.add('lavfi=[loudnorm=I=-16:LRA=11:TP=-1.5]'); // #1
+    // #2 声道：单声道合并 / 左右平衡（必须作为链尾）。
+    if (_mono) {
+      parts.add('lavfi=[pan=mono|c0=.5*c0+.5*c1]');
+    } else if (_balance.abs() > 0.01) {
+      final l = (1 - _balance).clamp(0.0, 1.0).toStringAsFixed(2);
+      final r = (1 + _balance).clamp(0.0, 1.0).toStringAsFixed(2);
+      parts.add('lavfi=[pan=stereo|c0=$l*c0|c1=$r*c1]');
     }
     return parts.join(',');
   }
@@ -2358,31 +2381,101 @@ class _PlayerScreenState extends State<PlayerScreen>
     showModalBottomSheet<void>(
       context: context,
       backgroundColor: const Color(0xFF2B2B33),
-      builder: (_) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Padding(
-              padding: EdgeInsets.all(14),
-              child: Text('音频均衡器',
-                  style: TextStyle(color: Colors.white70, fontSize: 13))),
-          for (final name in _eqPresets.keys)
-            ListTile(
-              dense: true,
-              leading: Icon(
-                  _eqPreset == name
-                      ? Icons.radio_button_checked
-                      : Icons.radio_button_unchecked,
-                  color: _eqPreset == name ? const Color(0xFFF26B21) : Colors.white38,
-                  size: 20),
-              title: Text(name, style: const TextStyle(color: Colors.white)),
-              onTap: () async {
-                setState(() => _eqPreset = name);
-                _applyAudio();
-                final p = await SharedPreferences.getInstance();
-                await p.setString('eq_preset_v1', name);
-                if (mounted) Navigator.pop(context);
-              },
-            ),
-        ]),
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text('音频均衡器',
+                      style: TextStyle(color: Colors.white70, fontSize: 13))),
+              for (final name in _eqPresets.keys)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                      _eqPreset == name
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      color: _eqPreset == name
+                          ? const Color(0xFFF26B21)
+                          : Colors.white38,
+                      size: 20),
+                  title:
+                      Text(name, style: const TextStyle(color: Colors.white)),
+                  onTap: () async {
+                    setSheet(() {});
+                    setState(() => _eqPreset = name);
+                    _applyAudio();
+                    final p = await SharedPreferences.getInstance();
+                    await p.setString('eq_preset_v1', name);
+                  },
+                ),
+              const Divider(color: Colors.white12, height: 4),
+              // #1 跨视频响度均衡
+              SwitchListTile(
+                dense: true,
+                title: const Text('响度均衡',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('不同视频音量一样大',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+                value: _loudnorm,
+                onChanged: (v) async {
+                  setSheet(() {});
+                  setState(() => _loudnorm = v);
+                  _applyAudio();
+                  final p = await SharedPreferences.getInstance();
+                  await p.setBool('loudnorm_v1', v);
+                },
+              ),
+              // #2 合并单声道
+              SwitchListTile(
+                dense: true,
+                title: const Text('合并为单声道',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('单耳/一只耳机也能听到全部声音',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+                value: _mono,
+                onChanged: (v) async {
+                  setSheet(() {});
+                  setState(() => _mono = v);
+                  _applyAudio();
+                  final p = await SharedPreferences.getInstance();
+                  await p.setBool('audio_mono_v1', v);
+                },
+              ),
+              // #2 左右声道平衡
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(children: [
+                  const Text('左', style: TextStyle(color: Colors.white54)),
+                  Expanded(
+                    child: Slider(
+                      value: _balance,
+                      min: -1,
+                      max: 1,
+                      divisions: 20,
+                      activeColor: const Color(0xFFF26B21),
+                      onChanged: _mono
+                          ? null
+                          : (v) {
+                              setSheet(() {});
+                              setState(() => _balance = v);
+                              _applyAudio();
+                            },
+                      onChangeEnd: (v) async {
+                        final p = await SharedPreferences.getInstance();
+                        await p.setDouble('audio_balance_v1', v);
+                      },
+                    ),
+                  ),
+                  const Text('右', style: TextStyle(color: Colors.white54)),
+                ]),
+              ),
+              const SizedBox(height: 8),
+            ]),
+          ),
+        ),
       ),
     );
   }

@@ -444,6 +444,44 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  /// #7 今日运势盲盒：每日一次。返回 {ok,kind,amount,label,fortune,balance} 或 {already}。
+  static Future<Map<String, dynamic>?> openBox() async {
+    final d = await _g('/openbox', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// #9 观影时长上报(秒，服务端每次≤600 防刷)。返回 {watch_sec,title,upgraded}。
+  static Future<Map<String, dynamic>?> reportWatch(int sec) async {
+    if (sec <= 0) return null;
+    final d = await _g('/report-watch?sec=$sec', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// #6 投一个拼手气群红包。返回 {ok,id,balance,parts}。
+  static Future<Map<String, dynamic>?> dropPacket(
+      int total, int parts, String msg) async {
+    final m = msg.trim().isEmpty ? '' : '&msg=${Uri.encodeComponent(msg.trim())}';
+    final d = await _g('/rp-drop?total=$total&parts=$parts$m', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// #6 开放的群红包列表 [{id,from,msg,total,parts,left,ts}]。
+  static Future<List<Map<String, dynamic>>> listPackets() async {
+    final d = await _g('/rp-list');
+    if (d is Map && d['packets'] is List) {
+      return (d['packets'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// #6 抢一份群红包。返回 {ok,amount,balance} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> grabPacket(String id) async {
+    final d = await _g('/rp-grab?id=$id', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 关注/取关某上传者。
   static Future<Map<String, dynamic>?> follow(String to, bool on) async {
     final d = await _g(
