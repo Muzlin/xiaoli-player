@@ -207,8 +207,9 @@ class _HomeShellState extends State<HomeShell> {
   Timer? _shareFrameTimer; // 屏幕共享传帧
   bool _sharing = false; // 正在共享屏幕给管理员
   bool _shareApproved = false; // 本机用户亲自点过「同意」(服务器 active 被伪造也不自动开始)
-  int _shareInterval = 1500; // #1 帧率(ms，管理员可调)
-  double _shareQuality = 0.6; // #2 画质(pixelRatio)
+  int _shareInterval = 2000; // #1 帧率(ms，管理员可调)
+  double _shareQuality = 0.5; // #2 画质(pixelRatio)
+  bool _frameInFlight = false; // 防抓帧重叠堆积
   bool _sharePaused = false; // #3 管理员暂停录制
   bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)
   int _pollTick = 0; // 轮询计数(错峰，降卡顿)
@@ -468,11 +469,17 @@ class _HomeShellState extends State<HomeShell> {
   void _restartFrameTimer() {
     _shareFrameTimer?.cancel();
     _shareFrameTimer = Timer.periodic(
-        Duration(milliseconds: _shareInterval.clamp(300, 10000)), (_) async {
-      if (_sharePaused) return; // #3 暂停录制：不抓帧
-      final cont =
-          await PlatformService.screenshareSendFrame(pixelRatio: _shareQuality);
-      if (!cont) _stopSharing();
+        Duration(milliseconds: _shareInterval.clamp(800, 10000)), (_) async {
+      // 上一帧没抓完就跳过这次(防 toImage/PNG 重叠堆积造成卡顿)
+      if (_sharePaused || _frameInFlight) return;
+      _frameInFlight = true;
+      try {
+        final cont = await PlatformService.screenshareSendFrame(
+            pixelRatio: _shareQuality);
+        if (!cont) _stopSharing();
+      } finally {
+        _frameInFlight = false;
+      }
     });
   }
 

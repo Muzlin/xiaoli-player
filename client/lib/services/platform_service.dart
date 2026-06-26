@@ -779,13 +779,18 @@ class PlatformService {
 
   /// 抓当前 app 画面(RepaintBoundary)→PNG→上传一帧。
   /// 返回服务器是否仍在共享(false=已被管理员/用户停止，应停帧)。
-  static Future<bool> screenshareSendFrame({double pixelRatio = 0.6}) async {
+  static Future<bool> screenshareSendFrame(
+      {double pixelRatio = 0.5, int maxSide = 800}) async {
     try {
       final ctx = screenShareKey.currentContext;
       if (ctx == null) return true;
       final ro = ctx.findRenderObject();
       if (ro is! RenderRepaintBoundary) return true;
-      final image = await ro.toImage(pixelRatio: pixelRatio);
+      // 钳制输出尺寸：最长边 <= maxSide，避免大窗/高DPR 抓出巨图→PNG编码卡UI线程。
+      double pr = pixelRatio;
+      final longest = ro.size.longestSide;
+      if (longest > 0 && longest * pr > maxSide) pr = maxSide / longest;
+      final image = await ro.toImage(pixelRatio: pr);
       final bd = await image.toByteData(format: ui.ImageByteFormat.png);
       image.dispose();
       if (bd == null) return true;
