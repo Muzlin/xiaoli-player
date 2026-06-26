@@ -485,6 +485,105 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  // ===== 消息系统：身份/私信/群聊/群治理/推荐视频 =====
+  /// 注册/更新昵称(=登录身份)。别人据此在通讯录找到你。
+  static Future<bool> setNick(String name) async {
+    final d = await _g('/set-nick?name=${Uri.encodeComponent(name)}',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 通讯录：所有设过昵称的用户 [{uid,nick}]，q 过滤。
+  static Future<List<Map<String, dynamic>>> users({String q = ''}) async {
+    final d = await _g('/users?q=${Uri.encodeComponent(q)}', withUid: true);
+    if (d is Map && d['users'] is List) {
+      return (d['users'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// 私信：发文字(text)或推荐视频(vid+title)。
+  static Future<bool> dmSend(String to,
+      {String text = '', String vid = '', String title = ''}) async {
+    final extra = vid.isNotEmpty
+        ? '&vid=$vid&title=${Uri.encodeComponent(title)}'
+        : '';
+    final d = await _g(
+        '/dm-send?to=$to&text=${Uri.encodeComponent(text)}$extra',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 我的私信会话 [{peer,peer_nick,last,ts}]。
+  static Future<List<Map<String, dynamic>>> dmList() async {
+    final d = await _g('/dm-list', withUid: true);
+    if (d is Map && d['convs'] is List) {
+      return (d['convs'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// 与某人的私信消息 {msgs,peer_nick}。
+  static Future<Map<String, dynamic>?> dmMsgs(String peer) async {
+    final d = await _g('/dm-msgs?peer=$peer', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 建群，返回 {ok,gid,name}。
+  static Future<Map<String, dynamic>?> groupCreate(String name) async {
+    final d =
+        await _g('/group-create?name=${Uri.encodeComponent(name)}', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 我加入的群 [{gid,name,role,count,no_leave}]。
+  static Future<List<Map<String, dynamic>>> groupList() async {
+    final d = await _g('/group-list', withUid: true);
+    if (d is Map && d['groups'] is List) {
+      return (d['groups'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
+  /// 群消息 + 群信息 {msgs,name,owner,admins,members,no_leave}。
+  static Future<Map<String, dynamic>?> groupMsgs(String gid) async {
+    final d = await _g('/group-msgs?gid=$gid', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 群发消息：文字或推荐视频。
+  static Future<bool> groupSend(String gid,
+      {String text = '', String vid = '', String title = ''}) async {
+    final extra = vid.isNotEmpty
+        ? '&vid=$vid&title=${Uri.encodeComponent(title)}'
+        : '';
+    final d = await _g(
+        '/group-send?gid=$gid&text=${Uri.encodeComponent(text)}$extra',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 拉人进群。
+  static Future<bool> groupInvite(String gid, String target) async {
+    final d = await _g('/group-invite?gid=$gid&target=$target', withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 群治理：op=kick/admin/leave/disband/noleave。返回服务器结果。
+  static Future<Map<String, dynamic>?> groupOp(String gid, String op,
+      {String target = '', bool on = true}) async {
+    final t = target.isNotEmpty ? '&target=$target' : '';
+    final d = await _g('/group-op?gid=$gid&op=$op$t&on=${on ? 1 : 0}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 关注/取关某上传者。
   static Future<Map<String, dynamic>?> follow(String to, bool on) async {
     final d = await _g(
@@ -731,6 +830,17 @@ class PlatformService {
       if (page != null) url += '&page=${Uri.encodeComponent(page)}';
       if (pos != null) url += '&pos=${Uri.encodeComponent(pos)}';
       await http.get(Uri.parse(url)).timeout(const Duration(seconds: 6));
+    } catch (_) {}
+  }
+
+  /// 上报账号身份给管理台：B站登录名优先，否则个人中心昵称。
+  static Future<void> reportAccount(String name, bool isBili) async {
+    try {
+      final uid = await walletUid();
+      await http
+          .get(Uri.parse(
+              '$current/set-acct?uid=$uid&name=${Uri.encodeComponent(name)}&bili=${isBili ? 1 : 0}'))
+          .timeout(const Duration(seconds: 6));
     } catch (_) {}
   }
 

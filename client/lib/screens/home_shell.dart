@@ -4,6 +4,7 @@ import 'package:crypto/crypto.dart';
 import 'dart:math';
 import '../text_scale.dart';
 import 'dart:io';
+import '../restart_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -23,6 +24,7 @@ import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
 import 'store_page.dart';
+import 'messages_page.dart';
 import 'stats_screen.dart';
 
 /// 一首曲目：本地文件、内置热门、或 B站联网搜索结果。
@@ -319,6 +321,7 @@ class _HomeShellState extends State<HomeShell> {
     });
     _checkBan(); // 启动登记设备 + 查封号
     _checkGift(); // 启动查一次红包(后台空投)
+    _reportAccount(); // 启动上报账号身份
     // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
     _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       _pollTick++;
@@ -332,6 +335,7 @@ class _HomeShellState extends State<HomeShell> {
         _checkGift();
         _checkCommands(); // 每20s
       }
+      if (_pollTick % 12 == 0) _reportAccount(); // 账号身份每60s
       _reportActivity(); // 内部已「变了才发」
     });
   }
@@ -356,6 +360,27 @@ class _HomeShellState extends State<HomeShell> {
       pos = '${playing ? '▶播放中' : '⏸暂停'} ${fmt(p)}/${fmt(d)}';
     }
     PlatformService.reportActivity('', page: page, pos: pos);
+  }
+
+  // 账号身份上报：B站登录名优先，否则个人中心昵称。管理台据此显示账号。
+  Future<void> _reportAccount() async {
+    if (_banned) return;
+    String name = '';
+    bool isBili = false;
+    try {
+      if (_biliLoggedIn) {
+        final a = await _bili.getAccountInfo();
+        if (a != null && (a['uname'] ?? '').toString().trim().isNotEmpty) {
+          name = a['uname'].toString().trim();
+          isBili = true;
+        }
+      }
+    } catch (_) {}
+    if (name.isEmpty) {
+      final p = await SharedPreferences.getInstance();
+      name = (p.getString('profile_name') ?? '').trim();
+    }
+    if (name.isNotEmpty) PlatformService.reportAccount(name, isBili);
   }
 
   // 远程指令：管理员给本设备下发的可见效果指令(发消息/刷新/维护/清缓存)。
@@ -395,6 +420,20 @@ class _HomeShellState extends State<HomeShell> {
       } else if (cmd == 'clearcache') {
         final p = await SharedPreferences.getInstance();
         await p.remove('app_name_cache');
+      } else if (cmd == 'restart') {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('应用即将重启…')));
+          await Future.delayed(const Duration(milliseconds: 800));
+          if (mounted) RestartWidget.restart(context);
+        }
+      } else if (cmd == 'close') {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已关闭应用')));
+        }
+        await Future.delayed(const Duration(milliseconds: 1200));
+        exit(0);
       }
     }
   }
@@ -7375,6 +7414,46 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
     );
   }
 
+  // 消息中心：进入前确保设了昵称(=身份，别人据此找到你)。
+  Future<void> _openMessages() async {
+    final p = await SharedPreferences.getInstance();
+    var nick = (p.getString('profile_name') ?? '').trim();
+    if (nick.isEmpty) {
+      if (!mounted) return;
+      final ctrl = TextEditingController();
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('先设个昵称'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLength: 20,
+            decoration: const InputDecoration(
+                hintText: '别人在通讯录里看到的名字'),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      nick = ctrl.text.trim();
+      if (nick.isEmpty) return;
+      await p.setString('profile_name', nick);
+    }
+    await PlatformService.setNick(nick); // 注册/更新昵称身份
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => MessagesPage(onPlayVideo: widget.onPlay),
+    ));
+  }
+
   // #7 今日运势盲盒：每日一次扭蛋。
   Future<void> _openLuckyBox() async {
     final d = await PlatformService.openBox();
@@ -8050,6 +8129,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                         _showPlaylistSquare),
                     _entry(cs, Icons.cloud_sync, '云端历史',
                         _showCloudHistory),
+                    _entry(cs, Icons.forum, '消息', _openMessages),
                     _entry(cs, Icons.recommend, '猜你喜欢', _showRecommend),
                     _entry(cs, Icons.casino, '今日盲盒', _openLuckyBox),
                     _entry(cs, Icons.card_giftcard, '群红包', _showPacketPlaza),

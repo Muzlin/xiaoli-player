@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'app.dart';
+import 'restart_widget.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -9,5 +10,5 @@ void main() {
   if (!kIsWeb) {
     MediaKit.ensureInitialized();
   }
-  runApp(const MediaApp());
+  runApp(const RestartWidget(child: MediaApp()));
 }
