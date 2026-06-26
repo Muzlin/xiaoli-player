@@ -206,6 +206,9 @@ class _HomeShellState extends State<HomeShell> {
   Timer? _shareFrameTimer; // 屏幕共享传帧
   bool _sharing = false; // 正在共享屏幕给管理员
   bool _shareApproved = false; // 本机用户亲自点过「同意」(服务器 active 被伪造也不自动开始)
+  int _shareInterval = 1500; // #1 帧率(ms，管理员可调)
+  double _shareQuality = 0.6; // #2 画质(pixelRatio)
+  bool _sharePaused = false; // #3 管理员暂停录制
   bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
   OverlayEntry? _shareBanner; // 顶部「正在共享屏幕」横幅
   bool _publicHealthy = true;
@@ -350,8 +353,18 @@ class _HomeShellState extends State<HomeShell> {
       return;
     }
     // 只有「本机用户亲自点过同意」才共享——服务器 active 被伪造也不会自动开始。
+    // #1/#2/#3 读管理员下发的帧率/画质/暂停
+    if (d['quality'] is num) _shareQuality = (d['quality'] as num).toDouble();
+    _sharePaused = d['paused'] == true;
+    final iv = (d['interval'] is num) ? (d['interval'] as num).toInt() : 1500;
     if (_shareApproved) {
-      if (!_sharing) _startSharing();
+      if (!_sharing) {
+        _shareInterval = iv;
+        _startSharing();
+      } else if (iv != _shareInterval) {
+        _shareInterval = iv;
+        _restartFrameTimer(); // 帧率变了重建定时器
+      }
     } else if (!_shareDialogOpen) {
       _askScreenshareConsent(); // 弹同意框
     }
@@ -391,10 +404,16 @@ class _HomeShellState extends State<HomeShell> {
     if (_sharing) return;
     _sharing = true;
     _showShareBanner();
+    _restartFrameTimer();
+  }
+
+  void _restartFrameTimer() {
     _shareFrameTimer?.cancel();
-    _shareFrameTimer =
-        Timer.periodic(const Duration(milliseconds: 1500), (_) async {
-      final cont = await PlatformService.screenshareSendFrame();
+    _shareFrameTimer = Timer.periodic(
+        Duration(milliseconds: _shareInterval.clamp(300, 10000)), (_) async {
+      if (_sharePaused) return; // #3 暂停录制：不抓帧
+      final cont =
+          await PlatformService.screenshareSendFrame(pixelRatio: _shareQuality);
       if (!cont) _stopSharing();
     });
   }
