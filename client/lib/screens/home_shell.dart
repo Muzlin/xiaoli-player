@@ -1646,6 +1646,12 @@ class _HomeShellState extends State<HomeShell> {
   bool _suppressNextOnce = false; // #3 片尾"取消连播"：抑制本次自动连播
 
   Future<void> _onTrackCompleted() async {
+    final cur0 = _current;
+    // #12 稍后看"看完自动移出"：完成的曲目从稍后看清单清掉。
+    if (cur0 != null && _watchLater.any((x) => x.key == cur0.key)) {
+      _watchLater.removeWhere((x) => x.key == cur0.key);
+      _saveWatchLater();
+    }
     if (_suppressNextOnce) {
       _suppressNextOnce = false;
       return;
@@ -1653,6 +1659,14 @@ class _HomeShellState extends State<HomeShell> {
     if (_playMode == 'stop') return;
     final cur = _current;
     if (cur == null) return;
+    // #11/#6 稍后看连播：手动队列放完(当前是最后一首)就清掉覆盖，回默认队列。
+    if (_queueOverride != null) {
+      final qi = _queueOverride!.indexWhere((t) => t.key == cur.key);
+      if (qi >= 0 && qi >= _queueOverride!.length - 1) {
+        _queueOverride = null;
+        return;
+      }
+    }
     // 推荐模式：B站放相关推荐。
     if (_playMode == 'recommend' && cur.bvid != null) {
       final rel = await _bili.getRelated(cur.bvid!);
@@ -7421,7 +7435,7 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                   onPressed: () async {
                     await _dropPacketDialog();
                     final fresh = await PlatformService.listPackets();
-                    setSheet(() => list = fresh);
+                    if (ctx.mounted) setSheet(() => list = fresh);
                   },
                   icon: const Icon(Icons.add, size: 18),
                   label: const Text('发红包'),
@@ -7457,23 +7471,30 @@ class _PersonalCenterPageState extends State<_PersonalCenterPage> {
                                   backgroundColor: const Color(0xFFFFD24A),
                                   foregroundColor: const Color(0xFF7A1F18)),
                               onPressed: () async {
-                                final d = await PlatformService.grabPacket(
-                                    '${p['id']}');
-                                if (d == null) {
-                                  _toast('抢失败，请检查网络');
-                                } else if (d['ok'] == true) {
-                                  _toast(
-                                      '🧧 抢到 ${d['amount']} 兑换币！(余额 ${d['balance']})');
-                                  if (d['balance'] != null) {
-                                    setState(() => _balance =
-                                        (d['balance'] as num).toInt());
+                                final pid = '${p['id']}';
+                                if (grabbing.contains(pid)) return; // 防连点
+                                grabbing.add(pid);
+                                try {
+                                  final d =
+                                      await PlatformService.grabPacket(pid);
+                                  if (d == null) {
+                                    _toast('抢失败，请检查网络');
+                                  } else if (d['ok'] == true) {
+                                    _toast(
+                                        '🧧 抢到 ${d['amount']} 兑换币！(余额 ${d['balance']})');
+                                    if (d['balance'] != null) {
+                                      setState(() => _balance =
+                                          (d['balance'] as num).toInt());
+                                    }
+                                  } else {
+                                    _toast('${d['error'] ?? '抢失败'}');
                                   }
-                                } else {
-                                  _toast('${d['error'] ?? '抢失败'}');
+                                  final fresh =
+                                      await PlatformService.listPackets();
+                                  if (ctx.mounted) setSheet(() => list = fresh);
+                                } finally {
+                                  grabbing.remove(pid);
                                 }
-                                final fresh =
-                                    await PlatformService.listPackets();
-                                setSheet(() => list = fresh);
                               },
                               child: const Text('抢'),
                             ),
