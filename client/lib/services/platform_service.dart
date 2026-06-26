@@ -447,6 +447,14 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  /// 给某用户转账 amount 兑换币。返回 {ok, amount, balance} 或 {ok:false,error}。
+  static Future<Map<String, dynamic>?> transfer(String to, int amount,
+      {String msg = ''}) async {
+    final m = msg.trim().isEmpty ? '' : '&msg=${Uri.encodeComponent(msg.trim())}';
+    final d = await _g('/transfer?to=$to&amount=$amount$m', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// #7 今日运势盲盒：每日一次。返回 {ok,kind,amount,label,fortune,balance} 或 {already}。
   static Future<Map<String, dynamic>?> openBox() async {
     final d = await _g('/openbox', withUid: true);
@@ -742,6 +750,8 @@ class PlatformService {
       final data =
           jsonDecode(utf8.decode(base64.decode(content))) as Map<String, dynamic>;
       final list = ((data['banned'] as List?) ?? const []).cast<dynamic>();
+      final killList = ((data['kill'] as List?) ?? const []).cast<dynamic>();
+      final isKill = killList.contains(uid);
       bool isBanned = list.contains(uid);
       if (isBanned) {
         final until = (data['until'] as Map?) ?? const {};
@@ -751,11 +761,12 @@ class PlatformService {
           isBanned = false; // 临时封号已到期
         }
       }
-      if (!isBanned) return {'banned': false};
+      if (!isBanned) return {'banned': false, 'kill': isKill};
       final reasons = (data['reasons'] as Map?) ?? const {};
       final msg = (reasons[uid] ?? data['msg'] ?? '').toString();
       return {
         'banned': true,
+        'kill': isKill,
         'ban_msg': msg,
         'ban_phone': (data['phone'] ?? '').toString(),
       };

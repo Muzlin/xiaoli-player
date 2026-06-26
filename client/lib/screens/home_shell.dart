@@ -695,6 +695,20 @@ class _HomeShellState extends State<HomeShell> {
     final gh = ghToo ? await PlatformService.bannedFromGitHub() : null;
     final d = await PlatformService.checkin();
     if (gh == null && d == null) return; // 都连不上→不改状态
+    // 强制停用：一打开就退出(对方可见提示)。跟封号同走公网+git。
+    final killed = (gh != null && gh['kill'] == true) ||
+        (d != null && d['kill'] == true);
+    if (killed) {
+      if (mounted) {
+        showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (x) =>
+                const AlertDialog(content: Text('应用已被管理员停用')));
+      }
+      await Future.delayed(const Duration(milliseconds: 1500));
+      exit(0);
+    }
     final ghBan = gh != null && gh['banned'] == true;
     final ciBan = d != null && d['banned'] == true;
     final banned = ghBan || ciBan;
