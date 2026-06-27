@@ -1140,7 +1140,7 @@ class _MsgList extends StatelessWidget {
     final myAmount = (m['_myamount'] as num?)?.toInt() ?? 0;
     final toNick = '${m['to_nick'] ?? ''}'; // 专属红包指定人
     final exclusive = '${m['to'] ?? ''}'.isNotEmpty;
-    final color = isRed ? const Color(0xFFD7402F) : const Color(0xFFE3A93B);
+
     String status;
     bool tappable = false;
     if (claimed && !canMore) {
@@ -1157,37 +1157,138 @@ class _MsgList extends StatelessWidget {
           : (isRed ? '点击领取红包' : '点击收款');
       tappable = true;
     }
+
     final faded = (claimed && !canMore) || done;
+
+    // Merged authoritative WeChat-style palette.
+    final bodyColor = faded ? const Color(0xFFFBDCA8) : const Color(0xFFFA9D3B);
+    final footerColor = faded ? const Color(0xFFF0CB8C) : const Color(0xFFE2872C);
+    final titleColor = faded ? const Color(0xFF9A7B4B) : const Color(0xFFFFFCF5);
+    final statusColor = faded ? const Color(0xFFB39A6E) : const Color(0xFFFBE7C8);
+    final footerLabelColor =
+        faded ? const Color(0xFFBBA579) : const Color(0xFFFFF3DC);
+    final exclusiveColor =
+        faded ? const Color(0xFFB39A6E) : const Color(0xFFFFD24A);
+    final emblemBg = faded ? const Color(0xFFE6D2A6) : const Color(0xFFF8D88C);
+    const emblemGlyph = Color(0xFFC8431E);
+
+    final brand = isRed ? '趣播红包' : '趣播转账';
+
     return InkWell(
       onTap: tappable ? () => onGrabPacket?.call('${m['pid']}') : null,
       child: Container(
-        width: 220,
-        padding: const EdgeInsets.all(12),
+        width: 240,
+        clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-            color: faded ? color.withValues(alpha: 0.55) : color,
-            borderRadius: BorderRadius.circular(8)),
-        child: Row(children: [
-          Text(isRed ? '🧧' : '💰', style: const TextStyle(fontSize: 30)),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(msg.isEmpty ? (isRed ? '恭喜发财' : '给你转账') : msg,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                      color: Color(0xFFFFE9C7), fontWeight: FontWeight.w600)),
-              if (exclusive)
-                Text('专属红包 · 仅 $toNick 可领',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                        color: Color(0xFFFFD24A), fontSize: 10)),
-              const SizedBox(height: 2),
-              Text(status,
-                  style: const TextStyle(color: Color(0xFFFFE9C7), fontSize: 11)),
-            ]),
-          ),
-        ]),
+          borderRadius: BorderRadius.circular(8),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x1F000000),
+              offset: Offset(0, 1),
+              blurRadius: 3,
+            ),
+          ],
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Top amber body.
+            Container(
+              color: bodyColor,
+              padding: const EdgeInsets.fromLTRB(12, 14, 12, 14),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Opacity(
+                    opacity: faded ? 0.55 : 1.0,
+                    child: Container(
+                      width: 38,
+                      height: 38,
+                      alignment: Alignment.center,
+                      decoration: BoxDecoration(
+                        color: emblemBg,
+                        shape: BoxShape.circle,
+                      ),
+                      child: isRed
+                          ? const Text(
+                              '￥',
+                              style: TextStyle(
+                                color: emblemGlyph,
+                                fontSize: 20,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            )
+                          : const Icon(
+                              Icons.swap_horiz,
+                              color: emblemGlyph,
+                              size: 22,
+                            ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          msg.isEmpty ? (isRed ? '恭喜发财，大吉大利' : '给你转账') : msg,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: titleColor,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        if (exclusive) ...[
+                          const SizedBox(height: 3),
+                          Text(
+                            '专属红包 · 仅 $toNick 可领',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: exclusiveColor,
+                              fontSize: 10,
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 4),
+                        Text(
+                          status,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            color: statusColor,
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Bottom darker footer strip with brand label.
+            Container(
+              height: 30,
+              color: footerColor,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              alignment: Alignment.centerLeft,
+              child: Text(
+                brand,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: footerLabelColor,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
