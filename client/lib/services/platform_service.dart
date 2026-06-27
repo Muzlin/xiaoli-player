@@ -576,12 +576,16 @@ class PlatformService {
       String title = '',
       String item = '',
       int scheduleMin = 0,
-      String target = ''}) async {
+      String target = '',
+      Map<String, String> events = const {}}) async {
+    final ev = events.isEmpty
+        ? ''
+        : '&events=${Uri.encodeComponent(jsonEncode(events))}';
     final q = '/bot-create?name=${Uri.encodeComponent(name)}'
         '&word=${Uri.encodeComponent(word)}&kind=$kind'
         '&text=${Uri.encodeComponent(text)}'
         '&vid=$vid&title=${Uri.encodeComponent(title)}&item=$item'
-        '&schedule_min=$scheduleMin&target=$target';
+        '&schedule_min=$scheduleMin&target=$target$ev';
     final d = await _g(q, withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }

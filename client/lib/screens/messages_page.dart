@@ -558,15 +558,10 @@ class _ChatPageState extends State<_ChatPage> {
     }
   }
 
-  Future<void> _grabPacket(String pid) async {
+  Future<Map<String, dynamic>?> _grabPacket(String pid) async {
     final d = await PlatformService.packetGrab(pid);
-    if (!mounted) return;
-    if (d != null && d['ok'] == true) {
-      _snack(context, '已领取 ${d['amount']} 兑换币');
-    } else {
-      _snack(context, '${d?['error'] ?? '领取失败'}');
-    }
-    _load();
+    if (mounted) _load();
+    return d;
   }
 
   @override
@@ -826,15 +821,10 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     }
   }
 
-  Future<void> _grabPacket(String pid) async {
+  Future<Map<String, dynamic>?> _grabPacket(String pid) async {
     final d = await PlatformService.packetGrab(pid);
-    if (!mounted) return;
-    if (d != null && d['ok'] == true) {
-      _snack(context, '🧧 抢到 ${d['amount']} 兑换币');
-    } else {
-      _snack(context, '${d?['error'] ?? '没抢到'}');
-    }
-    _load();
+    if (mounted) _load();
+    return d;
   }
 
   String get _myRole {
@@ -889,7 +879,10 @@ class _GroupChatPageState extends State<_GroupChatPage> {
             onSend: _send,
             onRecommend: _recommend,
             onRedpacket: _redpacket,
-            onCard: _sendCard),
+            onCard: _sendCard,
+            myUid: _myUid,
+            atMembers: Map<String, String>.from(
+                (_info['member_nicks'] as Map?) ?? const {})),
       ]),
     );
   }
@@ -1165,7 +1158,7 @@ class _MsgList extends StatelessWidget {
   final bool group;
   final void Function(String id, String title) onPlayVideo;
   final void Function(String uid, String nick)? onCard;
-  final void Function(String pid)? onGrabPacket;
+  final Future<Map<String, dynamic>?> Function(String pid)? onGrabPacket;
   final void Function(String mid, String emoji)? onReact; // 表情回应
   final void Function(Map<String, dynamic> msg)? onPat; // 拍一拍(双击对方消息)
   const _MsgList(
@@ -1244,7 +1237,147 @@ class _MsgList extends StatelessWidget {
     );
   }
 
-  Widget _packetBubble(Map<String, dynamic> m, bool mine) {
+  // 微信式红包/转账领取界面：红色封面 + 開/收款按钮 → 揭示金额。
+  Future<void> _openPacket(BuildContext context, Map<String, dynamic> m) async {
+    final isRed = m['ptype'] == 'redpacket';
+    final blessing = '${m['msg'] ?? ''}'.trim().isEmpty
+        ? (isRed ? '恭喜发财，大吉大利' : '给你转账')
+        : '${m['msg']}';
+    final fromNick = '${m['from_nick'] ?? ''}'.trim();
+    final pid = '${m['pid'] ?? ''}';
+    final claimed = m['_claimed'] == true;
+    final done = m['_done'] == true;
+    final canMore = m['_canmore'] == true;
+    final myAmount = (m['_myamount'] as num?)?.toInt() ?? 0;
+    String phase; // cover | opening | revealed | gone
+    int amount = myAmount;
+    String? errMsg;
+    if (claimed && !canMore) {
+      phase = 'revealed';
+    } else if (done) {
+      phase = 'gone';
+    } else {
+      phase = 'cover';
+    }
+    const red = Color(0xFFC73A2F);
+    const red2 = Color(0xFFB02619);
+    const gold = Color(0xFFF6D58A);
+    await showDialog<void>(
+      context: context,
+      barrierColor: Colors.black54,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+        Widget body;
+        if (phase == 'opening') {
+          body = const SizedBox(
+              height: 84,
+              child: Center(child: CircularProgressIndicator(color: gold)));
+        } else if (phase == 'revealed') {
+          body = Column(mainAxisSize: MainAxisSize.min, children: [
+            Text('$amount',
+                style: const TextStyle(
+                    color: gold, fontSize: 46, fontWeight: FontWeight.bold)),
+            const Text('兑换币', style: TextStyle(color: gold, fontSize: 14)),
+            const SizedBox(height: 8),
+            Text(isRed ? '已存入你的零钱' : '已收款',
+                style: const TextStyle(color: Colors.white60, fontSize: 12)),
+          ]);
+        } else if (phase == 'gone') {
+          body = Padding(
+            padding: const EdgeInsets.symmetric(vertical: 18),
+            child: Text(
+                errMsg ??
+                    (claimed
+                        ? '已领取 $myAmount 兑换币'
+                        : (isRed ? '手慢了，红包已被领完' : '已被领取')),
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.white70, fontSize: 15)),
+          );
+        } else {
+          body = GestureDetector(
+            onTap: () async {
+              setS(() => phase = 'opening');
+              final r = await onGrabPacket?.call(pid);
+              if (!ctx.mounted) return; // 领取途中关了弹窗
+              if (r != null && r['ok'] == true) {
+                setS(() {
+                  amount = (r['amount'] as num?)?.toInt() ?? 0;
+                  phase = 'revealed';
+                });
+              } else {
+                setS(() {
+                  errMsg = '${r?['error'] ?? '领取失败'}';
+                  phase = 'gone';
+                });
+              }
+            },
+            child: Container(
+              width: 78,
+              height: 78,
+              alignment: Alignment.center,
+              decoration: const BoxDecoration(
+                  color: gold,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(color: Color(0x55000000), blurRadius: 8)
+                  ]),
+              child: Text(isRed ? '開' : '收',
+                  style: const TextStyle(
+                      color: red2,
+                      fontSize: 30,
+                      fontWeight: FontWeight.bold)),
+            ),
+          );
+        }
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding:
+              const EdgeInsets.symmetric(horizontal: 48, vertical: 70),
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: [red, red2]),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 26),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Align(
+                  alignment: Alignment.topRight,
+                  child: GestureDetector(
+                      onTap: () => Navigator.pop(ctx),
+                      child: const Icon(Icons.close,
+                          color: Colors.white54, size: 22))),
+              const CircleAvatar(
+                  radius: 22,
+                  backgroundColor: gold,
+                  child: Icon(Icons.person, color: red2)),
+              const SizedBox(height: 8),
+              Text(
+                  fromNick.isEmpty
+                      ? (isRed ? '红包' : '转账')
+                      : '$fromNick 的${isRed ? '红包' : '转账'}',
+                  style: const TextStyle(color: gold, fontSize: 13)),
+              const SizedBox(height: 14),
+              Text(blessing,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 24),
+              body,
+              const SizedBox(height: 6),
+            ]),
+          ),
+        );
+      }),
+    );
+  }
+
+  Widget _packetBubble(BuildContext context, Map<String, dynamic> m, bool mine) {
     final isRed = m['ptype'] == 'redpacket';
     final msg = '${m['msg'] ?? ''}';
     final claimed = m['_claimed'] == true;
@@ -1255,7 +1388,6 @@ class _MsgList extends StatelessWidget {
     final exclusive = '${m['to'] ?? ''}'.isNotEmpty;
 
     String status;
-    bool tappable = false;
     if (claimed && !canMore) {
       status = isRed ? '已领 $myAmount 币' : '已收款 $myAmount 币';
     } else if (mine && !canMore) {
@@ -1265,10 +1397,7 @@ class _MsgList extends StatelessWidget {
     } else if (done) {
       status = isRed ? '手慢了，已抢光' : '已被领取';
     } else {
-      status = claimed
-          ? '已领 $myAmount 币 · 还能再抢'
-          : (isRed ? '点击领取红包' : '点击收款');
-      tappable = true;
+      status = claimed ? '已领 $myAmount 币 · 还能再抢' : (isRed ? '点击领取红包' : '点击收款');
     }
 
     final faded = (claimed && !canMore) || done;
@@ -1288,7 +1417,7 @@ class _MsgList extends StatelessWidget {
     final brand = isRed ? '趣播红包' : '趣播转账';
 
     return InkWell(
-      onTap: tappable ? () => onGrabPacket?.call('${m['pid']}') : null,
+      onTap: () => _openPacket(context, m), // 点开微信式领取界面
       child: Container(
         width: 240,
         clipBehavior: Clip.antiAlias,
@@ -1439,7 +1568,7 @@ class _MsgList extends StatelessWidget {
         final isCard = m['kind'] == 'card';
         final isPacket = m['kind'] == 'packet';
         final bubble = isPacket
-            ? _packetBubble(m, mine)
+            ? _packetBubble(context, m, mine)
             : isCard
             ? InkWell(
                 onTap: () => onCard?.call(
@@ -1573,13 +1702,67 @@ class _ChatInput extends StatelessWidget {
   final VoidCallback? onTransfer; // 私聊才有转账
   final VoidCallback? onRedpacket; // 私聊才有发红包
   final VoidCallback? onCard; // 发个人名片
+  final Map<String, String>? atMembers; // 群聊 @ 成员表(uid→昵称)
+  final String? myUid;
   const _ChatInput(
       {required this.controller,
       required this.onSend,
       required this.onRecommend,
       this.onTransfer,
       this.onRedpacket,
-      this.onCard});
+      this.onCard,
+      this.atMembers,
+      this.myUid});
+
+  // 群聊输入 @ 时弹成员表；选中把「@昵称 」插进输入框。
+  void _showAtPicker(BuildContext context) {
+    final members = atMembers;
+    if (members == null || members.isEmpty) return;
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: ListView(shrinkWrap: true, children: [
+          const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('选择要 @ 的人',
+                  style: TextStyle(fontWeight: FontWeight.w600))),
+          for (final e in members.entries)
+            if (e.key != myUid)
+              ListTile(
+                dense: true,
+                leading: CircleAvatar(
+                    radius: 16,
+                    backgroundColor: e.key.startsWith('bot')
+                        ? const Color(0xFFE3A93B)
+                        : const Color(0xFF07C160),
+                    child: Icon(
+                        e.key.startsWith('bot')
+                            ? Icons.smart_toy
+                            : Icons.person,
+                        color: Colors.white,
+                        size: 18)),
+                title: Text(e.value),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _insertAt(e.value);
+                },
+              ),
+        ]),
+      ),
+    );
+  }
+
+  void _insertAt(String nick) {
+    var t = controller.text;
+    if (!t.endsWith('@')) {
+      if (t.isNotEmpty && !t.endsWith(' ')) t += ' '; // 按钮触发时补空格分隔
+      t += '@';
+    }
+    controller.text = '$t$nick ';
+    controller.selection = TextSelection.fromPosition(
+        TextPosition(offset: controller.text.length));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -1613,6 +1796,12 @@ class _ChatInput extends StatelessWidget {
                 tooltip: '发名片',
                 onPressed: onCard,
               ),
+            if (atMembers != null && atMembers!.isNotEmpty)
+              IconButton(
+                icon: const Icon(Icons.alternate_email, color: Colors.black54),
+                tooltip: '@成员',
+                onPressed: () => _showAtPicker(context),
+              ),
             Expanded(
               child: TextField(
                 controller: controller,
@@ -1629,6 +1818,16 @@ class _ChatInput extends StatelessWidget {
                       borderRadius: BorderRadius.circular(6),
                       borderSide: BorderSide.none),
                 ),
+                onChanged: atMembers == null
+                    ? null
+                    : (v) {
+                        // 仅在「行首或空格后刚输入 @」时弹，避免编辑/删除到 @ 结尾时反复弹
+                        if (v.endsWith('@') &&
+                            (v.length == 1 ||
+                                ' \n\t'.contains(v[v.length - 2]))) {
+                          _showAtPicker(context);
+                        }
+                      },
                 onSubmitted: (_) => onSend(),
               ),
             ),
@@ -2120,11 +2319,29 @@ class _BotPageState extends State<BotPage> {
     });
   }
 
+  // 10 个事件触发规则：[key, 中文名, 默认回复]
+  static const List<List<String>> _evtRules = [
+    ['app_open', '打开软件', '欢迎回来！今天也要开心鸭~'],
+    ['sign', '每日签到', '签到成功，坚持就是胜利！'],
+    ['comeback', '久别回归', '好久不见，可想你了~'],
+    ['low_balance', '余额告急', '兑换币不多啦，记得签到/看视频赚币~'],
+    ['watch', '观影达标', '观影达人！又解锁一个里程碑👏'],
+    ['moment', '发了朋友圈', '动态发布成功，已帮你点亮✨'],
+    ['got_packet', '收到红包/转账', '到账啦，恭喜发财🧧'],
+    ['follow', '关注了人', '关注成功，又多了个好友~'],
+    ['achievement', '解锁成就', '叮！解锁新成就，太强了🏆'],
+    ['night', '深夜关怀', '夜深了，注意休息哦🌙'],
+  ];
+
   Future<void> _create() async {
     final nameCtrl = TextEditingController();
     final wordCtrl = TextEditingController();
     final textCtrl = TextEditingController(text: '你好呀，我是机器人~');
     final everyCtrl = TextEditingController(text: '0');
+    final evtCtrls = {
+      for (final e in _evtRules) e[0]: TextEditingController(text: e[2])
+    };
+    final evtOn = <String>{};
     String kind = 'text';
     String? target;
     Map<String, dynamic>? vid;
@@ -2211,6 +2428,34 @@ class _BotPageState extends State<BotPage> {
                     ),
                   ),
                 ]),
+              const Divider(),
+              const Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text('🔔 事件触发（选填，满足规则机器人就私信你）',
+                      style: TextStyle(fontWeight: FontWeight.w600))),
+              for (final e in _evtRules) ...[
+                Row(children: [
+                  Checkbox(
+                    visualDensity: VisualDensity.compact,
+                    value: evtOn.contains(e[0]),
+                    onChanged: (v) => setD(() =>
+                        v == true ? evtOn.add(e[0]) : evtOn.remove(e[0])),
+                  ),
+                  Expanded(child: Text(e[1])),
+                ]),
+                if (evtOn.contains(e[0]))
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12, bottom: 6),
+                    child: TextField(
+                        controller: evtCtrls[e[0]],
+                        maxLength: 100,
+                        style: const TextStyle(fontSize: 13),
+                        decoration: const InputDecoration(
+                            isDense: true,
+                            counterText: '',
+                            labelText: '机器人发的内容')),
+                  ),
+              ],
             ]),
           ),
           actions: [
@@ -2224,20 +2469,33 @@ class _BotPageState extends State<BotPage> {
         ),
       ),
     );
-    if (ok != true) return;
+    // 先把值读出来，再统一释放控制器(含 10 个事件控制器)，避免泄漏。
     final name = nameCtrl.text.trim();
-    if (name.isEmpty) return;
+    final word = wordCtrl.text.trim();
+    final replyText = textCtrl.text.trim();
     final every = int.tryParse(everyCtrl.text.trim()) ?? 0;
+    final events = <String, String>{};
+    for (final e in _evtRules) {
+      if (evtOn.contains(e[0])) {
+        final t = evtCtrls[e[0]]!.text.trim();
+        if (t.isNotEmpty) events[e[0]] = t;
+      }
+    }
+    for (final c in [nameCtrl, wordCtrl, textCtrl, everyCtrl, ...evtCtrls.values]) {
+      c.dispose();
+    }
+    if (ok != true || name.isEmpty) return;
     final d = await PlatformService.botCreate(
       name: name,
-      word: wordCtrl.text.trim(),
+      word: word,
       kind: kind,
-      text: textCtrl.text.trim(),
+      text: replyText,
       vid: vid?['id'] as String? ?? '',
       title: vid?['title'] as String? ?? '',
       item: kind == 'coupon' ? 'coupon_10' : '',
       scheduleMin: (every > 0 && target != null) ? every : 0,
       target: target ?? '',
+      events: events,
     );
     if (d != null && d['ok'] == true) _load();
   }
