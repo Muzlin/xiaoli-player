@@ -1,5 +1,8 @@
 package com.example.media_client
 
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -9,6 +12,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.KeyEvent
+import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -21,6 +25,8 @@ class MainActivity : FlutterActivity() {
     private var screenChannel: MethodChannel? = null
     private var installerChannel: MethodChannel? = null
     private var openChannel: MethodChannel? = null
+    private var notifChannel: MethodChannel? = null
+    private var notifId: Int = 1000 // 递增通知 id，多条消息不互相覆盖
     private var sharedUrl: String? = null
     private var pendingOpenPath: String? = null // 启动时「打开方式」传入的待播文件
 
@@ -80,6 +86,20 @@ class MainActivity : FlutterActivity() {
                 result.notImplemented()
             }
         }
+        // 系统通知：收到新消息时弹安卓通知栏。
+        notifChannel = MethodChannel(messenger, "xiaoli/notify")
+        notifChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "requestAuth" -> { result.success(true) } // 权限在 Dart 侧用 permission_handler 之外的 SDK33 申请，这里仅占位
+                "show" -> {
+                    val title = call.argument<String>("title") ?: "新消息"
+                    val body = call.argument<String>("body") ?: ""
+                    showNotification(title, body)
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
@@ -91,6 +111,45 @@ class MainActivity : FlutterActivity() {
         handleShareIntent(intent)
         // 启动即「打开方式」：先缓存，Dart 起来后 getPending 拉取播放。
         pendingOpenPath = viewIntentPath(intent)
+        // Android 13+ 需运行时申请通知权限，否则消息通知静默不显示。
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)
+                != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                requestPermissions(
+                    arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1001)
+            }
+        }
+    }
+
+    private val notifChannelId = "xiaoli_msgs"
+
+    // 收到新消息弹安卓通知栏。点通知回到 app。
+    private fun showNotification(title: String, body: String) {
+        val mgr = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            mgr.getNotificationChannel(notifChannelId) == null
+        ) {
+            val ch = NotificationChannel(
+                notifChannelId, "聊天消息", NotificationManager.IMPORTANCE_HIGH)
+            ch.description = "新私信 / 群消息提醒"
+            mgr.createNotificationChannel(ch)
+        }
+        val launch = packageManager.getLaunchIntentForPackage(packageName)?.apply {
+            flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pi = PendingIntent.getActivity(
+            this, 0, launch ?: Intent(),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+        val n = NotificationCompat.Builder(this, notifChannelId)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        mgr.notify(notifId++, n)
     }
 
     override fun onNewIntent(intent: Intent) {

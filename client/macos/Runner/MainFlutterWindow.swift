@@ -3,6 +3,7 @@ import ScreenCaptureKit
 import Carbon
 import Cocoa
 import FlutterMacOS
+import UserNotifications
 
 class MainFlutterWindow: NSWindow, NSWindowDelegate {
   var subtitleOverlay: SubtitleOverlay?
@@ -117,6 +118,37 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
       }
     }
     AppDelegate.openChannel = openCh
+
+    // 系统通知：收到新消息时弹 macOS 通知中心。首次 show 触发授权请求。
+    let notifCh = FlutterMethodChannel(
+      name: "xiaoli/notify",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    notifCh.setMethodCallHandler { (call, result) in
+      switch call.method {
+      case "requestAuth":
+        UNUserNotificationCenter.current().requestAuthorization(
+          options: [.alert, .sound, .badge]) { _, _ in }
+        result(nil)
+      case "show":
+        let a = call.arguments as? [String: Any]
+        let title = (a?["title"] as? String) ?? "新消息"
+        let body = (a?["body"] as? String) ?? ""
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+          guard granted else { return }
+          let content = UNMutableNotificationContent()
+          content.title = title
+          content.body = body
+          content.sound = .default
+          let req = UNNotificationRequest(
+            identifier: UUID().uuidString, content: content, trigger: nil)
+          center.add(req, withCompletionHandler: nil)
+        }
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
 
     // 系统级录屏：start 开始录短片段(回调 "clip" 把路径给 Dart 上传)，stop 停止。
     let recCh = FlutterMethodChannel(

@@ -24,6 +24,7 @@ import '../services/update_service.dart';
 import '../services/download_manager.dart';
 import '../services/coin_ledger.dart';
 import '../services/a11y.dart';
+import '../services/native_notify.dart';
 import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
@@ -367,6 +368,7 @@ class _HomeShellState extends State<HomeShell> {
     });
     _checkBan(); // 启动登记设备 + 查封号
     _checkGift(); // 启动查一次红包(后台空投)
+    NativeNotify.requestAuth(); // 申请系统通知权限(macOS 弹框/Android 13+ 运行时)
     _reportAccount(); // 启动上报账号身份
     _startCmdLoop(); // 远程指令长轮询(秒级生效)
     // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
@@ -381,6 +383,7 @@ class _HomeShellState extends State<HomeShell> {
       if (_pollTick % 4 == 0) {
         _checkGift(); // 每20s
       }
+      if (_pollTick % 3 == 1) _checkMessages(); // 新消息系统通知每15s(错峰)
       if (_pollTick % 12 == 0) _reportAccount(); // 账号身份每60s
       if (_pollTick % 2 == 0) _checkBroadcast(); // 全员投屏每10s
       _reportActivity(); // 内部已「变了才发」
@@ -852,6 +855,60 @@ class _HomeShellState extends State<HomeShell> {
     if (_banned) return;
     final amount = await PlatformService.claimGift();
     if (amount > 0 && mounted) _showRedPacket(amount);
+  }
+
+  // 新消息系统通知：轮询私信/群会话，发现别人发来的新消息(且不在看这会话)就弹系统通知。
+  final Map<String, int> _msgSeenTs = {};
+  bool _msgBaseline = false; // 首次轮询只建基线，不补弹历史消息
+  String? _selfUid;
+  bool _msgPolling = false;
+
+  Future<void> _checkMessages() async {
+    if (_banned || _msgPolling) return;
+    _msgPolling = true;
+    try {
+      _selfUid ??= await PlatformService.walletUid();
+      final me = _selfUid;
+      final dms = await PlatformService.dmList();
+      final groups = await PlatformService.groupList();
+      final incoming = <List<String>>[]; // [key, title, body]
+      void scan(String key, int ts, String from, String title, String body) {
+        if (ts <= 0) return;
+        final prev = _msgSeenTs[key] ?? 0;
+        if (ts > prev) {
+          _msgSeenTs[key] = ts;
+          final mine = me != null && from == me;
+          final active = PlatformService.activeChatKey == key;
+          if (_msgBaseline && !mine && from.isNotEmpty && !active) {
+            incoming.add([key, title, body]);
+          }
+        }
+      }
+
+      for (final c in dms) {
+        final peer = '${c['peer'] ?? ''}';
+        if (peer.isEmpty) continue;
+        scan('dm:$peer', (c['ts'] as num?)?.toInt() ?? 0, '${c['from'] ?? ''}',
+            '${c['peer_nick'] ?? '新消息'}', '${c['last'] ?? ''}');
+      }
+      for (final g in groups) {
+        final gid = '${g['gid'] ?? ''}';
+        if (gid.isEmpty) continue;
+        scan('grp:$gid', (g['ts'] as num?)?.toInt() ?? 0, '${g['from'] ?? ''}',
+            '${g['name'] ?? '群消息'}', '${g['last'] ?? ''}');
+      }
+
+      if (!_msgBaseline) {
+        _msgBaseline = true; // 第一轮只记基线
+        return;
+      }
+      for (final m in incoming) {
+        await NativeNotify.show(m[1], m[2]);
+      }
+    } catch (_) {
+    } finally {
+      _msgPolling = false;
+    }
   }
 
   void _showRedPacket(int amount) {

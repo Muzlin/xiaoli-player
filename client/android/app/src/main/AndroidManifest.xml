@@ -3,6 +3,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <!-- 自动更新：安装新版 apk -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
+    <!-- 新消息系统通知(Android 13+ 需运行时申请) -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:label="小李播放器"
         android:name="${applicationName}"

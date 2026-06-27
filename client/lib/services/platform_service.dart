@@ -203,6 +203,9 @@ class PlatformService {
     return '$current/video/$id';
   }
 
+  /// 当前打开的聊天标识（'dm:<peer>' / 'grp:<gid>'）；消息轮询据此不给正在看的会话弹通知。
+  static String? activeChatKey;
+
   // ===== 小李兑换币钱包 =====
   static String? _uid;
 

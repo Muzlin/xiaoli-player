@@ -426,9 +426,18 @@ class _ChatPageState extends State<_ChatPage> {
   @override
   void initState() {
     super.initState();
+    PlatformService.activeChatKey = 'dm:${widget.peer}'; // 正在看，别给这会话弹通知
     PlatformService.walletUid()
         .then((u) => mounted ? setState(() => _myUid = u) : null);
     _load();
+  }
+
+  @override
+  void dispose() {
+    if (PlatformService.activeChatKey == 'dm:${widget.peer}') {
+      PlatformService.activeChatKey = null;
+    }
+    super.dispose();
   }
 
   Future<void> _load() async {
@@ -639,9 +648,18 @@ class _GroupChatPageState extends State<_GroupChatPage> {
   @override
   void initState() {
     super.initState();
+    PlatformService.activeChatKey = 'grp:${widget.gid}'; // 正在看，别给这群弹通知
     PlatformService.walletUid()
         .then((u) => mounted ? setState(() => _myUid = u) : null);
     _load();
+  }
+
+  @override
+  void dispose() {
+    if (PlatformService.activeChatKey == 'grp:${widget.gid}') {
+      PlatformService.activeChatKey = null;
+    }
+    super.dispose();
   }
 
   Future<void> _load() async {
