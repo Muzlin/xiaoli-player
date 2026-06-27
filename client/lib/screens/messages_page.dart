@@ -694,63 +694,104 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     final totalCtrl = TextEditingController(text: '20');
     final partsCtrl = TextEditingController(text: '5');
     final msgCtrl = TextEditingController(text: '恭喜发财');
+    // 群成员（排除自己）用于「专属红包」指定收礼人
+    final nickMap = Map<String, dynamic>.from(
+        (_info['member_nicks'] as Map?) ?? const {});
+    final members = ((_info['members'] as List?) ?? [])
+        .map((e) => '$e')
+        .where((u) => u.isNotEmpty && u != _myUid)
+        .toList();
+    String? toUid; // null=拼手气群红包；非空=专属给某人
     final ok = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFFC0392B),
-        title: const Text('🧧 群红包（拼手气）',
-            style: TextStyle(color: Color(0xFFFFE2A8))),
-        content: Column(mainAxisSize: MainAxisSize.min, children: [
-          TextField(
-              controller: totalCtrl,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                  labelText: '总额',
-                  labelStyle: TextStyle(color: Colors.white70))),
-          TextField(
-              controller: partsCtrl,
-              keyboardType: TextInputType.number,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                  labelText: '个数',
-                  labelStyle: TextStyle(color: Colors.white70))),
-          TextField(
-              controller: msgCtrl,
-              maxLength: 40,
-              style: const TextStyle(color: Colors.white),
-              decoration: const InputDecoration(
-                  labelText: '祝福语',
-                  labelStyle: TextStyle(color: Colors.white70),
-                  counterStyle: TextStyle(color: Colors.white54))),
-        ]),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child:
-                  const Text('取消', style: TextStyle(color: Colors.white70))),
-          FilledButton(
-              style: FilledButton.styleFrom(
-                  backgroundColor: const Color(0xFFFFD24A),
-                  foregroundColor: const Color(0xFF7A1F18)),
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('塞钱发群里')),
-        ],
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDlg) {
+          final exclusive = toUid != null;
+          return AlertDialog(
+            backgroundColor: const Color(0xFFC0392B),
+            title: Text(exclusive ? '🧧 专属红包' : '🧧 群红包（拼手气）',
+                style: const TextStyle(color: Color(0xFFFFE2A8))),
+            content: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: totalCtrl,
+                  keyboardType: TextInputType.number,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: const InputDecoration(
+                      labelText: '总额',
+                      labelStyle: TextStyle(color: Colors.white70))),
+              if (!exclusive)
+                TextField(
+                    controller: partsCtrl,
+                    keyboardType: TextInputType.number,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                        labelText: '个数（多于群人数则可继续抢）',
+                        labelStyle: TextStyle(color: Colors.white70))),
+              TextField(
+                  controller: msgCtrl,
+                  maxLength: 40,
+                  style: const TextStyle(color: Colors.white),
+                  decoration: const InputDecoration(
+                      labelText: '祝福语',
+                      labelStyle: TextStyle(color: Colors.white70),
+                      counterStyle: TextStyle(color: Colors.white54))),
+              const SizedBox(height: 6),
+              if (members.isNotEmpty)
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: DropdownButton<String?>(
+                        value: toUid,
+                        isExpanded: true,
+                        dropdownColor: const Color(0xFF8E2A20),
+                        iconEnabledColor: Colors.white70,
+                        style: const TextStyle(color: Colors.white),
+                        hint: const Text('发给所有人（拼手气）',
+                            style: TextStyle(color: Colors.white70)),
+                        items: [
+                          const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text('发给所有人（拼手气）',
+                                  style: TextStyle(color: Colors.white))),
+                          for (final u in members)
+                            DropdownMenuItem<String?>(
+                                value: u,
+                                child: Text('专属给 ${nickMap[u] ?? u}',
+                                    style:
+                                        const TextStyle(color: Colors.white))),
+                        ],
+                        onChanged: (v) => setDlg(() => toUid = v))),
+            ]),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text('取消',
+                      style: TextStyle(color: Colors.white70))),
+              FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFFFD24A),
+                      foregroundColor: const Color(0xFF7A1F18)),
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: Text(exclusive ? '发专属红包' : '塞钱发群里')),
+            ],
+          );
+        },
       ),
     );
     if (ok != true) return;
     final total = int.tryParse(totalCtrl.text.trim()) ?? 0;
-    final parts = int.tryParse(partsCtrl.text.trim()) ?? 0;
+    final parts =
+        toUid != null ? 1 : (int.tryParse(partsCtrl.text.trim()) ?? 0);
     final d = await PlatformService.chatPacket(
         scope: 'group',
         target: widget.gid,
         ptype: 'redpacket',
         amount: total,
         parts: parts,
-        msg: msgCtrl.text.trim());
+        msg: msgCtrl.text.trim(),
+        to: toUid ?? '');
     if (!mounted) return;
     if (d != null && d['ok'] == true) {
-      _snack(context, '🧧 群红包已发，等大家抢');
+      _snack(context, toUid != null ? '🧧 专属红包已发' : '🧧 群红包已发，等大家抢');
       _load();
     } else {
       _snack(context, '${d?['error'] ?? '发红包失败'}');
@@ -1095,29 +1136,35 @@ class _MsgList extends StatelessWidget {
     final msg = '${m['msg'] ?? ''}';
     final claimed = m['_claimed'] == true;
     final done = m['_done'] == true;
+    final canMore = m['_canmore'] == true; // 个数>人数时同一人可继续抢
     final myAmount = (m['_myamount'] as num?)?.toInt() ?? 0;
+    final toNick = '${m['to_nick'] ?? ''}'; // 专属红包指定人
+    final exclusive = '${m['to'] ?? ''}'.isNotEmpty;
     final color = isRed ? const Color(0xFFD7402F) : const Color(0xFFE3A93B);
     String status;
     bool tappable = false;
-    if (claimed) {
+    if (claimed && !canMore) {
       status = isRed ? '已领 $myAmount 币' : '已收款 $myAmount 币';
-    } else if (mine) {
+    } else if (mine && !canMore) {
       status = done
           ? (isRed ? '已被领完' : '已被领取')
           : (isRed ? '红包待领取' : '等待对方收款');
     } else if (done) {
       status = isRed ? '手慢了，已抢光' : '已被领取';
     } else {
-      status = isRed ? '点击领取红包' : '点击收款';
+      status = claimed
+          ? '已领 $myAmount 币 · 还能再抢'
+          : (isRed ? '点击领取红包' : '点击收款');
       tappable = true;
     }
+    final faded = (claimed && !canMore) || done;
     return InkWell(
       onTap: tappable ? () => onGrabPacket?.call('${m['pid']}') : null,
       child: Container(
         width: 220,
         padding: const EdgeInsets.all(12),
         decoration: BoxDecoration(
-            color: claimed || done ? color.withValues(alpha: 0.55) : color,
+            color: faded ? color.withValues(alpha: 0.55) : color,
             borderRadius: BorderRadius.circular(8)),
         child: Row(children: [
           Text(isRed ? '🧧' : '💰', style: const TextStyle(fontSize: 30)),
@@ -1129,6 +1176,12 @@ class _MsgList extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                       color: Color(0xFFFFE9C7), fontWeight: FontWeight.w600)),
+              if (exclusive)
+                Text('专属红包 · 仅 $toNick 可领',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: Color(0xFFFFD24A), fontSize: 10)),
               const SizedBox(height: 2),
               Text(status,
                   style: const TextStyle(color: Color(0xFFFFE9C7), fontSize: 11)),

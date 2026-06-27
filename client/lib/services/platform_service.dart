@@ -891,10 +891,12 @@ class PlatformService {
       required String ptype,
       required int amount,
       int parts = 1,
-      String msg = ''}) async {
+      String msg = '',
+      String to = ''}) async {
     final m = msg.trim().isEmpty ? '' : '&msg=${Uri.encodeComponent(msg.trim())}';
+    final t = to.trim().isEmpty ? '' : '&to=${Uri.encodeComponent(to.trim())}';
     final d = await _g(
-        '/chat-packet?scope=$scope&target=$target&ptype=$ptype&amount=$amount&parts=$parts$m',
+        '/chat-packet?scope=$scope&target=$target&ptype=$ptype&amount=$amount&parts=$parts$m$t',
         withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
