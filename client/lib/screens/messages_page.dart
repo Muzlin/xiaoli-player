@@ -504,17 +504,18 @@ class _ChatPageState extends State<_ChatPage> {
       ),
     );
     if (ok != true) return;
-    final d = await PlatformService.transfer(widget.peer, amount);
+    final d = await PlatformService.chatPacket(
+        scope: 'dm',
+        target: widget.peer,
+        ptype: 'redpacket',
+        amount: amount,
+        msg: msgCtrl.text.trim());
     if (!mounted) return;
-    if (d == null) {
-      _snack(context, '发红包失败，请检查网络');
-    } else if (d['ok'] == true) {
-      _snack(context, '🧧 红包已发出！-$amount 币');
-      await PlatformService.dmSend(widget.peer,
-          text: '[🧧红包] ${msgCtrl.text.trim()}（$amount 币已到账）');
+    if (d != null && d['ok'] == true) {
+      _snack(context, '🧧 红包已发出，等对方领取');
       _load();
     } else {
-      _snack(context, '${d['error'] ?? '发红包失败'}');
+      _snack(context, '${d?['error'] ?? '发红包失败'}');
     }
   }
 
@@ -537,18 +538,26 @@ class _ChatPageState extends State<_ChatPage> {
   Future<void> _transfer() async {
     final amt = await _askAmount(context, '转账给 ${widget.peerNick}');
     if (amt == null || amt <= 0) return;
-    final d = await PlatformService.transfer(widget.peer, amt);
+    final d = await PlatformService.chatPacket(
+        scope: 'dm', target: widget.peer, ptype: 'transfer', amount: amt);
     if (!mounted) return;
-    if (d == null) {
-      _snack(context, '转账失败，请检查网络');
-    } else if (d['ok'] == true) {
-      _snack(context, '已转 $amt 兑换币（余额 ${d['balance']}）');
-      await PlatformService.dmSend(widget.peer,
-          text: '[转账] 给你转了 $amt 兑换币 💰');
+    if (d != null && d['ok'] == true) {
+      _snack(context, '已发出转账，等对方收款');
       _load();
     } else {
-      _snack(context, '${d['error'] ?? '转账失败'}');
+      _snack(context, '${d?['error'] ?? '转账失败'}');
     }
+  }
+
+  Future<void> _grabPacket(String pid) async {
+    final d = await PlatformService.packetGrab(pid);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _snack(context, '已领取 ${d['amount']} 兑换币');
+    } else {
+      _snack(context, '${d?['error'] ?? '领取失败'}');
+    }
+    _load();
   }
 
   @override
@@ -566,7 +575,8 @@ class _ChatPageState extends State<_ChatPage> {
                 msgs: _msgs,
                 myUid: _myUid,
                 onPlayVideo: widget.onPlayVideo,
-                onCard: _openCard)),
+                onCard: _openCard,
+                onGrabPacket: _grabPacket)),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
@@ -679,26 +689,83 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     ));
   }
 
-  // 群聊转账：选一位群成员转账。
-  Future<void> _transfer() async {
-    final picked = await _pickUser(context);
-    if (picked == null || !mounted) return;
-    final to = picked['uid'] as String;
-    final nick = '${picked['nick'] ?? ''}';
-    final amt = await _askAmount(context, '转账给 $nick');
-    if (amt == null || amt <= 0) return;
-    final d = await PlatformService.transfer(to, amt);
+  // 群里发拼手气红包（成员抢）。
+  Future<void> _redpacket() async {
+    final totalCtrl = TextEditingController(text: '20');
+    final partsCtrl = TextEditingController(text: '5');
+    final msgCtrl = TextEditingController(text: '恭喜发财');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFFC0392B),
+        title: const Text('🧧 群红包（拼手气）',
+            style: TextStyle(color: Color(0xFFFFE2A8))),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: totalCtrl,
+              keyboardType: TextInputType.number,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                  labelText: '总额',
+                  labelStyle: TextStyle(color: Colors.white70))),
+          TextField(
+              controller: partsCtrl,
+              keyboardType: TextInputType.number,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                  labelText: '个数',
+                  labelStyle: TextStyle(color: Colors.white70))),
+          TextField(
+              controller: msgCtrl,
+              maxLength: 40,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                  labelText: '祝福语',
+                  labelStyle: TextStyle(color: Colors.white70),
+                  counterStyle: TextStyle(color: Colors.white54))),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child:
+                  const Text('取消', style: TextStyle(color: Colors.white70))),
+          FilledButton(
+              style: FilledButton.styleFrom(
+                  backgroundColor: const Color(0xFFFFD24A),
+                  foregroundColor: const Color(0xFF7A1F18)),
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('塞钱发群里')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final total = int.tryParse(totalCtrl.text.trim()) ?? 0;
+    final parts = int.tryParse(partsCtrl.text.trim()) ?? 0;
+    final d = await PlatformService.chatPacket(
+        scope: 'group',
+        target: widget.gid,
+        ptype: 'redpacket',
+        amount: total,
+        parts: parts,
+        msg: msgCtrl.text.trim());
     if (!mounted) return;
-    if (d == null) {
-      _snack(context, '转账失败，请检查网络');
-    } else if (d['ok'] == true) {
-      _snack(context, '已转 $amt 兑换币给 $nick');
-      await PlatformService.groupSend(widget.gid,
-          text: '[转账] 给 $nick 转了 $amt 兑换币 💰');
+    if (d != null && d['ok'] == true) {
+      _snack(context, '🧧 群红包已发，等大家抢');
       _load();
     } else {
-      _snack(context, '${d['error'] ?? '转账失败'}');
+      _snack(context, '${d?['error'] ?? '发红包失败'}');
     }
+  }
+
+  Future<void> _grabPacket(String pid) async {
+    final d = await PlatformService.packetGrab(pid);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _snack(context, '🧧 抢到 ${d['amount']} 兑换币');
+    } else {
+      _snack(context, '${d?['error'] ?? '没抢到'}');
+    }
+    _load();
   }
 
   String get _myRole {
@@ -731,12 +798,13 @@ class _GroupChatPageState extends State<_GroupChatPage> {
                 myUid: _myUid,
                 group: true,
                 onPlayVideo: widget.onPlayVideo,
-                onCard: _openCard)),
+                onCard: _openCard,
+                onGrabPacket: _grabPacket)),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
             onRecommend: _recommend,
-            onTransfer: _transfer,
+            onRedpacket: _redpacket,
             onCard: _sendCard),
       ]),
     );
@@ -1013,12 +1081,63 @@ class _MsgList extends StatelessWidget {
   final bool group;
   final void Function(String id, String title) onPlayVideo;
   final void Function(String uid, String nick)? onCard;
+  final void Function(String pid)? onGrabPacket;
   const _MsgList(
       {required this.msgs,
       required this.myUid,
       required this.onPlayVideo,
       this.onCard,
+      this.onGrabPacket,
       this.group = false});
+
+  Widget _packetBubble(Map<String, dynamic> m, bool mine) {
+    final isRed = m['ptype'] == 'redpacket';
+    final msg = '${m['msg'] ?? ''}';
+    final claimed = m['_claimed'] == true;
+    final done = m['_done'] == true;
+    final myAmount = (m['_myamount'] as num?)?.toInt() ?? 0;
+    final color = isRed ? const Color(0xFFD7402F) : const Color(0xFFE3A93B);
+    String status;
+    bool tappable = false;
+    if (claimed) {
+      status = isRed ? '已领 $myAmount 币' : '已收款 $myAmount 币';
+    } else if (mine) {
+      status = done
+          ? (isRed ? '已被领完' : '已被领取')
+          : (isRed ? '红包待领取' : '等待对方收款');
+    } else if (done) {
+      status = isRed ? '手慢了，已抢光' : '已被领取';
+    } else {
+      status = isRed ? '点击领取红包' : '点击收款';
+      tappable = true;
+    }
+    return InkWell(
+      onTap: tappable ? () => onGrabPacket?.call('${m['pid']}') : null,
+      child: Container(
+        width: 220,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+            color: claimed || done ? color.withValues(alpha: 0.55) : color,
+            borderRadius: BorderRadius.circular(8)),
+        child: Row(children: [
+          Text(isRed ? '🧧' : '💰', style: const TextStyle(fontSize: 30)),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Text(msg.isEmpty ? (isRed ? '恭喜发财' : '给你转账') : msg,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                      color: Color(0xFFFFE9C7), fontWeight: FontWeight.w600)),
+              const SizedBox(height: 2),
+              Text(status,
+                  style: const TextStyle(color: Color(0xFFFFE9C7), fontSize: 11)),
+            ]),
+          ),
+        ]),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1035,7 +1154,10 @@ class _MsgList extends StatelessWidget {
         final mine = m['from'] == myUid;
         final isVideo = m['kind'] == 'video';
         final isCard = m['kind'] == 'card';
-        final bubble = isCard
+        final isPacket = m['kind'] == 'packet';
+        final bubble = isPacket
+            ? _packetBubble(m, mine)
+            : isCard
             ? InkWell(
                 onTap: () => onCard?.call(
                     '${m['card']}', '${m['card_nick'] ?? ''}'),

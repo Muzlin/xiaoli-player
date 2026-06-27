@@ -883,6 +883,28 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  /// 在聊天里发转账/红包(待对方领取/抢)。
+  /// scope: dm|group; ptype: transfer|redpacket; group红包用 parts 拼手气。
+  static Future<Map<String, dynamic>?> chatPacket(
+      {required String scope,
+      required String target,
+      required String ptype,
+      required int amount,
+      int parts = 1,
+      String msg = ''}) async {
+    final m = msg.trim().isEmpty ? '' : '&msg=${Uri.encodeComponent(msg.trim())}';
+    final d = await _g(
+        '/chat-packet?scope=$scope&target=$target&ptype=$ptype&amount=$amount&parts=$parts$m',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 领取/抢一个聊天红包或转账(复用 /rp-grab)。返回 {ok,amount,balance}。
+  static Future<Map<String, dynamic>?> packetGrab(String pid) async {
+    final d = await _g('/rp-grab?id=$pid', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
   /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
   /// 比走隧道 /checkin 更可靠。
