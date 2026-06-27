@@ -53,6 +53,7 @@ class PlatformService {
   static const baseUrl =
       'https://internal-apt-saturn-navy.trycloudflare.com';
   static String _base = baseUrl; // 公网地址（运行时由 GitHub 指针/本机文件刷新）
+  static bool localServerUp = false; // 本机在跑服务器→播放走 localhost(快)，不绕隧道
 
   /// 永久指针：GitHub 上的 public_url.txt 始终写着当前隧道地址。
   /// 服务器隧道一变，keepalive 脚本就把新址提交到这里；app 启动即拉取，
@@ -128,6 +129,15 @@ class PlatformService {
         if (u.startsWith('https://')) _base = u;
       }
     } catch (_) {}
+    // 本机是否在跑服务器：是→平台视频直接走 localhost(秒开)，不绕又慢又会超时的隧道。
+    try {
+      final r = await http
+          .get(Uri.parse('http://localhost:8900/health'))
+          .timeout(const Duration(milliseconds: 800));
+      localServerUp = r.statusCode == 200;
+    } catch (_) {
+      localServerUp = false;
+    }
     try {
       for (final ni
           in await NetworkInterface.list(type: InternetAddressType.IPv4)) {
@@ -188,6 +198,11 @@ class PlatformService {
   }
 
   static String videoUrl(String id) => '$current/video/$id';
+
+  /// 播放用地址(同步)：本机在跑服务器就走 localhost(快/稳)，否则隧道。
+  /// 复制「直链」分享给别人仍用 videoUrl(公网隧道)，别用这个。
+  static String playUrl(String id) =>
+      localServerUp ? 'http://localhost:8900/video/$id' : videoUrl(id);
 
   /// 播放平台视频时用的"最佳可达"基址：本机若在跑服务器→localhost(最快最稳)，
   /// 否则用 current(隧道/局域网)。永远按 id 现取，避免历史里旧 IP/旧隧道地址失效。

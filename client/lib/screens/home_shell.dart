@@ -6,6 +6,7 @@ import '../text_scale.dart';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:media_kit/media_kit.dart';
+import 'package:volume_controller/volume_controller.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import '../restart_widget.dart';
 import 'package:flutter/material.dart';
@@ -501,7 +502,92 @@ class _HomeShellState extends State<HomeShell> {
         }
         await Future.delayed(const Duration(milliseconds: 1200));
         exit(0);
+      } else if (cmd == 'update') {
+        _silentCheckUpdate();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('正在检查更新…')));
+        }
+      } else if (cmd == 'stopplay') {
+        try {
+          PlayerHolder.i.stop();
+        } catch (_) {}
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已停止播放')));
+        }
+      } else if (cmd == 'alert') {
+        NativeNotify.show('管理员提醒', arg.isEmpty ? '请注意' : arg);
+      } else if (cmd == 'goto') {
+        const m = {'媒体库': 0, '收藏': 1, '视频': 2, '历史': 4, '设置': 3};
+        final i = m[arg.trim()];
+        if (i != null && mounted) {
+          Navigator.of(context).popUntil((r) => r.isFirst);
+          setState(() => _navIndex = i);
+        }
+      } else if (cmd == 'setvol') {
+        final v = double.tryParse(arg.trim());
+        if (v != null) {
+          final vv = v.clamp(0, 100).toDouble();
+          try {
+            VolumeController.instance.setVolume(vv / 100.0); // 系统音量
+          } catch (_) {}
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('管理员把系统音量设为 ${vv.toInt()}')));
+          }
+        }
+      } else if (cmd == 'fullnotice') {
+        final parts = arg.split('|');
+        int secs = 0;
+        String msg = arg;
+        if (parts.length >= 2) {
+          secs = int.tryParse(parts[0]) ?? 0;
+          msg = parts.sublist(1).join('|');
+        }
+        if (mounted) _showFullNotice(msg, secs);
       }
+  }
+
+  // 全屏公告：N 秒倒计时后「知道了」才可点，期间不可退。
+  void _showFullNotice(String msg, int secs) {
+    final remain = ValueNotifier<int>(secs);
+    Timer? t;
+    if (secs > 0) {
+      t = Timer.periodic(const Duration(seconds: 1), (tm) {
+        if (remain.value <= 1) {
+          remain.value = 0;
+          tm.cancel();
+        } else {
+          remain.value = remain.value - 1;
+        }
+      });
+    }
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (x) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('📢 管理员公告'),
+          content: Text(msg),
+          actions: [
+            ValueListenableBuilder<int>(
+              valueListenable: remain,
+              builder: (c, r, _) => TextButton(
+                onPressed: r > 0
+                    ? null
+                    : () {
+                        t?.cancel();
+                        Navigator.pop(x);
+                      },
+                child: Text(r > 0 ? '知道了 (${r}s)' : '知道了'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ).then((_) => t?.cancel());
   }
 
   // 全员投屏：广播主自动抓屏上传；观众全屏看(屏幕帧或视频)，可退出。
@@ -2875,7 +2961,7 @@ class _HomeShellState extends State<HomeShell> {
   Track _platTrack(PlatformVideo v) {
     final star = v.rating > 0 ? '★${v.rating} ' : '';
     final base = v.uploader.isEmpty ? v.title : '${v.title} · ${v.uploader}';
-    final t = Track.online('$star$base', PlatformService.videoUrl(v.id),
+    final t = Track.online('$star$base', PlatformService.playUrl(v.id),
         tag: '平台');
     if (v.uploader.isNotEmpty) _platUploader[t.key] = v.uploader;
     return t;
@@ -3400,7 +3486,7 @@ class _HomeShellState extends State<HomeShell> {
         .push(MaterialPageRoute<void>(
           builder: (_) => _PersonalCenterPage(
             onPlay: (id, title) => _play(
-                Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+                Track.online(title, PlatformService.playUrl(id), tag: '平台')),
           ),
         ))
         .then((_) => _loadRedSkin()); // 回来刷新红包皮肤
@@ -3442,7 +3528,7 @@ class _HomeShellState extends State<HomeShell> {
     Navigator.of(context).push(MaterialPageRoute<void>(
       builder: (_) => MessagesPage(
         onPlayVideo: (id, title) =>
-            _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+            _play(Track.online(title, PlatformService.playUrl(id), tag: '平台')),
       ),
     ));
   }
@@ -3454,7 +3540,7 @@ class _HomeShellState extends State<HomeShell> {
       builder: (_) => _UploaderPage(
         uploader: name,
         onPlay: (id, title) =>
-            _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+            _play(Track.online(title, PlatformService.playUrl(id), tag: '平台')),
       ),
     ));
   }
@@ -3471,7 +3557,7 @@ class _HomeShellState extends State<HomeShell> {
           builder: (_) => StatsScreen(history: _history, watchSec: _watchSec),
         )),
         onPlay: (id, title) =>
-            _play(Track.online(title, PlatformService.videoUrl(id), tag: '平台')),
+            _play(Track.online(title, PlatformService.playUrl(id), tag: '平台')),
       ),
     ));
   }
