@@ -910,6 +910,26 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  /// 表情回应：在某条消息(mid)上切换一个 emoji。scope=dm|group，target=对方uid/群gid。
+  static Future<Map<String, dynamic>?> msgReact(
+      {required String scope,
+      required String target,
+      required String mid,
+      required String emoji}) async {
+    final d = await _g(
+        '/msg-react?scope=$scope&target=$target&mid=$mid&emoji=${Uri.encodeComponent(emoji)}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 拍一拍：在会话里发一条"X 拍了拍 Y"。私聊 to 留空(默认拍对方)，群聊 to=被拍成员。
+  static Future<Map<String, dynamic>?> patUser(
+      {required String scope, required String target, String to = ''}) async {
+    final t = to.trim().isEmpty ? '' : '&to=${to.trim()}';
+    final d = await _g('/pat?scope=$scope&target=$target$t', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
   /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
   /// 比走隧道 /checkin 更可靠。

@@ -585,7 +585,17 @@ class _ChatPageState extends State<_ChatPage> {
                 myUid: _myUid,
                 onPlayVideo: widget.onPlayVideo,
                 onCard: _openCard,
-                onGrabPacket: _grabPacket)),
+                onGrabPacket: _grabPacket,
+                onReact: (mid, emoji) async {
+                  await PlatformService.msgReact(
+                      scope: 'dm', target: widget.peer, mid: mid, emoji: emoji);
+                  _load();
+                },
+                onPat: (m) async {
+                  await PlatformService.patUser(
+                      scope: 'dm', target: widget.peer);
+                  _load();
+                })),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
@@ -858,7 +868,22 @@ class _GroupChatPageState extends State<_GroupChatPage> {
                 group: true,
                 onPlayVideo: widget.onPlayVideo,
                 onCard: _openCard,
-                onGrabPacket: _grabPacket)),
+                onGrabPacket: _grabPacket,
+                onReact: (mid, emoji) async {
+                  await PlatformService.msgReact(
+                      scope: 'group',
+                      target: widget.gid,
+                      mid: mid,
+                      emoji: emoji);
+                  _load();
+                },
+                onPat: (m) async {
+                  await PlatformService.patUser(
+                      scope: 'group',
+                      target: widget.gid,
+                      to: '${m['from'] ?? ''}');
+                  _load();
+                })),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
@@ -1141,13 +1166,83 @@ class _MsgList extends StatelessWidget {
   final void Function(String id, String title) onPlayVideo;
   final void Function(String uid, String nick)? onCard;
   final void Function(String pid)? onGrabPacket;
+  final void Function(String mid, String emoji)? onReact; // 表情回应
+  final void Function(Map<String, dynamic> msg)? onPat; // 拍一拍(双击对方消息)
   const _MsgList(
       {required this.msgs,
       required this.myUid,
       required this.onPlayVideo,
       this.onCard,
       this.onGrabPacket,
+      this.onReact,
+      this.onPat,
       this.group = false});
+
+  // 长按消息弹表情选择条 → 切换回应。
+  void _showReactPicker(BuildContext context, Map<String, dynamic> m) {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty || onReact == null) return;
+    const emojis = ['👍', '❤️', '😂', '😮', '😢', '🎉'];
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        margin: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 8),
+        decoration: BoxDecoration(
+            color: Colors.white, borderRadius: BorderRadius.circular(28)),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceAround,
+          children: [
+            for (final e in emojis)
+              InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onReact!(mid, e);
+                },
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Text(e, style: const TextStyle(fontSize: 26)),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 气泡下方的回应 chip 行（emoji + 人数，自己点过则高亮）。
+  Widget? _reactionChips(Map<String, dynamic> m) {
+    final r = m['reactions'];
+    if (r is! Map || r.isEmpty) return null;
+    final mid = '${m['mid'] ?? ''}';
+    final chips = <Widget>[];
+    r.forEach((emoji, who) {
+      final list = (who is List) ? who : const [];
+      if (list.isEmpty) return;
+      final mineIn = myUid != null && list.contains(myUid);
+      chips.add(GestureDetector(
+        onTap: () => onReact?.call(mid, '$emoji'),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+          decoration: BoxDecoration(
+            color: mineIn ? const Color(0xFFD7F0D0) : Colors.white,
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(
+                color: mineIn ? const Color(0xFF07C160) : Colors.black12),
+          ),
+          child: Text('$emoji ${list.length}',
+              style: const TextStyle(fontSize: 12, color: Colors.black87)),
+        ),
+      ));
+    });
+    if (chips.isEmpty) return null;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Wrap(spacing: 4, runSpacing: 4, children: chips),
+    );
+  }
 
   Widget _packetBubble(Map<String, dynamic> m, bool mine) {
     final isRed = m['ptype'] == 'redpacket';
@@ -1323,6 +1418,22 @@ class _MsgList extends StatelessWidget {
       itemCount: msgs.length,
       itemBuilder: (_, i) {
         final m = msgs[i];
+        // 拍一拍：居中灰色系统提示行。
+        if (m['kind'] == 'pat') {
+          final fn = '${m['from_nick'] ?? ''}';
+          final tn = '${m['to_nick'] ?? ''}';
+          final meFrom = m['from'] == myUid;
+          final meTo = m['to'] == myUid;
+          final who = meFrom ? '你' : fn;
+          final whom = meTo ? '你' : tn;
+          return Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Center(
+              child: Text('$who 拍了拍 $whom',
+                  style: const TextStyle(fontSize: 12, color: Colors.black45)),
+            ),
+          );
+        }
         final mine = m['from'] == myUid;
         final isVideo = m['kind'] == 'video';
         final isCard = m['kind'] == 'card';
@@ -1409,6 +1520,7 @@ class _MsgList extends StatelessWidget {
           child: Icon(mine ? Icons.person : Icons.person_outline,
               size: 20, color: Colors.white),
         );
+        final reactChips = _reactionChips(m);
         final bubbleCol = Column(
           crossAxisAlignment:
               mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -1420,10 +1532,22 @@ class _MsgList extends StatelessWidget {
                     style:
                         const TextStyle(fontSize: 11, color: Colors.black45)),
               ),
-            ConstrainedBox(
-                constraints: BoxConstraints(
-                    maxWidth: MediaQuery.of(context).size.width * 0.64),
-                child: bubble),
+            GestureDetector(
+              onLongPress: () => _showReactPicker(context, m),
+              // 双击对方文字气泡=拍一拍发送者；卡片/红包/视频自带点击，不抢手势。
+              onDoubleTap: (!mine &&
+                      onPat != null &&
+                      !isPacket &&
+                      !isCard &&
+                      !isVideo)
+                  ? () => onPat!(m)
+                  : null,
+              child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.64),
+                  child: bubble),
+            ),
+            if (reactChips != null) reactChips,
           ],
         );
         return Padding(
