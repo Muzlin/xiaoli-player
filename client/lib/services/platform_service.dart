@@ -934,6 +934,64 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  /// 个人主页(公开信息 + 自己看时含余额)。
+  static Future<Map<String, dynamic>?> profile(String uid) async {
+    final me = await walletUid();
+    final d = await _g('/profile?uid=$uid&me=$me');
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 群投票：发起 / 投票。
+  static Future<Map<String, dynamic>?> pollCreate(
+      String gid, String q, List<String> options) async {
+    final d = await _g(
+        '/poll-create?gid=$gid&q=${Uri.encodeComponent(q)}'
+        '&options=${Uri.encodeComponent(jsonEncode(options))}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  static Future<Map<String, dynamic>?> pollVote(String id, int opt) async {
+    final d = await _g('/poll-vote?id=$id&opt=$opt', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 群接龙：发起 / 接龙。
+  static Future<Map<String, dynamic>?> jielongCreate(
+      String gid, String title, String first) async {
+    final d = await _g(
+        '/jielong-create?gid=$gid&title=${Uri.encodeComponent(title)}'
+        '&first=${Uri.encodeComponent(first)}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  static Future<Map<String, dynamic>?> jielongJoin(String id, String text) async {
+    final d = await _g(
+        '/jielong-join?id=$id&text=${Uri.encodeComponent(text)}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 群一起看：开播 / 房主同步进度 / 取当前状态。
+  static Future<Map<String, dynamic>?> watchStart(
+      String gid, String vid, String title) async {
+    final d = await _g(
+        '/watch-start?gid=$gid&vid=$vid&title=${Uri.encodeComponent(title)}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  static Future<void> watchSync(String gid, double pos, bool playing) async {
+    await _g('/watch-sync?gid=$gid&pos=${pos.toStringAsFixed(1)}'
+        '&playing=${playing ? 1 : 0}', withUid: true);
+  }
+
+  static Future<Map<String, dynamic>?> watchState(String gid) async {
+    final d = await _g('/watch-state?gid=$gid', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
   /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
   /// 比走隧道 /checkin 更可靠。

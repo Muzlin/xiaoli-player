@@ -569,7 +569,11 @@ class _ChatPageState extends State<_ChatPage> {
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
-          title: Text(widget.peerNick),
+          title: GestureDetector(
+              onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                  builder: (_) => ProfilePage(
+                      uid: widget.peer, onPlayVideo: widget.onPlayVideo))),
+              child: Text(widget.peerNick)),
           backgroundColor: const Color(0xFFEDEDED),
           foregroundColor: Colors.black87,
           elevation: 0),
@@ -581,6 +585,10 @@ class _ChatPageState extends State<_ChatPage> {
                 onPlayVideo: widget.onPlayVideo,
                 onCard: _openCard,
                 onGrabPacket: _grabPacket,
+                onProfile: (uid) => Navigator.of(context).push(
+                    MaterialPageRoute<void>(
+                        builder: (_) => ProfilePage(
+                            uid: uid, onPlayVideo: widget.onPlayVideo))),
                 onReact: (mid, emoji) async {
                   await PlatformService.msgReact(
                       scope: 'dm', target: widget.peer, mid: mid, emoji: emoji);
@@ -873,7 +881,10 @@ class _GroupChatPageState extends State<_GroupChatPage> {
                       target: widget.gid,
                       to: '${m['from'] ?? ''}');
                   _load();
-                })),
+                },
+                gid: widget.gid,
+                onRefresh: _load,
+                onProfile: _openProfile)),
         _ChatInput(
             controller: _ctrl,
             onSend: _send,
@@ -881,10 +892,166 @@ class _GroupChatPageState extends State<_GroupChatPage> {
             onRedpacket: _redpacket,
             onCard: _sendCard,
             myUid: _myUid,
+            onMore: _showGroupTools,
             atMembers: Map<String, String>.from(
                 (_info['member_nicks'] as Map?) ?? const {})),
       ]),
     );
+  }
+
+  void _openProfile(String uid) {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => ProfilePage(
+            uid: uid, onPlayVideo: widget.onPlayVideo)));
+  }
+
+  // 「+」工具：发起投票 / 接龙 / 一起看。
+  void _showGroupTools() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+              leading: const Icon(Icons.bar_chart, color: Color(0xFF07C160)),
+              title: const Text('发起投票'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _createPoll();
+              }),
+          ListTile(
+              leading: const Icon(Icons.format_list_numbered,
+                  color: Color(0xFFE3A93B)),
+              title: const Text('发起接龙'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _createJielong();
+              }),
+          ListTile(
+              leading: const Icon(Icons.groups, color: Color(0xFF5B6EE8)),
+              title: const Text('一起看视频'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _startWatch();
+              }),
+        ]),
+      ),
+    );
+  }
+
+  Future<void> _createPoll() async {
+    final qCtrl = TextEditingController();
+    final optCtrls = [TextEditingController(), TextEditingController()];
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('发起投票'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: qCtrl,
+                  maxLength: 120,
+                  decoration: const InputDecoration(labelText: '投票问题')),
+              for (var i = 0; i < optCtrls.length; i++)
+                TextField(
+                    controller: optCtrls[i],
+                    maxLength: 60,
+                    decoration:
+                        InputDecoration(labelText: '选项 ${i + 1}')),
+              if (optCtrls.length < 8)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton.icon(
+                    icon: const Icon(Icons.add, size: 16),
+                    label: const Text('加选项'),
+                    onPressed: () =>
+                        setD(() => optCtrls.add(TextEditingController())),
+                  ),
+                ),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('发起')),
+          ],
+        ),
+      ),
+    );
+    final q = qCtrl.text.trim();
+    final opts =
+        optCtrls.map((c) => c.text.trim()).where((s) => s.isNotEmpty).toList();
+    qCtrl.dispose();
+    for (final c in optCtrls) {
+      c.dispose();
+    }
+    if (ok != true || q.isEmpty || opts.length < 2) return;
+    final d = await PlatformService.pollCreate(widget.gid, q, opts);
+    if (!mounted) return;
+    if (d?['ok'] == true) {
+      _load();
+    } else {
+      _snack(context, '${d?['error'] ?? '发起失败'}');
+    }
+  }
+
+  Future<void> _createJielong() async {
+    final titleCtrl = TextEditingController();
+    final firstCtrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('发起接龙'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: titleCtrl,
+              maxLength: 80,
+              decoration: const InputDecoration(labelText: '接龙主题')),
+          TextField(
+              controller: firstCtrl,
+              maxLength: 80,
+              decoration: const InputDecoration(labelText: '我先来一条（选填）')),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('发起')),
+        ],
+      ),
+    );
+    final title = titleCtrl.text.trim();
+    final first = firstCtrl.text.trim();
+    titleCtrl.dispose();
+    firstCtrl.dispose();
+    if (ok != true || title.isEmpty) return;
+    final d = await PlatformService.jielongCreate(widget.gid, title, first);
+    if (!mounted) return;
+    if (d?['ok'] == true) {
+      _load();
+    } else {
+      _snack(context, '${d?['error'] ?? '发起失败'}');
+    }
+  }
+
+  Future<void> _startWatch() async {
+    final v = await _pickVideo(context);
+    if (v == null || !mounted) return;
+    final d = await PlatformService.watchStart(
+        widget.gid, v['id'] as String, v['title'] as String);
+    if (!mounted) return;
+    if (d?['ok'] == true) {
+      _load();
+      // 发起人自己也开始看
+      widget.onPlayVideo(v['id'] as String, v['title'] as String);
+    } else {
+      _snack(context, '${d?['error'] ?? '发起失败'}');
+    }
   }
 
   void _openManage() {
@@ -936,8 +1103,8 @@ class _GroupManageSheetState extends State<_GroupManageSheet> {
     setState(() => _busy = true);
     final d = await PlatformService.groupOp(widget.gid, op,
         target: target, on: on);
-    setState(() => _busy = false);
     if (!mounted) return;
+    setState(() => _busy = false);
     if (d == null) {
       _toast('操作失败，请检查网络');
       return;
@@ -1161,6 +1328,9 @@ class _MsgList extends StatelessWidget {
   final Future<Map<String, dynamic>?> Function(String pid)? onGrabPacket;
   final void Function(String mid, String emoji)? onReact; // 表情回应
   final void Function(Map<String, dynamic> msg)? onPat; // 拍一拍(双击对方消息)
+  final String? gid; // 群聊：投票/接龙/一起看用
+  final VoidCallback? onRefresh; // 投票/接龙后刷新
+  final void Function(String uid)? onProfile; // 点头像/名片看主页
   const _MsgList(
       {required this.msgs,
       required this.myUid,
@@ -1169,7 +1339,332 @@ class _MsgList extends StatelessWidget {
       this.onGrabPacket,
       this.onReact,
       this.onPat,
+      this.gid,
+      this.onRefresh,
+      this.onProfile,
       this.group = false});
+
+  // 群投票气泡：问题 + 选项条(票数/百分比)，点选项投票。
+  Widget _pollBubble(BuildContext context, Map<String, dynamic> m) {
+    final poll = (m['poll'] as Map?) ?? const {};
+    final q = '${poll['q'] ?? '投票'}';
+    final options = (poll['options'] as List?)?.cast<dynamic>() ?? const [];
+    final counts = (poll['counts'] as List?)?.cast<dynamic>() ?? const [];
+    final total = (poll['total'] as num?)?.toInt() ?? 0;
+    final myVote = (poll['my_vote'] as num?)?.toInt() ?? -1;
+    return Container(
+      width: 260,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+          color: Colors.white, borderRadius: BorderRadius.circular(8)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.bar_chart, size: 18, color: Color(0xFF07C160)),
+          const SizedBox(width: 4),
+          Expanded(
+              child: Text(q,
+                  style: const TextStyle(fontWeight: FontWeight.w600))),
+        ]),
+        const SizedBox(height: 8),
+        for (var i = 0; i < options.length; i++)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: InkWell(
+              onTap: () async {
+                final pid = '${m['poll_id'] ?? ''}';
+                if (pid.isEmpty) return;
+                await PlatformService.pollVote(pid, i);
+                onRefresh?.call();
+              },
+              child: Stack(children: [
+                Container(
+                  height: 30,
+                  decoration: BoxDecoration(
+                      color: const Color(0xFFF0F0F0),
+                      borderRadius: BorderRadius.circular(5)),
+                ),
+                FractionallySizedBox(
+                  widthFactor: total > 0
+                      ? ((i < counts.length ? (counts[i] as num) : 0) / total)
+                          .clamp(0.0, 1.0)
+                      : 0.0,
+                  child: Container(
+                    height: 30,
+                    decoration: BoxDecoration(
+                        color: i == myVote
+                            ? const Color(0xFF95EC69)
+                            : const Color(0xFFD7EFD0),
+                        borderRadius: BorderRadius.circular(5)),
+                  ),
+                ),
+                Positioned.fill(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                    child: Row(children: [
+                      if (i == myVote)
+                        const Icon(Icons.check_circle,
+                            size: 15, color: Color(0xFF07C160)),
+                      if (i == myVote) const SizedBox(width: 3),
+                      Expanded(
+                          child: Text('${options[i]}',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(fontSize: 13))),
+                      Text('${i < counts.length ? counts[i] : 0}',
+                          style: const TextStyle(
+                              fontSize: 12, color: Colors.black54)),
+                    ]),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        Text('共 $total 人投票',
+            style: const TextStyle(fontSize: 11, color: Colors.black38)),
+      ]),
+    );
+  }
+
+  // 群接龙气泡：标题 + 编号列表 + 「我也接龙」。
+  Widget _jielongBubble(BuildContext context, Map<String, dynamic> m) {
+    final jl = (m['jielong'] as Map?) ?? const {};
+    final title = '${jl['title'] ?? '接龙'}';
+    final entries = (jl['entries'] as List?)?.cast<dynamic>() ?? const [];
+    final count = (jl['count'] as num?)?.toInt() ?? entries.length;
+    return Container(
+      width: 260,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+          color: Colors.white, borderRadius: BorderRadius.circular(8)),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Row(children: [
+          const Icon(Icons.format_list_numbered,
+              size: 18, color: Color(0xFFE3A93B)),
+          const SizedBox(width: 4),
+          Expanded(
+              child: Text('接龙：$title',
+                  style: const TextStyle(fontWeight: FontWeight.w600))),
+        ]),
+        const Divider(height: 14),
+        for (var i = 0; i < entries.length; i++)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4),
+            child: Builder(builder: (_) {
+              final e = (entries[i] as Map?) ?? const {};
+              return Text('${i + 1}. ${e['nick'] ?? ''}：${e['text'] ?? ''}',
+                  style: const TextStyle(fontSize: 13));
+            }),
+          ),
+        if (count > entries.length)
+          Text('…共 $count 条', style: const TextStyle(fontSize: 11, color: Colors.black38)),
+        const SizedBox(height: 6),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: OutlinedButton.icon(
+            style: OutlinedButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor: const Color(0xFFE3A93B)),
+            icon: const Icon(Icons.add, size: 16),
+            label: const Text('我也接龙'),
+            onPressed: () async {
+              final jid = '${m['jl_id'] ?? ''}';
+              if (jid.isEmpty) return;
+              final ctrl = TextEditingController();
+              final ok = await showDialog<bool>(
+                context: context,
+                builder: (c) => AlertDialog(
+                  title: Text('接龙：$title'),
+                  content: TextField(
+                      controller: ctrl,
+                      maxLength: 80,
+                      autofocus: true,
+                      decoration: const InputDecoration(hintText: '写点啥…')),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(c, false),
+                        child: const Text('取消')),
+                    FilledButton(
+                        onPressed: () => Navigator.pop(c, true),
+                        child: const Text('接龙')),
+                  ],
+                ),
+              );
+              if (ok == true && ctrl.text.trim().isNotEmpty) {
+                await PlatformService.jielongJoin(jid, ctrl.text.trim());
+                onRefresh?.call();
+              }
+              ctrl.dispose();
+            },
+          ),
+        ),
+      ]),
+    );
+  }
+
+  // 群一起看气泡：发起人 + 影片，点「加入观看」一起看同一视频。
+  Widget _watchBubble(BuildContext context, Map<String, dynamic> m) {
+    final vid = '${m['vid'] ?? ''}';
+    final title = '${m['title'] ?? '视频'}';
+    final nick = '${m['from_nick'] ?? ''}';
+    return InkWell(
+      onTap: vid.isEmpty ? null : () => onPlayVideo(vid, title),
+      child: Container(
+        width: 240,
+        padding: const EdgeInsets.all(12),
+        decoration: BoxDecoration(
+            gradient: const LinearGradient(
+                colors: [Color(0xFF5B6EE8), Color(0xFF8E54E9)]),
+            borderRadius: BorderRadius.circular(8)),
+        child: Row(children: [
+          const Icon(Icons.groups, color: Colors.white, size: 34),
+          const SizedBox(width: 10),
+          Expanded(
+              child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                Text('$nick 发起了一起看',
+                    style: const TextStyle(
+                        color: Colors.white70, fontSize: 11)),
+                const SizedBox(height: 2),
+                Text(title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14)),
+                const SizedBox(height: 4),
+                const Text('▶ 点击加入观看',
+                    style: TextStyle(color: Color(0xFFFFE9A8), fontSize: 12)),
+              ])),
+        ]),
+      ),
+    );
+  }
+
+  // 长按消息：选「表情回应」或「转发」。
+  void _msgActions(BuildContext context, Map<String, dynamic> m) {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+              leading: const Text('😀', style: TextStyle(fontSize: 22)),
+              title: const Text('表情回应'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showReactPicker(context, m);
+              }),
+          ListTile(
+              leading: const Icon(Icons.forward, color: Color(0xFF07C160)),
+              title: const Text('转发'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _forwardMessage(context, m);
+              }),
+        ]),
+      ),
+    );
+  }
+
+  // 多选转发：把这条消息(文字/视频)转发给多个联系人/群。
+  Future<void> _forwardMessage(
+      BuildContext context, Map<String, dynamic> m) async {
+    final isVid = m['kind'] == 'video';
+    final text = '${m['text'] ?? ''}';
+    if (!isVid && text.trim().isEmpty) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('该消息暂不支持转发')));
+      return;
+    }
+    final users = await PlatformService.users();
+    final groups = await PlatformService.groupList();
+    if (!context.mounted) return;
+    final sel = <String>{}; // 'dm:uid' / 'grp:gid'
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+        return DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          builder: (ctx, scroll) => Column(children: [
+            Padding(
+                padding: const EdgeInsets.all(12),
+                child: Row(children: [
+                  const Text('转发给',
+                      style: TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  FilledButton(
+                      onPressed: sel.isEmpty
+                          ? null
+                          : () => Navigator.pop(ctx, true),
+                      child: Text('发送(${sel.length})')),
+                ])),
+            Expanded(
+              child: ListView(controller: scroll, children: [
+                if (groups.isNotEmpty)
+                  const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 4, 0, 4),
+                      child: Text('群聊',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.black45))),
+                for (final g in groups)
+                  CheckboxListTile(
+                    dense: true,
+                    value: sel.contains('grp:${g['gid']}'),
+                    title: Text('👥 ${g['name']}'),
+                    onChanged: (v) => setS(() => v == true
+                        ? sel.add('grp:${g['gid']}')
+                        : sel.remove('grp:${g['gid']}')),
+                  ),
+                if (users.isNotEmpty)
+                  const Padding(
+                      padding: EdgeInsets.fromLTRB(16, 8, 0, 4),
+                      child: Text('联系人',
+                          style: TextStyle(
+                              fontSize: 12, color: Colors.black45))),
+                for (final u in users)
+                  CheckboxListTile(
+                    dense: true,
+                    value: sel.contains('dm:${u['uid']}'),
+                    title: Text('👤 ${u['nick']}'),
+                    onChanged: (v) => setS(() => v == true
+                        ? sel.add('dm:${u['uid']}')
+                        : sel.remove('dm:${u['uid']}')),
+                  ),
+              ]),
+            ),
+          ]),
+        );
+      }),
+    );
+    if (ok != true || sel.isEmpty) return;
+    var n = 0;
+    for (final key in sel) {
+      final i = key.indexOf(':');
+      final type = key.substring(0, i);
+      final id = key.substring(i + 1);
+      bool sent;
+      if (type == 'grp') {
+        sent = await PlatformService.groupSend(id,
+            text: isVid ? '' : text,
+            vid: isVid ? '${m['vid']}' : '',
+            title: isVid ? '${m['title'] ?? ''}' : '');
+      } else {
+        sent = await PlatformService.dmSend(id,
+            text: isVid ? '' : text,
+            vid: isVid ? '${m['vid']}' : '',
+            title: isVid ? '${m['title'] ?? ''}' : '');
+      }
+      if (sent) n++;
+    }
+    if (context.mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('已转发给 $n 个会话')));
+    }
+  }
 
   // 长按消息弹表情选择条 → 切换回应。
   void _showReactPicker(BuildContext context, Map<String, dynamic> m) {
@@ -1567,7 +2062,14 @@ class _MsgList extends StatelessWidget {
         final isVideo = m['kind'] == 'video';
         final isCard = m['kind'] == 'card';
         final isPacket = m['kind'] == 'packet';
-        final bubble = isPacket
+        final kind = m['kind'];
+        final bubble = kind == 'poll'
+            ? _pollBubble(context, m)
+            : kind == 'jielong'
+            ? _jielongBubble(context, m)
+            : kind == 'watch'
+            ? _watchBubble(context, m)
+            : isPacket
             ? _packetBubble(context, m, mine)
             : isCard
             ? InkWell(
@@ -1643,11 +2145,16 @@ class _MsgList extends StatelessWidget {
                 child: _linkifyText('${m['text'] ?? ''}', Colors.black87),
               );
         // 微信风：对方头像在左、自己头像在右，气泡贴着头像。
-        final avatar = CircleAvatar(
-          radius: 18,
-          backgroundColor: mine ? const Color(0xFF07C160) : Colors.black26,
-          child: Icon(mine ? Icons.person : Icons.person_outline,
-              size: 20, color: Colors.white),
+        final avatar = GestureDetector(
+          onTap: (onProfile != null && '${m['from'] ?? ''}'.isNotEmpty)
+              ? () => onProfile!('${m['from']}')
+              : null,
+          child: CircleAvatar(
+            radius: 18,
+            backgroundColor: mine ? const Color(0xFF07C160) : Colors.black26,
+            child: Icon(mine ? Icons.person : Icons.person_outline,
+                size: 20, color: Colors.white),
+          ),
         );
         final reactChips = _reactionChips(m);
         final bubbleCol = Column(
@@ -1657,12 +2164,17 @@ class _MsgList extends StatelessWidget {
             if (group && !mine)
               Padding(
                 padding: const EdgeInsets.only(left: 2, bottom: 2),
-                child: Text('${m['from_nick'] ?? ''}',
-                    style:
-                        const TextStyle(fontSize: 11, color: Colors.black45)),
+                child: GestureDetector(
+                  onTap: (onProfile != null && '${m['from'] ?? ''}'.isNotEmpty)
+                      ? () => onProfile!('${m['from']}')
+                      : null,
+                  child: Text('${m['from_nick'] ?? ''}',
+                      style: const TextStyle(
+                          fontSize: 11, color: Colors.black45)),
+                ),
               ),
             GestureDetector(
-              onLongPress: () => _showReactPicker(context, m),
+              onLongPress: () => _msgActions(context, m),
               // 双击对方文字气泡=拍一拍发送者；卡片/红包/视频自带点击，不抢手势。
               onDoubleTap: (!mine &&
                       onPat != null &&
@@ -1695,6 +2207,162 @@ class _MsgList extends StatelessWidget {
   }
 }
 
+// ============ 个人主页 ============
+class ProfilePage extends StatefulWidget {
+  final String uid;
+  final void Function(String id, String title) onPlayVideo;
+  const ProfilePage({super.key, required this.uid, required this.onPlayVideo});
+  @override
+  State<ProfilePage> createState() => _ProfilePageState();
+}
+
+class _ProfilePageState extends State<ProfilePage> {
+  Map<String, dynamic>? _p;
+  bool _loading = true;
+  String? _myUid;
+
+  @override
+  void initState() {
+    super.initState();
+    PlatformService.walletUid()
+        .then((u) => mounted ? setState(() => _myUid = u) : null);
+    _load();
+  }
+
+  Future<void> _load() async {
+    final d = await PlatformService.profile(widget.uid);
+    if (mounted) setState(() {
+      _p = d;
+      _loading = false;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = _p;
+    final isBot = p?['is_bot'] == true;
+    final nick = '${p?['nick'] ?? ''}';
+    final isSelf = _myUid != null && _myUid == widget.uid;
+    final moments = (p?['moments'] as List?)?.cast<dynamic>() ?? const [];
+    return Scaffold(
+      backgroundColor: const Color(0xFFF2F2F2),
+      appBar: AppBar(title: const Text('个人主页')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : p == null || p['ok'] != true
+              ? const Center(child: Text('加载失败'))
+              : ListView(children: [
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(20),
+                    child: Column(children: [
+                      CircleAvatar(
+                          radius: 36,
+                          backgroundColor: isBot
+                              ? const Color(0xFFE3A93B)
+                              : const Color(0xFF07C160),
+                          child: Icon(isBot ? Icons.smart_toy : Icons.person,
+                              color: Colors.white, size: 40)),
+                      const SizedBox(height: 10),
+                      Text(nick,
+                          style: const TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 4),
+                      Text('${p['watch_title'] ?? ''}',
+                          style: const TextStyle(
+                              color: Color(0xFF07C160), fontSize: 13)),
+                    ]),
+                  ),
+                  const SizedBox(height: 10),
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _stat('${p['ach_unlocked'] ?? 0}/${p['ach_total'] ?? 0}',
+                              '成就'),
+                          _stat('${p['moment_count'] ?? 0}', '动态'),
+                          _stat('${p['following_count'] ?? 0}', '关注'),
+                          _stat('${p['streak'] ?? 0}', '连签'),
+                          if (p['balance'] != null)
+                            _stat('${p['balance']}', '兑换币'),
+                        ]),
+                  ),
+                  if (!isSelf && !isBot)
+                    Padding(
+                      padding: const EdgeInsets.all(14),
+                      child: FilledButton.icon(
+                        style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF07C160),
+                            minimumSize: const Size.fromHeight(44)),
+                        icon: const Icon(Icons.chat_bubble_outline),
+                        label: const Text('发消息'),
+                        onPressed: () => Navigator.of(context)
+                            .pushReplacement(MaterialPageRoute<void>(
+                                builder: (_) => _ChatPage(
+                                    peer: widget.uid,
+                                    peerNick: nick,
+                                    onPlayVideo: widget.onPlayVideo))),
+                      ),
+                    ),
+                  if (moments.isNotEmpty) ...[
+                    const Padding(
+                        padding: EdgeInsets.fromLTRB(16, 8, 0, 6),
+                        child: Text('最近动态',
+                            style: TextStyle(
+                                fontWeight: FontWeight.w600))),
+                    for (final m in moments)
+                      Container(
+                        color: Colors.white,
+                        margin: const EdgeInsets.only(bottom: 1),
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              if ('${m['text'] ?? ''}'.isNotEmpty)
+                                Text('${m['text']}'),
+                              if ('${m['vid'] ?? ''}'.isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 6),
+                                  child: InkWell(
+                                    onTap: () => widget.onPlayVideo(
+                                        '${m['vid']}', '${m['title'] ?? ''}'),
+                                    child: Row(children: [
+                                      const Icon(Icons.play_circle_fill,
+                                          color: Color(0xFF07C160)),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                          child: Text('${m['title'] ?? '视频'}',
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: const TextStyle(
+                                                  color: Colors.black54))),
+                                    ]),
+                                  ),
+                                ),
+                              const SizedBox(height: 4),
+                              Text('❤️ ${m['likes'] ?? 0}',
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Colors.black38)),
+                            ]),
+                      ),
+                  ],
+                  const SizedBox(height: 30),
+                ]),
+    );
+  }
+
+  Widget _stat(String v, String label) => Column(children: [
+        Text(v,
+            style:
+                const TextStyle(fontSize: 18, fontWeight: FontWeight.w600)),
+        const SizedBox(height: 2),
+        Text(label,
+            style: const TextStyle(fontSize: 12, color: Colors.black45)),
+      ]);
+}
+
 class _ChatInput extends StatelessWidget {
   final TextEditingController controller;
   final VoidCallback onSend;
@@ -1704,6 +2372,7 @@ class _ChatInput extends StatelessWidget {
   final VoidCallback? onCard; // 发个人名片
   final Map<String, String>? atMembers; // 群聊 @ 成员表(uid→昵称)
   final String? myUid;
+  final VoidCallback? onMore; // 群聊「+」更多工具(投票/接龙/一起看)
   const _ChatInput(
       {required this.controller,
       required this.onSend,
@@ -1712,7 +2381,8 @@ class _ChatInput extends StatelessWidget {
       this.onRedpacket,
       this.onCard,
       this.atMembers,
-      this.myUid});
+      this.myUid,
+      this.onMore});
 
   // 群聊输入 @ 时弹成员表；选中把「@昵称 」插进输入框。
   void _showAtPicker(BuildContext context) {
@@ -1801,6 +2471,13 @@ class _ChatInput extends StatelessWidget {
                 icon: const Icon(Icons.alternate_email, color: Colors.black54),
                 tooltip: '@成员',
                 onPressed: () => _showAtPicker(context),
+              ),
+            if (onMore != null)
+              IconButton(
+                icon: const Icon(Icons.add_circle_outline,
+                    color: Colors.black54),
+                tooltip: '投票/接龙/一起看',
+                onPressed: onMore,
               ),
             Expanded(
               child: TextField(
