@@ -261,6 +261,7 @@ class _HomeShellState extends State<HomeShell> {
   Player? _bcPlayer; // 视频投屏播放器
   VideoController? _bcVc;
   int _pollTick = 0; // 轮询计数(错峰，降卡顿)
+  int _urlTick = 0; // 隧道地址刷新计数
   bool _cmdLoopOn = false; // 远程指令长轮询循环开关
   String _lastActKey = ''; // 活动上报去重(变了才发)
   bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
@@ -355,8 +356,13 @@ class _HomeShellState extends State<HomeShell> {
     };
     // 所有平台：启动即从 GitHub 指针拉当前公网地址，并定时刷新（隧道换址自愈）。
     _refreshPlatformUrl();
-    _urlTimer = Timer.periodic(
-        const Duration(seconds: 60), (_) => _refreshPlatformUrl());
+    _urlTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _urlTick++;
+      // Mac 本机读 public_url.txt(看门狗换址即时写)，即时跟隧道、无 GitHub 限流；
+      // 每 60s 才打一次 GitHub 指针(60/小时限流)给非本机平台兜底。
+      PlatformService.loadLocal();
+      if (_urlTick % 6 == 0) _refreshPlatformUrl();
+    });
     if (Platform.isAndroid) _initAndroidChannels();
     _initOpenFileChannel(); // 「打开方式」用本 app 打开音视频文件
     _loadAppName(); // App 内显示名（后台可改）
