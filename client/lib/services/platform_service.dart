@@ -1007,6 +1007,74 @@ class PlatformService {
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
+  // ===== 直播 =====
+  /// 帧的传输基址：本机在跑服务器走 localhost(快)，否则隧道。
+  static String _liveBase() =>
+      localServerUp ? 'http://localhost:8900' : current;
+
+  static Future<String?> liveStart({String title = '直播', String gid = ''}) async {
+    final g = gid.isEmpty ? '' : '&gid=$gid';
+    final d = await _g(
+        '/live-start?title=${Uri.encodeComponent(title)}$g',
+        withUid: true);
+    return (d is Map && d['ok'] == true) ? '${d['lid']}' : null;
+  }
+
+  static Future<void> liveFrame(String lid, Uint8List jpg) async {
+    try {
+      final uid = await walletUid();
+      await http
+          .post(Uri.parse('${_liveBase()}/live-frame?lid=$lid&uid=$uid'),
+              headers: {'Content-Type': 'image/jpeg'}, body: jpg)
+          .timeout(const Duration(seconds: 8));
+    } catch (_) {}
+  }
+
+  static Future<Uint8List?> liveFrameBytes(String lid) async {
+    try {
+      final r = await http
+          .get(Uri.parse('${_liveBase()}/live-frame-get?lid=$lid'))
+          .timeout(const Duration(seconds: 8));
+      if (r.statusCode == 200 && r.bodyBytes.isNotEmpty) return r.bodyBytes;
+    } catch (_) {}
+    return null;
+  }
+
+  static Future<Map<String, dynamic>?> liveState(String lid) async {
+    final d = await _g('/live-state?lid=$lid', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  static Future<bool> liveMsg(String lid,
+      {String text = '',
+      String kind = 'text',
+      String vid = '',
+      String title = ''}) async {
+    final extra = kind == 'video'
+        ? '&kind=video&vid=$vid&title=${Uri.encodeComponent(title)}'
+        : '&text=${Uri.encodeComponent(text)}';
+    final d = await _g('/live-msg?lid=$lid$extra', withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  static Future<void> liveKick(String lid, String target) async {
+    await _g('/live-kick?lid=$lid&target=$target', withUid: true);
+  }
+
+  static Future<void> liveStop(String lid) async {
+    await _g('/live-stop?lid=$lid', withUid: true);
+  }
+
+  static Future<List<Map<String, dynamic>>> liveList() async {
+    final d = await _g('/live-list');
+    if (d is Map && d['lives'] is List) {
+      return (d['lives'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
+  }
+
   /// 永久封号清单指针：GitHub 上的 banned.json，封号一变后台就提交到这里。
   /// app 直接从 GitHub 查封号——国内 api.github.com 可达，且不依赖隧道在线，
   /// 比走隧道 /checkin 更可靠。

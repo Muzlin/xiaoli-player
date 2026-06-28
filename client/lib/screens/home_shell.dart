@@ -27,6 +27,7 @@ import '../services/coin_ledger.dart';
 import '../services/a11y.dart';
 import '../services/native_notify.dart';
 import 'pay_page.dart';
+import 'live_page.dart';
 import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
@@ -3490,12 +3491,27 @@ class _HomeShellState extends State<HomeShell> {
               icon: const Icon(Icons.qr_code, color: Colors.white60),
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '直播',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) =>
+                          LivePage(onPlayVideo: _liveOnPlay))),
+              icon: const Icon(Icons.live_tv_outlined, color: Colors.white60),
+            ),
+          ),
           _navIcon(Icons.settings, 3, cs),
           const Spacer(),
         ],
       ),
     );
   }
+
+  // 直播间里「分享的视频」点开播放。
+  void _liveOnPlay(String id, String title) =>
+      _play(Track.online(title, PlatformService.playUrl(id), tag: '平台'));
 
   void _openPersonalCenter() {
     Navigator.of(context)
