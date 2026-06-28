@@ -26,6 +26,7 @@ import '../services/download_manager.dart';
 import '../services/coin_ledger.dart';
 import '../services/a11y.dart';
 import '../services/native_notify.dart';
+import 'pay_page.dart';
 import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
@@ -3478,6 +3479,15 @@ class _HomeShellState extends State<HomeShell> {
               onPressed: _openCreatorCenter,
               icon: const Icon(Icons.workspace_premium_outlined,
                   color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '收付款',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const PayPage())),
+              icon: const Icon(Icons.qr_code, color: Colors.white60),
             ),
           ),
           _navIcon(Icons.settings, 3, cs),

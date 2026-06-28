@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreImage
 import ScreenCaptureKit
 import Carbon
 import Cocoa
@@ -145,6 +146,32 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
           center.add(req, withCompletionHandler: nil)
         }
         result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    // 收付款：二维码生成(CoreImage CIQRCodeGenerator) + 扫一扫(AVFoundation 相机识别二维码)。
+    let qrCh = FlutterMethodChannel(
+      name: "xiaoli/qr",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    qrCh.setMethodCallHandler { (call, result) in
+      switch call.method {
+      case "generate":
+        let data = (call.arguments as? [String: Any])?["data"] as? String ?? ""
+        if let png = QRGen.png(from: data) {
+          result(FlutterStandardTypedData(bytes: png))
+        } else {
+          result(nil)
+        }
+      case "scan":
+        if #available(macOS 13.0, *) {
+          QRScanner.shared.start { code in
+            DispatchQueue.main.async { result(code) }
+          }
+        } else {
+          result(nil)  // 扫码识别需 macOS 13+
+        }
       default:
         result(FlutterMethodNotImplemented)
       }
@@ -707,5 +734,125 @@ class SCKFrameGrabber: NSObject, SCStreamOutput, SCStreamDelegate {
     running = false
     stream?.stopCapture { _ in }
     stream = nil
+  }
+}
+
+/// 二维码生成：CoreImage CIQRCodeGenerator → 放大 → PNG bytes。
+enum QRGen {
+  static func png(from string: String, scale: CGFloat = 12) -> Data? {
+    guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+    filter.setValue(string.data(using: .utf8), forKey: "inputMessage")
+    filter.setValue("M", forKey: "inputCorrectionLevel")
+    guard let ci = filter.outputImage else { return nil }
+    let scaled = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    let rep = NSCIImageRep(ciImage: scaled)
+    let img = NSImage(size: rep.size)
+    img.addRepresentation(rep)
+    guard let tiff = img.tiffRepresentation,
+      let bmp = NSBitmapImageRep(data: tiff),
+      let png = bmp.representation(using: .png, properties: [:])
+    else { return nil }
+    return png
+  }
+}
+
+/// 扫一扫：弹一个相机预览窗，AVFoundation 识别到二维码就回调字符串并关窗。
+/// macOS 的二维码 metadata 识别需 13.0+(同 ScreenCaptureKit)。
+@available(macOS 13.0, *)
+class QRScanner: NSObject, AVCaptureMetadataOutputObjectsDelegate, NSWindowDelegate {
+  static let shared = QRScanner()
+  private var session: AVCaptureSession?
+  private var window: NSWindow?
+  private var completion: ((String?) -> Void)?
+  private var finished = false
+
+  func start(_ completion: @escaping (String?) -> Void) {
+    DispatchQueue.main.async {
+      if self.session != nil { completion(nil); return }  // 已在扫
+      self.completion = completion
+      self.finished = false
+      AVCaptureDevice.requestAccess(for: .video) { granted in
+        DispatchQueue.main.async {
+          if granted {
+            self.setup()
+          } else {
+            self.finish(nil)
+          }
+        }
+      }
+    }
+  }
+
+  private func setup() {
+    let session = AVCaptureSession()
+    guard let device = AVCaptureDevice.default(for: .video),
+      let input = try? AVCaptureDeviceInput(device: device),
+      session.canAddInput(input)
+    else {
+      self.finish(nil)
+      return
+    }
+    session.addInput(input)
+    let output = AVCaptureMetadataOutput()
+    guard session.canAddOutput(output) else {
+      self.finish(nil)
+      return
+    }
+    session.addOutput(output)
+    output.setMetadataObjectsDelegate(self, queue: .main)
+    output.metadataObjectTypes = [.qr]
+
+    let rect = NSRect(x: 0, y: 0, width: 440, height: 500)
+    let w = NSWindow(
+      contentRect: rect, styleMask: [.titled, .closable],
+      backing: .buffered, defer: false)
+    w.title = "扫一扫 · 把二维码对准摄像头"
+    w.center()
+    w.level = .floating
+    w.delegate = self
+    let view = NSView(frame: rect)
+    view.wantsLayer = true
+    let preview = AVCaptureVideoPreviewLayer(session: session)
+    preview.videoGravity = .resizeAspectFill
+    preview.frame = view.bounds
+    preview.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    view.layer?.addSublayer(preview)
+    w.contentView = view
+    w.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    self.window = w
+    self.session = session
+    DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
+  }
+
+  func metadataOutput(
+    _ output: AVCaptureMetadataOutput,
+    didOutput metadataObjects: [AVMetadataObject],
+    from connection: AVCaptureConnection
+  ) {
+    guard !finished,
+      let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+      obj.type == .qr, let s = obj.stringValue
+    else { return }
+    finish(s)
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    if !finished { finish(nil) }  // 用户手动关窗=取消
+  }
+
+  private func finish(_ code: String?) {
+    if finished { return }
+    finished = true
+    session?.stopRunning()
+    session = nil
+    if let w = window {
+      window = nil
+      w.delegate = nil
+      w.close()
+    }
+    let cb = completion
+    completion = nil
+    cb?(code)
   }
 }
