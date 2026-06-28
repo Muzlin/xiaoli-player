@@ -812,7 +812,8 @@ class QRScanner: NSObject, AVCaptureMetadataOutputObjectsDelegate, NSWindowDeleg
     }
     session.addOutput(output)
     output.setMetadataObjectsDelegate(self, queue: .main)
-    output.metadataObjectTypes = [.qr]
+    // ⚠️ 必须等 session 跑起来、.qr 进了 availableMetadataObjectTypes 才能设，
+    // 否则 setMetadataObjectTypes 直接抛 ObjC 异常崩溃(SIGABRT)。
 
     let rect = NSRect(x: 0, y: 0, width: 440, height: 500)
     let w = NSWindow(
@@ -834,7 +835,15 @@ class QRScanner: NSObject, AVCaptureMetadataOutputObjectsDelegate, NSWindowDeleg
     NSApp.activate(ignoringOtherApps: true)
     self.window = w
     self.session = session
-    DispatchQueue.global(qos: .userInitiated).async { session.startRunning() }
+    DispatchQueue.global(qos: .userInitiated).async {
+      session.startRunning()
+      DispatchQueue.main.async {
+        // 跑起来后 .qr 才在 available 列表里；不在就不设(防崩)。
+        if output.availableMetadataObjectTypes.contains(.qr) {
+          output.metadataObjectTypes = [.qr]
+        }
+      }
+    }
   }
 
   func metadataOutput(
