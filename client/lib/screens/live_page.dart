@@ -157,7 +157,9 @@ class _LiveRoomPageState extends State<LiveRoomPage> {
   void initState() {
     super.initState();
     if (widget.isHost) {
-      ScreenRecorder.startDesktopFrames(_onScreenFrame);
+      ScreenRecorder.startDesktopFrames(_onScreenFrame).then((ok) {
+        if (!ok && mounted) _askScreenPermission();
+      });
     }
     _stateT = Timer.periodic(const Duration(milliseconds: 1500), (_) => _poll());
     if (!widget.isHost) {
@@ -177,6 +179,28 @@ class _LiveRoomPageState extends State<LiveRoomPage> {
     }
     _ctrl.dispose();
     super.dispose();
+  }
+
+  void _askScreenPermission() {
+    showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('需要「屏幕录制」权限'),
+        content: const Text(
+            '直播要录制你的屏幕。请在 系统设置 › 隐私与安全性 › 屏幕录制 里勾选「小李播放器」，'
+            '然后完全退出并重新打开 App，再发起直播。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c), child: const Text('知道了')),
+          FilledButton(
+              onPressed: () {
+                ScreenRecorder.openScreenSettings();
+                Navigator.pop(c);
+              },
+              child: const Text('去设置')),
+        ],
+      ),
+    );
   }
 
   Future<void> _onScreenFrame(Uint8List jpg) async {

@@ -196,21 +196,33 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
         result(nil)
       case "startDesktop":
         if #available(macOS 13.0, *) {
-          let g = SCKFrameGrabber()
-          g.onFrame = { data in
-            DispatchQueue.main.async {
-              recCh.invokeMethod("frame", arguments: FlutterStandardTypedData(bytes: data))
+          // 没有「屏幕录制」权限就抓不到桌面(SCK 静默失败)。先查权限，没有就弹系统授权框并告诉 Dart。
+          if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()  // 触发系统授权弹窗(首次)；已拒绝则需去设置手动开
+            result(false)
+          } else {
+            let g = SCKFrameGrabber()
+            g.onFrame = { data in
+              DispatchQueue.main.async {
+                recCh.invokeMethod("frame", arguments: FlutterStandardTypedData(bytes: data))
+              }
             }
+            g.start()
+            self?.desktopGrabber = g
+            result(true)
           }
-          g.start()
-          self?.desktopGrabber = g
-          result(true)
         } else {
           result(false)
         }
       case "stopDesktop":
         if #available(macOS 13.0, *) { (self?.desktopGrabber as? SCKFrameGrabber)?.stop() }
         self?.desktopGrabber = nil
+        result(nil)
+      case "openScreenSettings":
+        if let url = URL(string:
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+          NSWorkspace.shared.open(url)
+        }
         result(nil)
       default:
         result(FlutterMethodNotImplemented)

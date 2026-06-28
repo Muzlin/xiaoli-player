@@ -31,6 +31,13 @@ class ScreenRecorder {
     } catch (_) {}
   }
 
+  /// 打开 系统设置›隐私›屏幕录制，让用户给本 app 授权。
+  static Future<void> openScreenSettings() async {
+    try {
+      await _ch.invokeMethod('openScreenSettings');
+    } catch (_) {}
+  }
+
   static Future<bool> start() async {
     if (!supported || _on) return _on;
     _ch.setMethodCallHandler(_onCall);
