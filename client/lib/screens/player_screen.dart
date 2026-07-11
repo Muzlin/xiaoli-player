@@ -10,8 +10,11 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:http/http.dart' as http;
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../player/playback_source.dart';
+import '../player/player_holder.dart';
 import '../services/transcribe_service.dart';
 import '../services/bilibili_service.dart';
+import '../services/platform_service.dart';
+import '../services/a11y.dart';
 import '../text_scale.dart';
 import 'package:file_picker/file_picker.dart';
 
@@ -28,6 +31,10 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function(String message)? onPostComment; // 发评论(仅 B站)
   final Duration startAt; // 断点续播起点
   final void Function(int seconds)? onSavePos; // 保存播放进度
+  final void Function(int durSec)? onDuration; // 视频总时长(#7 继续观看算进度%)
+  final String? nextUpTitle; // #3 片尾浮层：下一首标题(null=无/随机/停止)
+  final VoidCallback? onPlayNext; // #3 立即播放下一首
+  final VoidCallback? onCancelNext; // #3 取消本次自动连播
   final Future<List<Danmaku>> Function()? onLoadDanmaku; // 加载弹幕(仅B站)
   final Future<String> Function(String msg, int progressMs, int color)?
       onPostDanmaku;
@@ -35,10 +42,12 @@ class PlayerScreen extends StatefulWidget {
   final Future<String> Function(int multiply)? onCoin; // B站投币
   final Future<String> Function()? onTriple; // B站一键三连
   final String? bvid; // B站 bvid(分享链接)
+  final String? platformId; // 平台视频ID(非空=本应用平台视频，可点赞/投币/收藏)
   final int seekStep; // 快进/快退步长
   final List<int> bookmarks; // 时间戳书签(秒)
   final void Function(List<int>)? onSaveBookmarks;
   final double initialSpeed; // 该视频上次倍速
+  final bool initialLoop; // 默认单曲循环（设置项）
   final void Function(double)? onSaveSpeed;
   final Future<void> Function()? onAddToFav; // 收藏到B站
   final Future<List<Map<String, dynamic>>> Function()? onLoadParts; // 分P列表
@@ -46,6 +55,8 @@ class PlayerScreen extends StatefulWidget {
   final Future<void> Function(int score)? onRate; // 平台视频评分
   final Future<List<SubtitleOption>> Function()? onLoadSubtitleOptions; // F13
   final Future<Map<String, String?>> Function()? onLoadMultiSubtitles; // F14
+  final VoidCallback? onCache; // 缓存此视频到本地（离线可看）；本地/已缓存为 null
+  final bool attach; // true=从迷你条恢复，附着到已在播放的全局播放器，不重新起播
   const PlayerScreen({
     super.key,
     required this.source,
@@ -57,16 +68,22 @@ class PlayerScreen extends StatefulWidget {
     this.onPostComment,
     this.startAt = Duration.zero,
     this.onSavePos,
+    this.onDuration,
+    this.nextUpTitle,
+    this.onPlayNext,
+    this.onCancelNext,
     this.onLoadDanmaku,
     this.onPostDanmaku,
     this.onLike,
     this.onCoin,
     this.onTriple,
     this.bvid,
+    this.platformId,
     this.seekStep = 10,
     this.bookmarks = const [],
     this.onSaveBookmarks,
     this.initialSpeed = 0,
+    this.initialLoop = false,
     this.onSaveSpeed,
     this.onAddToFav,
     this.onLoadParts,
@@ -74,6 +91,8 @@ class PlayerScreen extends StatefulWidget {
     this.onRate,
     this.onLoadSubtitleOptions,
     this.onLoadMultiSubtitles,
+    this.onCache,
+    this.attach = false,
   });
 
   @override
@@ -82,8 +101,9 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with WidgetsBindingObserver {
-  late final Player _player = Player();
-  late final VideoController _controller = VideoController(_player);
+  // 全局单例播放器：退出本页后仍继续播放（后台播放）。本页不再 new/dispose 它。
+  final Player _player = PlayerHolder.i.player;
+  final VideoController _controller = PlayerHolder.i.controller;
   final List<StreamSubscription<dynamic>> _subs = [];
 
   Duration _position = Duration.zero;
@@ -92,6 +112,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _hasVideo = false;
   String? _error;
   double _speed = 1.0;
+
+  // ===== 平台视频三连：点赞/投币/收藏 =====
+  int _plLikes = 0, _plCoins = 0, _plFavs = 0; // 各计数
+  bool _plLiked = false, _plCoined = false, _plFaved = false; // 本设备状态
+  bool _plBusy = false; // 防连点造成的来回 toggle 竞态
 
   bool _isWebVideo = false; // 网络视频（B站等），可能带烧录角标水印
   bool _cropEdges = false; // 放大裁边，把角落水印推出画面
@@ -465,7 +490,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   // 音量 / 循环 / 睡眠定时
   double _volume = 100;
   bool _muted = false;
-  bool _loop = false;
+  late bool _loop = widget.initialLoop;
   Duration? _aPoint; // A-B 循环 A 点
   Duration? _bPoint; // A-B 循环 B 点
   int _rotation = 0; // 旋转 0/1/2/3×90°
@@ -496,6 +521,18 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _onTop = false;
   bool _stopAtEnd = false;
   double _dim = 0.0;
+  double _warmth = 0.0; // 护眼暖色温叠加强度 0~0.6
+  String _eqPreset = '关闭'; // 音频均衡器预设
+  bool _nightAudio = false; // 夜间音频模式(动态压缩+人声清晰)
+  bool _loudnorm = false; // #1 跨视频响度均衡
+  bool _mono = false; // #2 合并为单声道
+  double _balance = 0.0; // #2 左右声道平衡 -1(全左)~1(全右)
+  int _picBright = 0, _picContrast = 0, _picSat = 0, _picGamma = 0; // 画面精调 -100~100
+  List<Map<String, dynamic>> _timelineMarks = const []; // 时间轴留言 [{pos,text,name}]
+  bool _nextUpShown = false; // #3 片尾"下一个"浮层是否显示
+  bool _nextUpDismissed = false; // 本视频已取消/已触发过，不再弹
+  int _nextUpCountdown = 5; // 倒计时秒
+  Timer? _nextUpTimer;
   double? _vw, _vh;
   double _preLongRate = 1.0;
   bool _longPressing = false;
@@ -846,6 +883,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   // F20: 左/右三分之一双击快退/快进，中间双击进全屏。
   void _handleDoubleTapZone() {
+    A11y.tap(); // 触感反馈(#14)
     final w = MediaQuery.of(context).size.width;
     final x = _doubleTapAt?.dx ?? w / 2;
     if (x < w * 0.34) {
@@ -1597,23 +1635,29 @@ class _PlayerScreenState extends State<PlayerScreen>
                           style: const TextStyle(
                               color: Colors.white70, fontSize: 12)),
                       Expanded(
-                        child: SliderTheme(
-                          data: SliderThemeData(
-                            trackHeight: 3,
-                            thumbColor: cs.primary,
-                            activeTrackColor: cs.primary,
-                            inactiveTrackColor: Colors.white24,
-                            overlayShape: SliderComponentShape.noOverlay,
-                            thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 6),
-                          ),
-                          child: Slider(
-                            min: 0,
-                            max: durMs > 0 ? durMs : 1,
-                            value: durMs > 0 ? posMs : 0,
-                            onChanged: (v) =>
-                                _player.seek(Duration(milliseconds: v.toInt())),
-                          ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _timelineMarkBar(durMs),
+                            SliderTheme(
+                              data: SliderThemeData(
+                                trackHeight: 3,
+                                thumbColor: cs.primary,
+                                activeTrackColor: cs.primary,
+                                inactiveTrackColor: Colors.white24,
+                                overlayShape: SliderComponentShape.noOverlay,
+                                thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 6),
+                              ),
+                              child: Slider(
+                                min: 0,
+                                max: durMs > 0 ? durMs : 1,
+                                value: durMs > 0 ? posMs : 0,
+                                onChanged: (v) => _player
+                                    .seek(Duration(milliseconds: v.toInt())),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                       Text(_fmt(_duration),
@@ -1862,11 +1906,17 @@ class _PlayerScreenState extends State<PlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // 标记：本页内容已成为全局当前播放项，且播放页在前台（迷你条暂不显示）。
+    PlayerHolder.i.current.value = widget.source;
+    PlayerHolder.i.screenOpen.value = true;
     _isWebVideo =
         widget.source.isVideo && widget.source.resource.startsWith('http');
     _cropEdges = _isWebVideo; // 网络视频默认裁边去角标水印
     _fav = widget.isFavorite;
     _marks.addAll(widget.bookmarks);
+    _loadPlatformEngage(); // 平台视频：取本设备三连状态+各计数
+    _loadPlayerExtras(); // 护眼色温 / 均衡器 / 夜间音频 / 画面精调 偏好
+    _loadTimelineMarks(); // 时间轴留言标记
     if (!widget.source.resource.startsWith('http')) {
       _autoLoadSidecarSub(widget.source.resource);
     }
@@ -1880,7 +1930,13 @@ class _PlayerScreenState extends State<PlayerScreen>
     }));
     _subs.add(_player.stream.position.listen((p) {
       if (!mounted) return;
-      setState(() => _position = p);
+      // 进度条重建限频到 ~5fps：每个 position 事件都重建整页会卡，节流到 200ms。
+      if ((p.inMilliseconds ~/ 200) != (_position.inMilliseconds ~/ 200)) {
+        setState(() => _position = p);
+      } else {
+        _position = p;
+      }
+      _maybeShowNextUp(p);
       if (_desktopSub) _pushDesktopSub(p);
       if (_aPoint != null && _bPoint != null && p >= _bPoint!) {
         _player.seek(_aPoint!);
@@ -1914,6 +1970,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _subs.add(_player.stream.duration.listen((d) {
       if (!mounted) return;
       setState(() => _duration = d);
+      if (d > Duration.zero) widget.onDuration?.call(d.inSeconds);
       if (!_resumed &&
           d > Duration.zero &&
           widget.startAt > const Duration(seconds: 3) &&
@@ -1971,9 +2028,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         return null;
       });
     }
-    _player.open(
-      Media(widget.source.resource, httpHeaders: widget.source.headers),
-    );
+    // attach=true：从迷你条恢复，播放器已在放同一内容，不重新 open（否则会从头开始）。
+    if (!widget.attach) {
+      _player.open(
+        Media(widget.source.resource, httpHeaders: widget.source.headers),
+      );
+    }
     // 字幕异步取到后默认开启（不阻塞起播）
     widget.source.subtitleFuture?.then((srt) {
       if (!mounted || srt == null || srt.isEmpty) return;
@@ -2050,10 +2110,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // 隐藏窗口(全局热键/Cmd+H)时暂停播放(仅 macOS)。
-    if (Platform.isMacOS && state == AppLifecycleState.hidden) {
-      _player.pause();
-    }
+    // 后台播放：窗口隐藏/切后台时不再自动暂停，音频继续播。
   }
 
   @override
@@ -2063,6 +2120,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
     WidgetsBinding.instance.removeObserver(this);
     _sleepTimer?.cancel();
+    _nextUpTimer?.cancel();
     if (_paletteApplied) accentNotifier.value = _savedAccent; // F39 还原主题色
     if (Platform.isAndroid) WakelockPlus.disable(); // F45
     if (_desktopSub) _dsChannel.invokeMethod('hide');
@@ -2073,7 +2131,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     for (final s in _subs) {
       s.cancel();
     }
-    _player.dispose();
+    // 不 dispose 全局播放器——退出本页后继续播放（后台播放）。
+    PlayerHolder.i.screenOpen.value = false;
     super.dispose();
   }
 
@@ -2083,6 +2142,910 @@ class _PlayerScreenState extends State<PlayerScreen>
     return d.inHours > 0
         ? '${d.inHours.toString().padLeft(2, '0')}:$m:$s'
         : '$m:$s';
+  }
+
+  // ===== 平台三连：点赞/投币/收藏 =====
+  Future<void> _loadPlatformEngage() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final d = await PlatformService.videoState(id);
+    if (d == null || !mounted) return;
+    setState(() {
+      _plLikes = ((d['likes'] ?? 0) as num).toInt();
+      _plCoins = ((d['coins'] ?? 0) as num).toInt();
+      _plFavs = ((d['favs'] ?? 0) as num).toInt();
+      _plLiked = d['liked_this'] == true;
+      _plCoined = d['coined_this'] == true;
+      _plFaved = d['faved_this'] == true;
+    });
+  }
+
+  void _engageToast(String m) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(m), duration: const Duration(milliseconds: 1200)));
+  }
+
+  // ===== 护眼色温 / 音频均衡器 =====
+  static const _eqPresets = <String, String>{
+    '关闭': '',
+    '低音增强': 'lavfi=[bass=g=8]',
+    '高音增强': 'lavfi=[treble=g=6]',
+    '人声增强': 'lavfi=[equalizer=f=2500:width_type=q:width=1.5:g=5]',
+    '低音+高音': 'lavfi=[bass=g=6,treble=g=4]',
+    '摇滚': 'lavfi=[bass=g=5,treble=g=5]',
+  };
+
+  Future<void> _loadPlayerExtras() async {
+    final p = await SharedPreferences.getInstance();
+    final w = p.getDouble('eye_warmth_v1') ?? 0.0;
+    final eq = p.getString('eq_preset_v1') ?? '关闭';
+    final night = p.getBool('night_audio_v1') ?? false;
+    final loud = p.getBool('loudnorm_v1') ?? false;
+    final mono = p.getBool('audio_mono_v1') ?? false;
+    final bal = p.getDouble('audio_balance_v1') ?? 0.0;
+    final pb = p.getInt('pic_bright_v1') ?? 0;
+    final pc = p.getInt('pic_contrast_v1') ?? 0;
+    final ps = p.getInt('pic_sat_v1') ?? 0;
+    final pg = p.getInt('pic_gamma_v1') ?? 0;
+    if (mounted) {
+      setState(() {
+        _warmth = w;
+        _eqPreset = eq;
+        _nightAudio = night;
+        _loudnorm = loud;
+        _mono = mono;
+        _balance = bal;
+        _picBright = pb;
+        _picContrast = pc;
+        _picSat = ps;
+        _picGamma = pg;
+      });
+    }
+    // 播放器初始化后再应用 mpv 滤镜/画质属性。
+    if (eq != '关闭' || night || loud || mono || bal.abs() > 0.01 ||
+        pb != 0 || pc != 0 || ps != 0 || pg != 0) {
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        _applyAudio();
+        _applyPicture();
+      });
+    }
+  }
+
+  // 组合音频滤镜：均衡器预设 + 夜间音频 + 响度均衡 + 声道平衡/单声道，逗号串成 mpv af 链。
+  String _audioAf() {
+    final parts = <String>[];
+    final eq = _eqPresets[_eqPreset] ?? '';
+    if (eq.isNotEmpty) parts.add(eq);
+    if (_nightAudio) {
+      parts.add(
+          'lavfi=[dynaudnorm=f=150:g=15:p=0.9,acompressor=threshold=-18dB:ratio=3]');
+    }
+    if (_loudnorm) parts.add('lavfi=[loudnorm=I=-16:LRA=11:TP=-1.5]'); // #1
+    // #2 声道：单声道合并 / 左右平衡（必须作为链尾）。
+    if (_mono) {
+      parts.add('lavfi=[pan=mono|c0=.5*c0+.5*c1]');
+    } else if (_balance.abs() > 0.01) {
+      final l = (1 - _balance).clamp(0.0, 1.0).toStringAsFixed(2);
+      final r = (1 + _balance).clamp(0.0, 1.0).toStringAsFixed(2);
+      parts.add('lavfi=[pan=stereo|c0=$l*c0|c1=$r*c1]');
+    }
+    return parts.join(',');
+  }
+
+  Future<void> _applyAudio() async {
+    try {
+      final native = _player.platform;
+      if (native != null) await (native as dynamic).setProperty('af', _audioAf());
+    } catch (_) {}
+  }
+
+  // 画面精调：mpv 原生 video-equalizer 属性(-100~100)。
+  Future<void> _applyPicture() async {
+    try {
+      final native = _player.platform;
+      if (native == null) return;
+      final d = native as dynamic;
+      await d.setProperty('brightness', '$_picBright');
+      await d.setProperty('contrast', '$_picContrast');
+      await d.setProperty('saturation', '$_picSat');
+      await d.setProperty('gamma', '$_picGamma');
+    } catch (_) {}
+  }
+
+  Future<void> _toggleNightAudio() async {
+    setState(() => _nightAudio = !_nightAudio);
+    _applyAudio();
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('night_audio_v1', _nightAudio);
+    _engageToast(_nightAudio ? '夜间音频已开（对白更清晰、爆音更柔和）' : '夜间音频已关');
+  }
+
+  void _showPictureSheet() {
+    Widget row(String label, int value, int min, int max,
+        void Function(int) onChanged, String prefsKey) {
+      return Row(children: [
+        SizedBox(
+            width: 56,
+            child: Text(label,
+                style: const TextStyle(color: Colors.white, fontSize: 13))),
+        Expanded(
+          child: Slider(
+            value: value.toDouble().clamp(min.toDouble(), max.toDouble()),
+            min: min.toDouble(),
+            max: max.toDouble(),
+            divisions: (max - min) ~/ 5,
+            label: '$value',
+            activeColor: const Color(0xFFF26B21),
+            onChanged: (v) => onChanged(v.round()),
+            onChangeEnd: (v) async {
+              final p = await SharedPreferences.getInstance();
+              await p.setInt(prefsKey, v.round());
+            },
+          ),
+        ),
+        SizedBox(
+            width: 34,
+            child: Text('$value',
+                textAlign: TextAlign.right,
+                style: const TextStyle(color: Colors.white60, fontSize: 12))),
+      ]);
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 26),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            Row(children: [
+              const Text('画面精调（实时校正发灰/偏暗）',
+                  style: TextStyle(color: Colors.white)),
+              const Spacer(),
+              TextButton(
+                onPressed: () async {
+                  setSheet(() {});
+                  setState(() {
+                    _picBright = _picContrast = _picSat = _picGamma = 0;
+                  });
+                  _applyPicture();
+                  final p = await SharedPreferences.getInstance();
+                  await p.remove('pic_bright_v1');
+                  await p.remove('pic_contrast_v1');
+                  await p.remove('pic_sat_v1');
+                  await p.remove('pic_gamma_v1');
+                },
+                child: const Text('复位', style: TextStyle(color: Color(0xFFF26B21))),
+              ),
+            ]),
+            row('亮度', _picBright, -100, 100, (v) {
+              setSheet(() {});
+              setState(() => _picBright = v);
+              _applyPicture();
+            }, 'pic_bright_v1'),
+            row('对比度', _picContrast, -100, 100, (v) {
+              setSheet(() {});
+              setState(() => _picContrast = v);
+              _applyPicture();
+            }, 'pic_contrast_v1'),
+            row('饱和度', _picSat, -100, 100, (v) {
+              setSheet(() {});
+              setState(() => _picSat = v);
+              _applyPicture();
+            }, 'pic_sat_v1'),
+            row('伽马', _picGamma, -100, 100, (v) {
+              setSheet(() {});
+              setState(() => _picGamma = v);
+              _applyPicture();
+            }, 'pic_gamma_v1'),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  void _showWarmSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 28),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('护眼色温（暖色叠加，降低蓝光）',
+                style: TextStyle(color: Colors.white)),
+            Slider(
+              value: _warmth,
+              min: 0,
+              max: 0.6,
+              divisions: 12,
+              label: '${(_warmth / 0.6 * 100).round()}%',
+              activeColor: const Color(0xFFFF9500),
+              onChanged: (v) {
+                setSheet(() {});
+                setState(() => _warmth = v);
+              },
+              onChangeEnd: (v) async {
+                final p = await SharedPreferences.getInstance();
+                await p.setDouble('eye_warmth_v1', v);
+              },
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  void _showEqSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF2B2B33),
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              const Padding(
+                  padding: EdgeInsets.all(14),
+                  child: Text('音频均衡器',
+                      style: TextStyle(color: Colors.white70, fontSize: 13))),
+              for (final name in _eqPresets.keys)
+                ListTile(
+                  dense: true,
+                  leading: Icon(
+                      _eqPreset == name
+                          ? Icons.radio_button_checked
+                          : Icons.radio_button_unchecked,
+                      color: _eqPreset == name
+                          ? const Color(0xFFF26B21)
+                          : Colors.white38,
+                      size: 20),
+                  title:
+                      Text(name, style: const TextStyle(color: Colors.white)),
+                  onTap: () async {
+                    setSheet(() {});
+                    setState(() => _eqPreset = name);
+                    _applyAudio();
+                    final p = await SharedPreferences.getInstance();
+                    await p.setString('eq_preset_v1', name);
+                  },
+                ),
+              const Divider(color: Colors.white12, height: 4),
+              // #1 跨视频响度均衡
+              SwitchListTile(
+                dense: true,
+                title: const Text('响度均衡',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('不同视频音量一样大',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+                value: _loudnorm,
+                onChanged: (v) async {
+                  setSheet(() {});
+                  setState(() => _loudnorm = v);
+                  _applyAudio();
+                  final p = await SharedPreferences.getInstance();
+                  await p.setBool('loudnorm_v1', v);
+                },
+              ),
+              // #2 合并单声道
+              SwitchListTile(
+                dense: true,
+                title: const Text('合并为单声道',
+                    style: TextStyle(color: Colors.white)),
+                subtitle: const Text('单耳/一只耳机也能听到全部声音',
+                    style: TextStyle(color: Colors.white38, fontSize: 12)),
+                value: _mono,
+                onChanged: (v) async {
+                  setSheet(() {});
+                  setState(() => _mono = v);
+                  _applyAudio();
+                  final p = await SharedPreferences.getInstance();
+                  await p.setBool('audio_mono_v1', v);
+                },
+              ),
+              // #2 左右声道平衡
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16),
+                child: Row(children: [
+                  const Text('左', style: TextStyle(color: Colors.white54)),
+                  Expanded(
+                    child: Slider(
+                      value: _balance,
+                      min: -1,
+                      max: 1,
+                      divisions: 20,
+                      activeColor: const Color(0xFFF26B21),
+                      onChanged: _mono
+                          ? null
+                          : (v) {
+                              setSheet(() {});
+                              setState(() => _balance = v);
+                              _applyAudio();
+                            },
+                      onChangeEnd: (v) async {
+                        final p = await SharedPreferences.getInstance();
+                        await p.setDouble('audio_balance_v1', v);
+                      },
+                    ),
+                  ),
+                  const Text('右', style: TextStyle(color: Colors.white54)),
+                ]),
+              ),
+              const SizedBox(height: 8),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  // ===== 字幕章节导航(#4)：从字幕静默间隙生成大纲 =====
+  void _showChapters() {
+    final cues = _dcues.isNotEmpty ? _dcues : _parseSrt(_subtitle ?? '');
+    if (cues.isEmpty) {
+      _engageToast('没有字幕，无法生成章节（先加载/生成字幕）');
+      return;
+    }
+    // 第一句永远是章节1；相邻 cue 间隔 >20s 视为新章节起点。
+    const gap = Duration(seconds: 20);
+    final chapters = <_Cue>[cues.first];
+    for (var i = 1; i < cues.length; i++) {
+      if (cues[i].start - cues[i - 1].end >= gap) chapters.add(cues[i]);
+    }
+    String fmt(Duration d) {
+      final h = d.inHours, m = d.inMinutes % 60, s = d.inSeconds % 60;
+      final mm = m.toString().padLeft(2, '0');
+      final ss = s.toString().padLeft(2, '0');
+      return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
+    }
+
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E26),
+      isScrollControlled: true,
+      builder: (_) => SizedBox(
+        height: MediaQuery.of(context).size.height * 0.6,
+        child: Column(children: [
+          Padding(
+              padding: const EdgeInsets.all(12),
+              child: Text('字幕章节（${chapters.length}）',
+                  style: const TextStyle(color: Colors.white, fontSize: 14))),
+          Expanded(
+            child: ListView.builder(
+              itemCount: chapters.length,
+              itemBuilder: (_, i) {
+                final c = chapters[i];
+                final title =
+                    c.text.length > 18 ? '${c.text.substring(0, 18)}…' : c.text;
+                return ListTile(
+                  dense: true,
+                  leading: Text(fmt(c.start),
+                      style: const TextStyle(
+                          color: Color(0xFFF26B21),
+                          fontFeatures: [ui.FontFeature.tabularFigures()])),
+                  title: Text('${i + 1}. $title',
+                      style: const TextStyle(color: Colors.white),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis),
+                  onTap: () {
+                    _player.seek(c.start);
+                    Navigator.pop(context);
+                  },
+                );
+              },
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
+  // ===== 金句截图(#5)：截帧烧录当前字幕+标题+时间戳 =====
+  Future<void> _quoteScreenshot() async {
+    try {
+      final bytes = await _player.screenshot(format: 'image/png');
+      if (bytes == null) {
+        _engageToast('截图失败');
+        return;
+      }
+      final cues = _dcues.isNotEmpty ? _dcues : _parseSrt(_subtitle ?? '');
+      final pos = _position;
+      final hit = cues.where((c) => pos >= c.start && pos < c.end).toList();
+      final quote = hit.isNotEmpty ? hit.first.text : '';
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      codec.dispose();
+      final img = frame.image;
+      final w = img.width.toDouble(), h = img.height.toDouble();
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+      canvas.drawImage(img, Offset.zero, Paint());
+      // 底部半透明条
+      final barH = h * 0.17;
+      canvas.drawRect(Rect.fromLTWH(0, h - barH, w, barH),
+          Paint()..color = const Color(0xCC000000));
+      final ts = _fmtDur(pos);
+      String title = '小李播放器';
+      if (widget.source.title.isNotEmpty) {
+        title = widget.source.title;
+      }
+      void draw(String text, double fontSize, double dy, Color color,
+          {FontWeight weight = FontWeight.normal}) {
+        final tp = TextPainter(
+          text: TextSpan(
+              text: text,
+              style: TextStyle(
+                  color: color, fontSize: fontSize, fontWeight: weight)),
+          textDirection: TextDirection.ltr,
+          maxLines: 2,
+          ellipsis: '…',
+        )..layout(maxWidth: w - 48);
+        tp.paint(canvas, Offset(24, dy));
+      }
+
+      if (quote.isNotEmpty) {
+        draw(quote, h * 0.045, h - barH + 14, Colors.white,
+            weight: FontWeight.w600);
+      } else {
+        draw('（当前无字幕）', h * 0.035, h - barH + 14, Colors.white54);
+      }
+      draw('$title · $ts · 小李播放器', h * 0.028, h - barH * 0.32,
+          const Color(0xFFFFB27A));
+      final pic = recorder.endRecording();
+      final outImg = await pic.toImage(img.width, img.height);
+      final png = await outImg.toByteData(format: ui.ImageByteFormat.png);
+      // 释放原生图像/Picture，避免每次截图泄漏 GPU 内存。
+      img.dispose();
+      pic.dispose();
+      outImg.dispose();
+      if (png == null) {
+        _engageToast('生成失败');
+        return;
+      }
+      final path = await FilePicker.platform.saveFile(
+        dialogTitle: '保存金句卡到…',
+        fileName: '小李金句_${DateTime.now().millisecondsSinceEpoch}.png',
+      );
+      if (path == null) return;
+      await File(path).writeAsBytes(png.buffer.asUint8List());
+      _engageToast('已保存金句卡：$path');
+    } catch (e) {
+      _engageToast('金句截图出错：$e');
+    }
+  }
+
+  String _fmtDur(Duration d) {
+    final h = d.inHours, m = d.inMinutes % 60, s = d.inSeconds % 60;
+    final mm = m.toString().padLeft(2, '0');
+    final ss = s.toString().padLeft(2, '0');
+    return h > 0 ? '$h:$mm:$ss' : '$mm:$ss';
+  }
+
+  // ===== 时间轴留言(#6)：给当前时刻贴公开评论，进度条上打标记 =====
+  Future<void> _timelineComment() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final atSec = _position.inSeconds;
+    final p = await SharedPreferences.getInstance();
+    final myName = (p.getString('profile_name') ?? '').trim();
+    final ctrl = TextEditingController();
+    if (!mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('在 ${_fmtDur(_position)} 处留言'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: 100,
+          decoration: const InputDecoration(
+              hintText: '这一刻想说…（会显示在进度条上）',
+              border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('发布')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final t = ctrl.text.trim();
+    if (t.isEmpty) return;
+    final sent = await PlatformService.comment(
+        id, t, myName.isEmpty ? '匿名' : myName,
+        pos: atSec);
+    if (sent) {
+      _engageToast('已在 ${_fmtDur(Duration(seconds: atSec))} 留言');
+      _loadTimelineMarks();
+    } else {
+      _engageToast('留言失败（可能含违禁词/被封禁）');
+    }
+  }
+
+  // #3 片尾"即将播放下一个"浮层：末 6 秒弹，5 秒倒计时自动连播。
+  void _maybeShowNextUp(Duration p) {
+    if (widget.nextUpTitle == null || _nextUpDismissed) return;
+    if (_loop || _stopAtEnd) return;
+    if (_duration <= Duration.zero) return;
+    final rem = (_duration - p).inMilliseconds;
+    if (!_nextUpShown && rem > 0 && rem <= 6000) {
+      _nextUpShown = true;
+      _nextUpCountdown = 5;
+      _nextUpTimer?.cancel();
+      _nextUpTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+        if (!mounted) {
+          t.cancel();
+          return;
+        }
+        // 倒计时途中用户回退/开循环/设停止 → 取消本次自动连播，允许临近结尾再弹。
+        if (_loop ||
+            _stopAtEnd ||
+            widget.nextUpTitle == null ||
+            (_duration - _position) > const Duration(seconds: 7)) {
+          t.cancel();
+          setState(() => _nextUpShown = false);
+          return;
+        }
+        setState(() => _nextUpCountdown--);
+        if (_nextUpCountdown <= 0) {
+          t.cancel();
+          _playNextUpNow();
+        }
+      });
+    }
+  }
+
+  // #6 时间轴留言标记条(进度条上方可点小圆点)，全/非全屏共用。
+  Widget _timelineMarkBar(double durMs) {
+    if (_timelineMarks.isEmpty || durMs <= 0) return const SizedBox.shrink();
+    return SizedBox(
+      height: 11,
+      child: LayoutBuilder(builder: (_, bc) {
+        final w = bc.maxWidth;
+        return Stack(children: [
+          for (final m in _timelineMarks)
+            Positioned(
+              left: (((m['pos'] as int) * 1000) / durMs * w).clamp(0.0, w - 8),
+              top: 2,
+              child: GestureDetector(
+                onTap: () {
+                  _player.seek(Duration(seconds: m['pos'] as int));
+                  _engageToast('💬 ${m['name']}：${m['text']}');
+                },
+                child: Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFFC107),
+                    shape: BoxShape.circle,
+                    border: Border.all(color: Colors.black45, width: 0.5),
+                  ),
+                ),
+              ),
+            ),
+        ]);
+      }),
+    );
+  }
+
+  void _cancelNextUp() {
+    _nextUpTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _nextUpShown = false;
+        _nextUpDismissed = true;
+      });
+    }
+    widget.onCancelNext?.call();
+  }
+
+  void _playNextUpNow() {
+    _nextUpTimer?.cancel();
+    _nextUpShown = false;
+    _nextUpDismissed = true;
+    widget.onPlayNext?.call();
+  }
+
+  // 拉取时间轴留言标记(有 pos 的评论)。
+  Future<void> _loadTimelineMarks() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final all = await PlatformService.comments(id);
+    final marks = all
+        .where((c) => (c['pos'] is num) && (c['pos'] as num) >= 0)
+        .map((c) => {'pos': (c['pos'] as num).toInt(), 'text': '${c['text'] ?? ''}', 'name': '${c['name'] ?? ''}'})
+        .toList();
+    if (mounted) setState(() => _timelineMarks = marks);
+  }
+
+  // ===== 平台视频：打赏 / 评论 / 举报 =====
+  Future<void> _platformTip() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final amount = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('打赏作者（小李兑换币）'),
+        children: [
+          for (final a in [5, 10, 20, 50, 100])
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, a),
+                child: Text('打赏 $a 币')),
+        ],
+      ),
+    );
+    if (amount == null) return;
+    final d = await PlatformService.tip(id, amount);
+    if (d == null) {
+      _engageToast('打赏失败');
+    } else if (d['ok'] == true) {
+      _engageToast('打赏成功！-$amount 币（余额 ${d['balance']}）');
+    } else {
+      _engageToast('${d['error'] ?? '打赏失败'}');
+    }
+  }
+
+  // 给作者发红包(#16)：选金额+写祝福，扣己方币，进对方待领池。
+  Future<void> _platformRedPacket() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    var amount = 8;
+    final msgCtrl = TextEditingController(text: '恭喜发财，大吉大利');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          backgroundColor: const Color(0xFFC0392B),
+          title: const Row(children: [
+            Text('🧧 ', style: TextStyle(fontSize: 22)),
+            Text('给作者发红包', style: TextStyle(color: Color(0xFFFFE2A8))),
+          ]),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            Wrap(
+              spacing: 8,
+              children: [
+                for (final a in [6, 8, 18, 66, 88])
+                  ChoiceChip(
+                    label: Text('$a'),
+                    selected: amount == a,
+                    selectedColor: const Color(0xFFFFD24A),
+                    onSelected: (_) => setD(() => amount = a),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: msgCtrl,
+              maxLength: 40,
+              style: const TextStyle(color: Colors.white),
+              decoration: const InputDecoration(
+                hintText: '写句祝福…',
+                hintStyle: TextStyle(color: Colors.white54),
+                counterStyle: TextStyle(color: Colors.white54),
+                enabledBorder: UnderlineInputBorder(
+                    borderSide: BorderSide(color: Colors.white38)),
+              ),
+            ),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消',
+                    style: TextStyle(color: Colors.white70))),
+            FilledButton(
+                style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFFFFD24A),
+                    foregroundColor: const Color(0xFF7A1F18)),
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('塞钱进红包')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true) return;
+    final d = await PlatformService.sendRedPacket(id, amount, msgCtrl.text);
+    if (d == null) {
+      _engageToast('发红包失败，请检查网络');
+    } else if (d['ok'] == true) {
+      _engageToast('🧧 红包已塞给作者！-$amount 币（余额 ${d['balance']}）');
+    } else {
+      _engageToast('${d['error'] ?? '发红包失败'}');
+    }
+  }
+
+  Future<void> _platformReport() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final reason = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('举报该视频'),
+        children: [
+          for (final r in ['色情低俗', '暴力血腥', '违法违规', '侵权', '其它'])
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, r),
+                child: Text(r)),
+        ],
+      ),
+    );
+    if (reason == null) return;
+    final ok = await PlatformService.feedback('【举报】视频 $id：$reason');
+    _engageToast(ok ? '举报已提交，感谢监督' : '举报失败');
+  }
+
+  Future<void> _showPlatformComments() async {
+    final id = widget.platformId;
+    if (id == null) return;
+    final p = await SharedPreferences.getInstance();
+    final myName = (p.getString('profile_name') ?? '').trim();
+    var list = await PlatformService.comments(id);
+    if (!mounted) return;
+    final ctrl = TextEditingController();
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF1E1E26),
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => Padding(
+          padding: EdgeInsets.only(
+              bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.6,
+            child: Column(children: [
+              Padding(
+                  padding: const EdgeInsets.all(12),
+                  child: Text('评论（${list.length}）',
+                      style: const TextStyle(color: Colors.white, fontSize: 14))),
+              Expanded(
+                child: list.isEmpty
+                    ? const Center(
+                        child: Text('还没有评论，来抢沙发~',
+                            style: TextStyle(color: Colors.white38)))
+                    : ListView.builder(
+                        itemCount: list.length,
+                        itemBuilder: (_, i) {
+                          final c = list[i];
+                          return ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.account_circle,
+                                color: Colors.white24),
+                            title: Text('${c['name'] ?? '匿名'}',
+                                style: const TextStyle(
+                                    color: Colors.white70, fontSize: 12)),
+                            subtitle: Text('${c['text'] ?? ''}',
+                                style: const TextStyle(color: Colors.white)),
+                          );
+                        }),
+              ),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                child: Row(children: [
+                  Expanded(
+                    child: TextField(
+                      controller: ctrl,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: const InputDecoration(
+                          hintText: '说点什么…',
+                          hintStyle: TextStyle(color: Colors.white38),
+                          border: OutlineInputBorder()),
+                    ),
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.send, color: Color(0xFFF26B21)),
+                    onPressed: () async {
+                      final t = ctrl.text.trim();
+                      if (t.isEmpty) return;
+                      final ok = await PlatformService.comment(
+                          id, t, myName.isEmpty ? '匿名' : myName);
+                      if (ok) {
+                        ctrl.clear();
+                        final fresh = await PlatformService.comments(id);
+                        if (ctx.mounted) setSheet(() => list = fresh);
+                      } else {
+                        _engageToast('评论失败（可能含违禁词/被封禁）');
+                      }
+                    },
+                  ),
+                ]),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _onPlatLike() async {
+    final id = widget.platformId;
+    if (id == null || _plBusy) return;
+    setState(() => _plBusy = true);
+    try {
+      final d = await PlatformService.like(id, on: !_plLiked); // 幂等：传目标状态
+      if (d != null && d['ok'] == true && mounted) {
+        setState(() {
+          _plLiked = d['liked'] == true;
+          _plLikes = ((d['likes'] ?? _plLikes) as num).toInt();
+        });
+      } else if (d == null) {
+        _engageToast('点赞失败');
+      }
+    } finally {
+      if (mounted) setState(() => _plBusy = false);
+    }
+  }
+
+  Future<void> _onPlatFav() async {
+    final id = widget.platformId;
+    if (id == null || _plBusy) return;
+    setState(() => _plBusy = true);
+    try {
+      final d = await PlatformService.fav(id, on: !_plFaved); // 幂等：传目标状态
+      if (d != null && d['ok'] == true && mounted) {
+        setState(() {
+          _plFaved = d['faved'] == true;
+          _plFavs = ((d['favs'] ?? _plFavs) as num).toInt();
+        });
+        _engageToast(_plFaved ? '已收藏' : '已取消收藏');
+      } else if (d == null) {
+        _engageToast('收藏失败');
+      }
+    } finally {
+      if (mounted) setState(() => _plBusy = false);
+    }
+  }
+
+  Future<void> _onPlatCoin() async {
+    final id = widget.platformId;
+    if (id == null || _plBusy || _plCoined) return;
+    setState(() => _plBusy = true);
+    try {
+      final d = await PlatformService.coin(id);
+      if (d == null) {
+        _engageToast('投币失败');
+      } else if (d['ok'] == true) {
+        setState(() {
+          _plCoined = true;
+          _plCoins += 1;
+        });
+        _engageToast('投币成功！花费 ${d['cost'] ?? 1} 小李兑换币');
+      } else {
+        _engageToast('${d['error'] ?? '投币失败'}（余额 ${d['balance'] ?? 0}）');
+        if ((d['error'] ?? '').toString().contains('已投')) {
+          setState(() => _plCoined = true);
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _plBusy = false);
+    }
+  }
+
+  // 单个三连按钮：图标(点亮=主题色) + 计数。
+  Widget _engageBtn(
+      IconData icon, bool active, int count, Color cs, VoidCallback? onTap) {
+    final color = active ? cs : Colors.white70;
+    return InkWell(
+      onTap: onTap == null
+          ? null
+          : () {
+              A11y.tap(); // 触感反馈(#14)
+              onTap();
+            },
+      borderRadius: BorderRadius.circular(10),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, color: color, size: 26),
+          const SizedBox(height: 2),
+          Text('$count',
+              style: TextStyle(color: color, fontSize: 12)),
+        ]),
+      ),
+    );
   }
 
   @override
@@ -2307,6 +3270,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             color: const Color(0xFF2B2B33),
             onSelected: (v) {
               switch (v) {
+                case 'cache':
+                  widget.onCache?.call();
+                  break;
                 case 'loop':
                   _toggleLoop();
                   break;
@@ -2409,6 +3375,39 @@ class _PlayerScreenState extends State<PlayerScreen>
                 case 'stopend':
                   setState(() => _stopAtEnd = !_stopAtEnd);
                   break;
+                case 'eq':
+                  _showEqSheet();
+                  break;
+                case 'night':
+                  _toggleNightAudio();
+                  break;
+                case 'picture':
+                  _showPictureSheet();
+                  break;
+                case 'chapters':
+                  _showChapters();
+                  break;
+                case 'quoteshot':
+                  _quoteScreenshot();
+                  break;
+                case 'warm':
+                  _showWarmSheet();
+                  break;
+                case 'ptip':
+                  _platformTip();
+                  break;
+                case 'predpacket':
+                  _platformRedPacket();
+                  break;
+                case 'pcomment':
+                  _showPlatformComments();
+                  break;
+                case 'tlcomment':
+                  _timelineComment();
+                  break;
+                case 'preport':
+                  _platformReport();
+                  break;
                 case 'srepeat':
                   _toggleSentenceRepeat();
                   break;
@@ -2427,6 +3426,11 @@ class _PlayerScreenState extends State<PlayerScreen>
               }
             },
             itemBuilder: (_) => [
+              if (widget.onCache != null)
+                const PopupMenuItem(
+                    value: 'cache',
+                    child: Text('⬇ 缓存此视频(离线可看)',
+                        style: TextStyle(color: Colors.white))),
               if (widget.onTriple != null) ...[
                 const PopupMenuItem(
                     value: 'triple',
@@ -2512,6 +3516,45 @@ class _PlayerScreenState extends State<PlayerScreen>
                   value: 'dim',
                   child:
                       Text('画面调暗', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'warm',
+                  child:
+                      Text('护眼色温', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'picture',
+                  child: Text('画面精调', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'eq',
+                  child: Text('音频均衡器', style: TextStyle(color: Colors.white))),
+              CheckedPopupMenuItem(
+                  value: 'night',
+                  checked: _nightAudio,
+                  child: const Text('夜间音频',
+                      style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'chapters',
+                  child: Text('字幕章节', style: TextStyle(color: Colors.white))),
+              const PopupMenuItem(
+                  value: 'quoteshot',
+                  child: Text('金句截图', style: TextStyle(color: Colors.white))),
+              if (widget.platformId != null) ...[
+                const PopupMenuItem(
+                    value: 'ptip',
+                    child: Text('打赏作者', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'predpacket',
+                    child: Text('🧧 给作者发红包',
+                        style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'pcomment',
+                    child: Text('评论', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'tlcomment',
+                    child: Text('在此刻留言', style: TextStyle(color: Colors.white))),
+                const PopupMenuItem(
+                    value: 'preport',
+                    child: Text('举报', style: TextStyle(color: Colors.white))),
+              ],
               if (Platform.isMacOS || Platform.isWindows)
                 CheckedPopupMenuItem(
                     value: 'ontop',
@@ -2679,6 +3722,66 @@ class _PlayerScreenState extends State<PlayerScreen>
                                 color:
                                     Colors.black.withValues(alpha: _dim)),
                           ),
+                        if (_warmth > 0)
+                          IgnorePointer(
+                            child: Container(
+                                color: const Color(0xFFFF9500)
+                                    .withValues(alpha: _warmth)),
+                          ),
+                        if (_nextUpShown && widget.nextUpTitle != null)
+                          Positioned(
+                            right: 16,
+                            bottom: 70,
+                            child: Container(
+                              width: 260,
+                              padding: const EdgeInsets.all(12),
+                              decoration: BoxDecoration(
+                                color: Colors.black.withValues(alpha: 0.82),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text('$_nextUpCountdown 秒后播放下一个',
+                                      style: const TextStyle(
+                                          color: Colors.white70, fontSize: 12)),
+                                  const SizedBox(height: 6),
+                                  Text(widget.nextUpTitle!,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 14,
+                                          fontWeight: FontWeight.w600)),
+                                  const SizedBox(height: 10),
+                                  Row(children: [
+                                    Expanded(
+                                      child: OutlinedButton(
+                                        onPressed: _cancelNextUp,
+                                        style: OutlinedButton.styleFrom(
+                                            foregroundColor: Colors.white,
+                                            side: const BorderSide(
+                                                color: Colors.white38),
+                                            padding: EdgeInsets.zero),
+                                        child: const Text('取消'),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: FilledButton(
+                                        onPressed: _playNextUpNow,
+                                        style: FilledButton.styleFrom(
+                                            backgroundColor: cs.primary,
+                                            padding: EdgeInsets.zero),
+                                        child: const Text('立即播放'),
+                                      ),
+                                    ),
+                                  ]),
+                                ],
+                              ),
+                            ),
+                          ),
                         if (_isDragSeeking && _dragPreview != null)
                           Center(
                             child: Container(
@@ -2732,6 +3835,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                           onSeek: (sec) =>
                               _player.seek(Duration(seconds: sec)),
                         ),
+                      _timelineMarkBar(durMs),
                       SliderTheme(
                         data: SliderThemeData(
                           trackHeight: 3,
@@ -2802,6 +3906,24 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
                   ],
                 ),
+                if (widget.platformId != null) ...[
+                  const SizedBox(height: 10),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      _engageBtn(_plLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                          _plLiked, _plLikes, cs.primary, _plBusy ? null : _onPlatLike),
+                      _engageBtn(
+                          Icons.monetization_on,
+                          _plCoined,
+                          _plCoins,
+                          cs.primary,
+                          (_plBusy || _plCoined) ? null : _onPlatCoin),
+                      _engageBtn(_plFaved ? Icons.star : Icons.star_border,
+                          _plFaved, _plFavs, cs.primary, _plBusy ? null : _onPlatFav),
+                    ],
+                  ),
+                ],
                 const SizedBox(height: 8),
                 _volumeBar(cs),
                 const SizedBox(height: 20),

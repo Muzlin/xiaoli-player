@@ -89,4 +89,74 @@ class TranscribeService {
       } catch (_) {}
     }
   }
+
+  /// 直播字幕：把一小段 WAV 转成纯文本(无时间戳)。失败/无语音返回 null。
+  static Future<String?> transcribeChunkToText(String wavIn) async {
+    if (!available) return null;
+    final tmp = Directory.systemTemp.createTempSync('xl_cap_');
+    final wav = '${tmp.path}/a.wav';
+    final outPrefix = '${tmp.path}/out';
+    try {
+      final ff = await Process.run(
+          ffmpeg!, ['-i', wavIn, '-vn', '-ar', '16000', '-ac', '1', '-y', wav]);
+      if (ff.exitCode != 0 || !File(wav).existsSync()) return null;
+      final wr = await Process.run(whisper!, [
+        '-m', model,
+        '-l', 'zh',
+        '-f', wav,
+        '-otxt',
+        '-nt', // 不要时间戳
+        '-of', outPrefix,
+        '-np',
+      ]);
+      final txtFile = File('$outPrefix.txt');
+      if (wr.exitCode != 0 || !txtFile.existsSync()) return null;
+      final txt =
+          txtFile.readAsStringSync().replaceAll('\n', ' ').replaceAll('  ', ' ').trim();
+      // whisper 对静音/噪声常吐 "(音乐)"「谢谢观看」等占位，过滤掉最常见的。
+      if (txt.isEmpty || txt == '谢谢大家' || txt.startsWith('(') || txt.startsWith('[')) {
+        return null;
+      }
+      return txt;
+    } catch (_) {
+      return null;
+    } finally {
+      try {
+        tmp.deleteSync(recursive: true);
+      } catch (_) {}
+    }
+  }
+
+  /// 直播双语字幕：一段 WAV → 中文 + 英文(whisper --translate 转英)。返回"中文\nEnglish"。
+  static Future<String?> transcribeChunkBilingual(String wavIn) async {
+    if (!available) return null;
+    final tmp = Directory.systemTemp.createTempSync('xl_bi_');
+    final wav = '${tmp.path}/a.wav';
+    try {
+      final ff = await Process.run(
+          ffmpeg!, ['-i', wavIn, '-vn', '-ar', '16000', '-ac', '1', '-y', wav]);
+      if (ff.exitCode != 0 || !File(wav).existsSync()) return null;
+      Future<String?> run(List<String> extra, String suffix) async {
+        final of = '${tmp.path}/o_$suffix';
+        final r = await Process.run(whisper!,
+            ['-m', model, '-f', wav, '-otxt', '-nt', '-of', of, '-np', ...extra]);
+        final f = File('$of.txt');
+        if (r.exitCode != 0 || !f.existsSync()) return null;
+        final t = f.readAsStringSync().replaceAll('\n', ' ').trim();
+        if (t.isEmpty || t.startsWith('(') || t.startsWith('[')) return null;
+        return t;
+      }
+
+      final zh = await run(['-l', 'zh'], 'zh');
+      if (zh == null) return null; // 无语音就别出英文占位
+      final en = await run(['-l', 'zh', '-tr'], 'en'); // -tr=翻译成英文
+      return en != null ? '$zh\n$en' : zh;
+    } catch (_) {
+      return null;
+    } finally {
+      try {
+        tmp.deleteSync(recursive: true);
+      } catch (_) {}
+    }
+  }
 }

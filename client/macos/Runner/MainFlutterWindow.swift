@@ -1,9 +1,16 @@
+import AVFoundation
+import CoreImage
+import ScreenCaptureKit
 import Carbon
 import Cocoa
 import FlutterMacOS
+import UserNotifications
 
 class MainFlutterWindow: NSWindow, NSWindowDelegate {
   var subtitleOverlay: SubtitleOverlay?
+  var screenRecorder: ScreenRecorder?
+  var desktopGrabber: AnyObject?
+  var micRecorder: MicChunkRecorder?
 
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
@@ -93,6 +100,172 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
       case "setAlwaysOnTop":
         let on = (call.arguments as? [String: Any])?["on"] as? Bool ?? false
         self?.level = on ? .floating : .normal
+        result(nil)
+      case "minimizeWindow":
+        self?.miniaturize(nil)
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    // 「打开方式」：把双击/打开的文件路径交给 Dart 播放（getPending 拉启动时缓存的）。
+    let openCh = FlutterMethodChannel(
+      name: "xiaoli/openfile",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    openCh.setMethodCallHandler { (call, result) in
+      if call.method == "getPending" {
+        let f = AppDelegate.pendingFiles
+        AppDelegate.pendingFiles = []
+        result(f)
+      } else {
+        result(FlutterMethodNotImplemented)
+      }
+    }
+    AppDelegate.openChannel = openCh
+
+    // 系统通知：收到新消息时弹 macOS 通知中心。首次 show 触发授权请求。
+    let notifCh = FlutterMethodChannel(
+      name: "xiaoli/notify",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    notifCh.setMethodCallHandler { (call, result) in
+      switch call.method {
+      case "requestAuth":
+        UNUserNotificationCenter.current().requestAuthorization(
+          options: [.alert, .sound, .badge]) { _, _ in }
+        result(nil)
+      case "show":
+        let a = call.arguments as? [String: Any]
+        let title = (a?["title"] as? String) ?? "新消息"
+        let body = (a?["body"] as? String) ?? ""
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+          guard granted else { return }
+          let content = UNMutableNotificationContent()
+          content.title = title
+          content.body = body
+          content.sound = .default
+          let req = UNNotificationRequest(
+            identifier: UUID().uuidString, content: content, trigger: nil)
+          center.add(req, withCompletionHandler: nil)
+        }
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    // 收付款：二维码生成(CoreImage CIQRCodeGenerator) + 扫一扫(AVFoundation 相机识别二维码)。
+    let qrCh = FlutterMethodChannel(
+      name: "xiaoli/qr",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    qrCh.setMethodCallHandler { (call, result) in
+      switch call.method {
+      case "generate":
+        let data = (call.arguments as? [String: Any])?["data"] as? String ?? ""
+        if let png = QRGen.png(from: data) {
+          result(FlutterStandardTypedData(bytes: png))
+        } else {
+          result(nil)
+        }
+      case "scan":
+        if #available(macOS 13.0, *) {
+          QRScanner.shared.start { code in
+            DispatchQueue.main.async { result(code) }
+          }
+        } else {
+          result(nil)  // 扫码识别需 macOS 13+
+        }
+      case "scanImage":
+        // 从图片识别二维码(CIDetector)：无需相机，最稳。选图→识别→返回字符串。
+        result(QRGen.scanImageViaPanel())
+      case "pickImages":
+        // 选一组图片(PPT幻灯片)，返回文件路径数组。
+        result(QRGen.pickImagePaths())
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    // 系统级录屏：start 开始录短片段(回调 "clip" 把路径给 Dart 上传)，stop 停止。
+    let recCh = FlutterMethodChannel(
+      name: "xiaoli/screenrec",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    recCh.setMethodCallHandler { [weak self] (call, result) in
+      switch call.method {
+      case "start":
+        if self?.screenRecorder == nil { self?.screenRecorder = ScreenRecorder() }
+        self?.screenRecorder?.onClip = { path in
+          DispatchQueue.main.async { recCh.invokeMethod("clip", arguments: path) }
+        }
+        let ok = self?.screenRecorder?.start() ?? false
+        result(ok)
+      case "stop":
+        self?.screenRecorder?.stop()
+        self?.screenRecorder = nil
+        result(nil)
+      case "startDesktop":
+        if #available(macOS 13.0, *) {
+          // 没有「屏幕录制」权限就抓不到桌面(SCK 静默失败)。先查权限，没有就弹系统授权框并告诉 Dart。
+          if !CGPreflightScreenCaptureAccess() {
+            CGRequestScreenCaptureAccess()  // 触发系统授权弹窗(首次)；已拒绝则需去设置手动开
+            result(false)
+          } else {
+            let g = SCKFrameGrabber()
+            g.onFrame = { data in
+              DispatchQueue.main.async {
+                recCh.invokeMethod("frame", arguments: FlutterStandardTypedData(bytes: data))
+              }
+            }
+            g.start()
+            self?.desktopGrabber = g
+            result(true)
+          }
+        } else {
+          result(false)
+        }
+      case "stopDesktop":
+        if #available(macOS 13.0, *) { (self?.desktopGrabber as? SCKFrameGrabber)?.stop() }
+        self?.desktopGrabber = nil
+        result(nil)
+      case "openScreenSettings":
+        if let url = URL(string:
+          "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+          NSWorkspace.shared.open(url)
+        }
+        result(nil)
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+
+    // 麦克风分段录音：recordChunk 录 N 秒 → 写 WAV → 返回路径(Dart 交给 whisper 转字幕)。
+    let micCh = FlutterMethodChannel(
+      name: "xiaoli/mic",
+      binaryMessenger: flutterViewController.engine.binaryMessenger)
+    micCh.setMethodCallHandler { [weak self] (call, result) in
+      switch call.method {
+      case "recordChunk":
+        let secs = (call.arguments as? [String: Any])?["seconds"] as? Double ?? 5.0
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+          DispatchQueue.main.async {
+            guard granted else { result(nil); return }
+            let rec = MicChunkRecorder()
+            self?.micRecorder = rec
+            let name = "miccap_\(Int(Date().timeIntervalSince1970 * 1000)).wav"
+            let path = (NSTemporaryDirectory() as NSString)
+              .appendingPathComponent(name)
+            rec.record(seconds: secs, to: path) { p in
+              DispatchQueue.main.async {
+                result(p)
+                if self?.micRecorder === rec { self?.micRecorder = nil }
+              }
+            }
+          }
+        }
+      case "stop":
+        self?.micRecorder?.cancel()
+        self?.micRecorder = nil
         result(nil)
       default:
         result(FlutterMethodNotImplemented)
@@ -301,5 +474,544 @@ class SubtitleOverlay {
     panel?.orderOut(nil)
     panel = nil
     label = nil
+  }
+}
+
+/// 系统级录屏：用 AVFoundation 抓主显示器，录成短 H.264 片段(.mov)。
+/// 每段 ~3s，录完回调路径给 Dart 上传，立刻接着录下一段(近连续)。
+/// 首次启动会触发 macOS「屏幕录制」授权——用户须到 系统设置>隐私与安全性>屏幕录制
+/// 勾选本 App 并重启，之后才真正录到画面(系统强制，绕不过=天然的知情同意)。
+// 系统级录屏调度：macOS 13+ 走 ScreenCaptureKit(屏幕+系统内音)，否则旧法(只视频)。
+// 麦克风分段录音：录固定秒数的音频写成 WAV(输入原始格式，交给 ffmpeg 重采样)。
+class MicChunkRecorder {
+  private let engine = AVAudioEngine()
+  private var file: AVAudioFile?
+  private var done: ((String?) -> Void)?
+  private var stopWork: DispatchWorkItem?
+  private var finished = false
+
+  func record(seconds: Double, to path: String,
+              completion: @escaping (String?) -> Void) {
+    done = completion
+    let input = engine.inputNode
+    let fmt = input.inputFormat(forBus: 0)
+    guard fmt.sampleRate > 0 else { completion(nil); return }
+    do {
+      file = try AVAudioFile(forWriting: URL(fileURLWithPath: path),
+                             settings: fmt.settings)
+    } catch {
+      completion(nil); return
+    }
+    input.installTap(onBus: 0, bufferSize: 4096, format: fmt) { [weak self] (buf, _) in
+      try? self?.file?.write(from: buf)
+    }
+    engine.prepare()
+    do {
+      try engine.start()
+    } catch {
+      input.removeTap(onBus: 0)
+      completion(nil)
+      return
+    }
+    let work = DispatchWorkItem { [weak self] in self?.finish() }
+    stopWork = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
+  }
+
+  private func finish() {
+    if finished { return }
+    finished = true
+    engine.inputNode.removeTap(onBus: 0)
+    engine.stop()
+    let path = file?.url.path
+    file = nil
+    let cb = done; done = nil
+    cb?(path)
+  }
+
+  func cancel() {
+    stopWork?.cancel()
+    if finished { return }
+    finished = true
+    engine.inputNode.removeTap(onBus: 0)
+    engine.stop()
+    file = nil
+    let cb = done; done = nil
+    cb?(nil)
+  }
+}
+
+class ScreenRecorder: NSObject {
+  private var running = false
+  private let dir = NSTemporaryDirectory() + "xiaoli_screenrec/"
+  var onClip: ((String) -> Void)?
+  var clipSeconds: Double = 3.0
+  private var sck: AnyObject?
+  private var legacy: LegacyScreenRecorder?
+
+  func start() -> Bool {
+    if running { return true }
+    try? FileManager.default.createDirectory(
+      atPath: dir, withIntermediateDirectories: true)
+    running = true
+    if #available(macOS 13.0, *) {
+      let r = SCKRecorder(dir: dir, clipSeconds: clipSeconds)
+      r.onClip = { [weak self] p in self?.onClip?(p) }
+      r.start()
+      sck = r
+    } else {
+      let l = LegacyScreenRecorder(dir: dir, clipSeconds: clipSeconds)
+      l.onClip = { [weak self] p in self?.onClip?(p) }
+      _ = l.start()
+      legacy = l
+    }
+    return true
+  }
+
+  func stop() {
+    running = false
+    if #available(macOS 13.0, *) { (sck as? SCKRecorder)?.stop() }
+    legacy?.stop()
+    sck = nil
+    legacy = nil
+    if let files = try? FileManager.default.contentsOfDirectory(atPath: dir) {
+      for f in files { try? FileManager.default.removeItem(atPath: dir + f) }
+    }
+  }
+}
+
+/// 旧法(只视频)：AVCaptureScreenInput，macOS <13 兜底。
+class LegacyScreenRecorder: NSObject, AVCaptureFileOutputRecordingDelegate {
+  private var session: AVCaptureSession?
+  private var output: AVCaptureMovieFileOutput?
+  private var running = false
+  private let dir: String
+  private let clipSeconds: Double
+  var onClip: ((String) -> Void)?
+  init(dir: String, clipSeconds: Double) {
+    self.dir = dir
+    self.clipSeconds = clipSeconds
+  }
+
+  func start() -> Bool {
+    if running { return true }
+    let s = AVCaptureSession()
+    s.sessionPreset = .high
+    guard let input = AVCaptureScreenInput(displayID: CGMainDisplayID()) else {
+      return false
+    }
+    input.minFrameDuration = CMTime(value: 1, timescale: 15)
+    input.scaleFactor = 0.5
+    input.capturesCursor = true
+    if s.canAddInput(input) { s.addInput(input) }
+    let out = AVCaptureMovieFileOutput()
+    out.movieFragmentInterval = .invalid
+    if s.canAddOutput(out) { s.addOutput(out) }
+    self.session = s
+    self.output = out
+    s.startRunning()
+    running = true
+    startClip()
+    return true
+  }
+
+  private func startClip() {
+    guard running, let out = output, !out.isRecording else { return }
+    let path = dir + "clip_\(Int(Date().timeIntervalSince1970 * 1000)).mov"
+    out.startRecording(to: URL(fileURLWithPath: path), recordingDelegate: self)
+    DispatchQueue.main.asyncAfter(deadline: .now() + clipSeconds) { [weak self] in
+      guard let self = self, self.running, out.isRecording else { return }
+      out.stopRecording()
+    }
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput, didFinishRecordingTo outputFileURL: URL,
+    from connections: [AVCaptureConnection], error: Error?
+  ) {
+    let ok =
+      (error == nil)
+      || ((error as NSError?)?.userInfo[AVErrorRecordingSuccessfullyFinishedKey]
+        as? Bool ?? false)
+    if ok,
+      let sz = try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[
+        .size] as? Int, sz > 1000
+    {
+      onClip?(outputFileURL.path)
+    } else {
+      try? FileManager.default.removeItem(at: outputFileURL)
+    }
+    if running { startClip() }
+  }
+
+  func stop() {
+    running = false
+    if let o = output, o.isRecording { o.stopRecording() }
+    session?.stopRunning()
+    session = nil
+    output = nil
+  }
+}
+
+/// 新法：ScreenCaptureKit(macOS 13+) 抓屏幕 + 系统内音 → AVAssetWriter MP4 分段。
+@available(macOS 13.0, *)
+class SCKRecorder: NSObject, SCStreamOutput, SCStreamDelegate {
+  private let dir: String
+  private let clipSeconds: Double
+  var onClip: ((String) -> Void)?
+  private var stream: SCStream?
+  private let q = DispatchQueue(label: "xiaoli.sck")
+  private var writer: AVAssetWriter?
+  private var vIn: AVAssetWriterInput?
+  private var aIn: AVAssetWriterInput?
+  private var sessionStarted = false
+  private var clipStart = CMTime.zero
+  private var curPath = ""
+  private var W = 1280
+  private var H = 800
+  private var running = false
+
+  init(dir: String, clipSeconds: Double) {
+    self.dir = dir
+    self.clipSeconds = clipSeconds
+  }
+
+  func start() {
+    running = true
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) {
+      [weak self] content, _ in
+      guard let self = self, self.running, let display = content?.displays.first
+      else { return }
+      self.W = Int(Double(display.width) * 0.5)
+      self.H = Int(Double(display.height) * 0.5)
+      let filter = SCContentFilter(
+        display: display, excludingApplications: [], exceptingWindows: [])
+      let cfg = SCStreamConfiguration()
+      cfg.width = self.W
+      cfg.height = self.H
+      cfg.minimumFrameInterval = CMTime(value: 1, timescale: 15)
+      cfg.capturesAudio = true
+      cfg.sampleRate = 48000
+      cfg.channelCount = 2
+      cfg.showsCursor = true
+      cfg.pixelFormat = kCVPixelFormatType_32BGRA
+      let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+      do {
+        try s.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.q)
+        try s.addStreamOutput(self, type: .audio, sampleHandlerQueue: self.q)
+      } catch { return }
+      s.startCapture { _ in }
+      self.stream = s
+      self.q.async { self.openWriter() }
+    }
+  }
+
+  private func openWriter() {
+    let path = dir + "clip_\(Int(Date().timeIntervalSince1970 * 1000)).mp4"
+    guard let w = try? AVAssetWriter(
+      outputURL: URL(fileURLWithPath: path), fileType: .mp4) else { return }
+    let vi = AVAssetWriterInput(
+      mediaType: .video,
+      outputSettings: [
+        AVVideoCodecKey: AVVideoCodecType.h264,
+        AVVideoWidthKey: W, AVVideoHeightKey: H,
+      ])
+    vi.expectsMediaDataInRealTime = true
+    let ai = AVAssetWriterInput(
+      mediaType: .audio,
+      outputSettings: [
+        AVFormatIDKey: kAudioFormatMPEG4AAC,
+        AVNumberOfChannelsKey: 2, AVSampleRateKey: 48000,
+        AVEncoderBitRateKey: 128000,
+      ])
+    ai.expectsMediaDataInRealTime = true
+    if w.canAdd(vi) { w.add(vi) }
+    if w.canAdd(ai) { w.add(ai) }
+    w.startWriting()
+    writer = w
+    vIn = vi
+    aIn = ai
+    sessionStarted = false
+    curPath = path
+  }
+
+  func stream(
+    _ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer,
+    of type: SCStreamOutputType
+  ) {
+    guard running, CMSampleBufferDataIsReady(sb), writer != nil else { return }
+    let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+    if type == .screen {
+      if !sessionStarted {
+        writer?.startSession(atSourceTime: pts)
+        sessionStarted = true
+        clipStart = pts
+      }
+      if vIn?.isReadyForMoreMediaData == true { vIn?.append(sb) }
+      if CMTimeGetSeconds(CMTimeSubtract(pts, clipStart)) >= clipSeconds {
+        rotate(at: pts)
+      }
+    } else if type == .audio {
+      if sessionStarted, aIn?.isReadyForMoreMediaData == true { aIn?.append(sb) }
+    }
+  }
+
+  private func rotate(at pts: CMTime) {
+    guard let w = writer else { return }
+    let path = curPath
+    writer = nil
+    vIn?.markAsFinished()
+    aIn?.markAsFinished()
+    vIn = nil
+    aIn = nil
+    sessionStarted = false
+    w.endSession(atSourceTime: pts)
+    w.finishWriting {
+      if w.status == .completed,
+        let sz = try? FileManager.default.attributesOfItem(atPath: path)[.size]
+          as? Int, sz > 2000
+      {
+        self.onClip?(path)
+      } else {
+        try? FileManager.default.removeItem(atPath: path)
+      }
+    }
+    if running { openWriter() }
+  }
+
+  func stop() {
+    running = false
+    stream?.stopCapture { _ in }
+    stream = nil
+    if let w = writer {
+      vIn?.markAsFinished()
+      aIn?.markAsFinished()
+      w.finishWriting {}
+    }
+    writer = nil
+    vIn = nil
+    aIn = nil
+  }
+}
+
+/// 桌面取帧器(macOS 13+)：ScreenCaptureKit 抓整个桌面，节流成 ~1.5fps JPEG 帧回调。
+@available(macOS 13.0, *)
+class SCKFrameGrabber: NSObject, SCStreamOutput, SCStreamDelegate {
+  var onFrame: ((Data) -> Void)?
+  var fps: Double = 1.5
+  private var stream: SCStream?
+  private let q = DispatchQueue(label: "xiaoli.grab")
+  private let ciContext = CIContext()
+  private var lastEmit = Date(timeIntervalSince1970: 0)
+  private var running = false
+
+  func start() {
+    running = true
+    SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: true) {
+      [weak self] content, _ in
+      guard let self = self, self.running, let display = content?.displays.first
+      else { return }
+      let filter = SCContentFilter(
+        display: display, excludingApplications: [], exceptingWindows: [])
+      let cfg = SCStreamConfiguration()
+      cfg.width = Int(Double(display.width) * 0.5)
+      cfg.height = Int(Double(display.height) * 0.5)
+      cfg.minimumFrameInterval = CMTime(value: 1, timescale: 5)
+      cfg.showsCursor = true
+      cfg.pixelFormat = kCVPixelFormatType_32BGRA
+      let s = SCStream(filter: filter, configuration: cfg, delegate: self)
+      try? s.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.q)
+      s.startCapture { _ in }
+      self.stream = s
+    }
+  }
+
+  func stream(
+    _ stream: SCStream, didOutputSampleBuffer sb: CMSampleBuffer,
+    of type: SCStreamOutputType
+  ) {
+    guard running, type == .screen, CMSampleBufferDataIsReady(sb) else { return }
+    let now = Date()
+    if now.timeIntervalSince(lastEmit) < (1.0 / fps) { return }
+    guard let px = CMSampleBufferGetImageBuffer(sb) else { return }
+    let ci = CIImage(cvImageBuffer: px)
+    let opts: [CIImageRepresentationOption: Any] = [
+      CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String): 0.5
+    ]
+    guard let jpg = ciContext.jpegRepresentation(
+      of: ci, colorSpace: CGColorSpaceCreateDeviceRGB(), options: opts) else { return }
+    lastEmit = now
+    onFrame?(jpg)
+  }
+
+  func stop() {
+    running = false
+    stream?.stopCapture { _ in }
+    stream = nil
+  }
+}
+
+/// 二维码生成：CoreImage CIQRCodeGenerator → 放大 → PNG bytes。
+enum QRGen {
+  static func png(from string: String, scale: CGFloat = 12) -> Data? {
+    guard let filter = CIFilter(name: "CIQRCodeGenerator") else { return nil }
+    filter.setValue(string.data(using: .utf8), forKey: "inputMessage")
+    filter.setValue("M", forKey: "inputCorrectionLevel")
+    guard let ci = filter.outputImage else { return nil }
+    let scaled = ci.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+    let rep = NSCIImageRep(ciImage: scaled)
+    let img = NSImage(size: rep.size)
+    img.addRepresentation(rep)
+    guard let tiff = img.tiffRepresentation,
+      let bmp = NSBitmapImageRep(data: tiff),
+      let png = bmp.representation(using: .png, properties: [:])
+    else { return nil }
+    return png
+  }
+
+  /// 选一张图片→CIDetector 识别其中的二维码(无需相机，永不崩)。
+  static func scanImageViaPanel() -> String? {
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = false
+    panel.canChooseDirectories = false
+    panel.allowedFileTypes = [
+      "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "heif", "webp",
+    ]
+    panel.title = "选一张含二维码的图片"
+    guard panel.runModal() == .OK, let url = panel.url,
+      let ci = CIImage(contentsOf: url)
+    else { return nil }
+    let detector = CIDetector(
+      ofType: CIDetectorTypeQRCode, context: CIContext(),
+      options: [CIDetectorAccuracy: CIDetectorAccuracyHigh])
+    for f in detector?.features(in: ci) ?? [] {
+      if let qr = f as? CIQRCodeFeature, let s = qr.messageString, !s.isEmpty {
+        return s
+      }
+    }
+    return nil
+  }
+
+  /// 选一组图片(当幻灯片用)，返回文件路径。
+  static func pickImagePaths() -> [String] {
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = true
+    panel.canChooseDirectories = false
+    panel.allowedFileTypes = [
+      "png", "jpg", "jpeg", "gif", "bmp", "tiff", "tif", "heic", "heif", "webp",
+    ]
+    panel.title = "选要演示的图片(可多选)"
+    guard panel.runModal() == .OK else { return [] }
+    return panel.urls.map { $0.path }
+  }
+}
+
+/// 扫一扫：弹一个相机预览窗，AVFoundation 识别到二维码就回调字符串并关窗。
+/// macOS 的二维码 metadata 识别需 13.0+(同 ScreenCaptureKit)。
+@available(macOS 13.0, *)
+class QRScanner: NSObject, AVCaptureMetadataOutputObjectsDelegate, NSWindowDelegate {
+  static let shared = QRScanner()
+  private var session: AVCaptureSession?
+  private var window: NSWindow?
+  private var completion: ((String?) -> Void)?
+  private var finished = false
+
+  func start(_ completion: @escaping (String?) -> Void) {
+    DispatchQueue.main.async {
+      if self.session != nil { completion(nil); return }  // 已在扫
+      self.completion = completion
+      self.finished = false
+      AVCaptureDevice.requestAccess(for: .video) { granted in
+        DispatchQueue.main.async {
+          if granted {
+            self.setup()
+          } else {
+            self.finish(nil)
+          }
+        }
+      }
+    }
+  }
+
+  private func setup() {
+    let session = AVCaptureSession()
+    guard let device = AVCaptureDevice.default(for: .video),
+      let input = try? AVCaptureDeviceInput(device: device),
+      session.canAddInput(input)
+    else {
+      self.finish(nil)
+      return
+    }
+    session.addInput(input)
+    let output = AVCaptureMetadataOutput()
+    guard session.canAddOutput(output) else {
+      self.finish(nil)
+      return
+    }
+    session.addOutput(output)
+    output.setMetadataObjectsDelegate(self, queue: .main)
+    // ⚠️ 必须等 session 跑起来、.qr 进了 availableMetadataObjectTypes 才能设，
+    // 否则 setMetadataObjectTypes 直接抛 ObjC 异常崩溃(SIGABRT)。
+
+    let rect = NSRect(x: 0, y: 0, width: 440, height: 500)
+    let w = NSWindow(
+      contentRect: rect, styleMask: [.titled, .closable],
+      backing: .buffered, defer: false)
+    w.title = "扫一扫 · 把二维码对准摄像头"
+    w.center()
+    w.level = .floating
+    w.delegate = self
+    let view = NSView(frame: rect)
+    view.wantsLayer = true
+    let preview = AVCaptureVideoPreviewLayer(session: session)
+    preview.videoGravity = .resizeAspectFill
+    preview.frame = view.bounds
+    preview.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+    view.layer?.addSublayer(preview)
+    w.contentView = view
+    w.makeKeyAndOrderFront(nil)
+    NSApp.activate(ignoringOtherApps: true)
+    self.window = w
+    self.session = session
+    DispatchQueue.global(qos: .userInitiated).async {
+      session.startRunning()
+      DispatchQueue.main.async {
+        // 跑起来后 .qr 才在 available 列表里；不在就不设(防崩)。
+        if output.availableMetadataObjectTypes.contains(.qr) {
+          output.metadataObjectTypes = [.qr]
+        }
+      }
+    }
+  }
+
+  func metadataOutput(
+    _ output: AVCaptureMetadataOutput,
+    didOutput metadataObjects: [AVMetadataObject],
+    from connection: AVCaptureConnection
+  ) {
+    guard !finished,
+      let obj = metadataObjects.first as? AVMetadataMachineReadableCodeObject,
+      obj.type == .qr, let s = obj.stringValue
+    else { return }
+    finish(s)
+  }
+
+  func windowWillClose(_ notification: Notification) {
+    if !finished { finish(nil) }  // 用户手动关窗=取消
+  }
+
+  private func finish(_ code: String?) {
+    if finished { return }
+    finished = true
+    session?.stopRunning()
+    session = nil
+    if let w = window {
+      window = nil
+      w.delegate = nil
+      w.close()
+    }
+    let cb = completion
+    completion = nil
+    cb?(code)
   }
 }

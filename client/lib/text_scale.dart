@@ -11,3 +11,11 @@ final ValueNotifier<Color> accentNotifier =
 /// 主题模式：跟随系统/浅色/深色。
 final ValueNotifier<ThemeMode> themeModeNotifier =
     ValueNotifier<ThemeMode>(ThemeMode.system);
+
+/// App 内显示名（后台可改；OS 级名字仍是打包时的）。默认小李播放器。
+final ValueNotifier<String> appNameNotifier =
+    ValueNotifier<String>('小李播放器');
+
+/// 官方下载网址（后台「下载源」开关决定 GitHub releases 或平台下载页）。空=用兜底。
+final ValueNotifier<String> officialDownloadNotifier =
+    ValueNotifier<String>('');

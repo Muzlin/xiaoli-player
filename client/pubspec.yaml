@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.37.0+2370
+version: 2.39.57+23957
 
 environment:
   sdk: ^3.12.0
@@ -43,12 +43,17 @@ dependencies:
   file_picker: ^8.1.2
   shared_preferences: ^2.3.2
   http: ^1.2.0
+  image: ^4.0.0
+  volume_controller: ^3.5.0
+  screen_brightness: ^2.1.9
   url_launcher: ^6.3.0
   crypto: ^3.0.3
   # 背景图复制进 app 容器（沙箱内持久可读）
   path_provider: ^2.1.5
   # Android 后台音频保活（已被 media_kit 传递引入，显式声明直接用）
   wakelock_plus: ^1.2.0
+  # 管理台远程指令「语音播报」用系统 TTS 朗读
+  flutter_tts: ^4.2.0
 
 dev_dependencies:
   flutter_test:
@@ -69,7 +74,7 @@ msix_config:
   publisher_display_name: 小李
   identity_name: com.xiaoli.player
   publisher: CN=XiaoliPlayer
-  msix_version: 2.37.0.0
+  msix_version: 2.39.10.0
   logo_path: windows/packaging/app_icon.png
   capabilities: internetClient
   store: false

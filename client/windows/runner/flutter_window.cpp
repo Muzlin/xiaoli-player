@@ -110,6 +110,11 @@ void FlutterWindow::HandleWindowCall(
   } else if (method == "setMini") {
     SetMini(get_bool("on"));
     result->Success();
+  } else if (method == "minimizeWindow") {
+    if (hwnd) {
+      ShowWindow(hwnd, SW_MINIMIZE);
+    }
+    result->Success();
   } else if (method == "setBackgroundRun") {
     background_run_ = get_bool("on");
     result->Success();

@@ -4,6 +4,31 @@ import FlutterMacOS
 
 @main
 class AppDelegate: FlutterAppDelegate {
+  // 「打开方式」用小李播放器打开音视频文件：缓存待播路径，channel 就绪后交给 Dart 播放。
+  static var pendingFiles: [String] = []
+  static weak var openChannel: FlutterMethodChannel?
+
+  static func deliver(_ paths: [String]) {
+    let valid = paths.filter { !$0.isEmpty }
+    guard !valid.isEmpty else { return }
+    if let ch = openChannel {
+      for p in valid { ch.invokeMethod("open", arguments: p) }
+    } else {
+      pendingFiles.append(contentsOf: valid)  // app 还没起好，先缓存，Dart 起来后拉取
+    }
+  }
+
+  // 双击文件 / 「打开方式」 / 拖到 Dock 图标（macOS 10.13+ 多文件）。
+  override func application(_ application: NSApplication, open urls: [URL]) {
+    AppDelegate.deliver(urls.filter { $0.isFileURL }.map { $0.path })
+  }
+
+  // 旧式单文件回调（兜底）。
+  override func application(_ sender: NSApplication, openFile filename: String) -> Bool {
+    AppDelegate.deliver([filename])
+    return true
+  }
+
   // 后台运行：开启时关掉最后一个窗口不退出（窗口由 windowShouldClose 隐藏而非关闭）。
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return !UserDefaults.standard.bool(forKey: "backgroundRun")

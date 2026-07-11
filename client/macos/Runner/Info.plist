@@ -2,6 +2,10 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+	<key>NSCameraUsageDescription</key>
+	<string>扫一扫需要使用摄像头识别二维码</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>直播语音字幕需要使用麦克风采集你的讲解</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>
@@ -35,5 +39,28 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>音视频文件</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Alternate</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.movie</string>
+				<string>public.video</string>
+				<string>public.audiovisual-content</string>
+				<string>public.audio</string>
+				<string>public.mpeg-4</string>
+				<string>public.mpeg-4-audio</string>
+				<string>com.apple.quicktime-movie</string>
+				<string>public.avi</string>
+				<string>org.matroska.mkv</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

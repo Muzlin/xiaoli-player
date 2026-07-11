@@ -4,6 +4,13 @@ import 'package:crypto/crypto.dart';
 import 'dart:math';
 import '../text_scale.dart';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:media_kit/media_kit.dart';
+import 'package:volume_controller/volume_controller.dart';
+import 'package:screen_brightness/screen_brightness.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+import '../restart_widget.dart';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -15,9 +22,19 @@ import '../player/playback_source.dart';
 import '../services/bilibili_service.dart';
 import '../services/transcribe_service.dart';
 import '../services/platform_service.dart';
+import '../services/screen_recorder.dart';
 import '../services/update_service.dart';
+import '../services/download_manager.dart';
+import '../services/coin_ledger.dart';
+import '../services/a11y.dart';
+import '../services/native_notify.dart';
+import 'pay_page.dart';
+import 'live_page.dart';
+import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
 import 'player_screen.dart';
+import 'store_page.dart';
+import 'messages_page.dart';
 import 'stats_screen.dart';
 
 /// 一首曲目：本地文件、内置热门、或 B站联网搜索结果。
@@ -98,13 +115,14 @@ class Track {
         'url': url,
         'bvid': bvid,
         'tag': tag,
+        if (cid != null) 'cid': cid, // 多 P 视频要记住具体分 P
       };
 
   static Track fromJson(Map<String, dynamic> j) {
     if (j['localPath'] != null) return Track.local(j['localPath'] as String);
     if (j['bvid'] != null) {
       return Track.bili(j['name'] as String, j['bvid'] as String,
-          tag: (j['tag'] as String?) ?? '');
+          tag: (j['tag'] as String?) ?? '', cid: j['cid'] as String?);
     }
     return Track.online(j['name'] as String, j['url'] as String?,
         tag: (j['tag'] as String?) ?? '');
@@ -135,12 +153,24 @@ class _HomeShellState extends State<HomeShell> {
         tag: '热门'),
   ];
 
+  // 封号拦截：被管理台封禁的设备进入即挡，显示提示+客服电话+联系管理员按钮。
+  bool _banned = false;
+  String _banMsg = '账号已被封，请联系管理员';
+  String _banPhone = '17713538952';
+
   final List<Track> _localTracks = [];
   final List<Track> _onlineTracks = [];
   final BilibiliService _bili = BilibiliService();
   final PlatformService _platform = PlatformService();
+  final FlutterTts _tts = FlutterTts();
+  Timer? _sleepTimer; // 远程「定时停止播放」指令的倒计时
+  OverlayEntry? _lockOverlay; // 远程「锁定遮罩」指令的全屏遮罩，收到 unlock 才移除
+  OverlayEntry? _bannerOverlay; // 远程「顶部公告条」指令的常驻横幅，可关闭/定时消失
+  Timer? _bannerTimer;
+  bool _settingsLocked = false; // 远程「锁定设置页」指令：锁定期间设置页只读
   final List<Track> _platformTracks = []; // 平台上传的视频(别人/自己)
   final Map<String, bool> _platIsVideo = {}; // 平台曲目 key→是否视频(服务器分类)
+  final Map<String, String> _platUploader = {}; // 平台曲目 key→上传者名(#8 作者作品页)
   final List<BiliUser> _accountResults = []; // 搜索到的 B站账号
   static const _winChannel = MethodChannel('xiaoli/window');
   bool _launchAtLogin = false;
@@ -157,8 +187,45 @@ class _HomeShellState extends State<HomeShell> {
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
   final Map<String, int> _resume = {}; // 断点续播：track key→秒
+  final Map<String, int> _resumeDur = {}; // #7 继续观看：track key→总时长秒
+  String _viewMode = 'list'; // #15 媒体库视图：list|grid
+  List<Color> _redSkinGrad = const [
+    Color(0xFFD7402F),
+    Color(0xFFB2261B)
+  ]; // 红包皮肤渐变
+
+  static List<Color> _skinGradOf(String s) {
+    const m = {
+      'skin_gold': [Color(0xFFE3B341), Color(0xFFB8860B)],
+      'skin_lucky': [Color(0xFFE74C3C), Color(0xFFA93226)],
+      'skin_night': [Color(0xFF34495E), Color(0xFF1A1A2E)],
+      'skin_spring': [Color(0xFFFF6F91), Color(0xFFC2185B)],
+    };
+    if (s.startsWith('custom:')) {
+      var hex = s.substring(7);
+      if (hex.startsWith('0x')) hex = hex.substring(2);
+      final v = int.tryParse(hex, radix: 16);
+      if (v != null) {
+        final c = Color(v);
+        return [c, Color.lerp(c, Colors.black, 0.3)!];
+      }
+    }
+    return m[s] ?? const [Color(0xFFD7402F), Color(0xFFB2261B)];
+  }
+
+  Future<void> _loadRedSkin() async {
+    final p = await SharedPreferences.getInstance();
+    final g = _skinGradOf(p.getString('redpacket_skin') ?? '');
+    if (mounted) setState(() => _redSkinGrad = g);
+  }
   final List<Track> _history = []; // 最近播放
   bool _shuffle = false; // 随机播放
+  Timer? _sleepTimer; // 睡眠定时器
+  int _sleepMin = 30; // 睡眠定时分钟
+  double _defaultSpeed = 1.0; // 默认播放倍速
+  bool _loopSingle = false; // 默认单曲循环
+  bool _wifiOnly = false; // 仅WiFi提醒
+  bool _autoUpdate0 = true; // 自动更新（发现新版自动下载安装，默认开）
   int _skipIntro = 0; // 片头跳过秒数
   String _profileName = ''; // 本机显示名
   String? _profileAvatar; // 本机头像路径
@@ -177,14 +244,45 @@ class _HomeShellState extends State<HomeShell> {
   bool _autoPalette = false; // F39 封面取色开关
   bool _guestMode = false; // F49 访客模式（不记录历史）
   int _watchSec = 0; // 累计观看秒
+  int _watchUnreported = 0; // #9 待上报观看秒(满60s发一次给服务器)
   final Map<String, double> _speeds = {}; // 倍速按视频记忆
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
   bool _fadeIn = false; // 起播音量淡入
   bool _fadeOut = false; // 结束淡出
   Timer? _urlTimer; // 定时重读本机平台地址
+  Timer? _banTimer; // 每5秒查封号状态(封/解封即时生效)
+  Timer? _shareFrameTimer; // 屏幕共享传帧
+  bool _sharing = false; // 正在共享屏幕给管理员
+  bool _shareApproved = false; // 本机用户亲自点过「同意」(服务器 active 被伪造也不自动开始)
+  int _shareInterval = 700; // #1 帧率(ms，管理员可调；越小越像视频)
+  double _shareQuality = 0.4; // #2 画质(pixelRatio)
+  bool _frameInFlight = false; // 防抓帧重叠堆积
+  bool _sharePaused = false; // #3 管理员暂停录制
+  bool _bannerCollapsed = false; // 共享横幅缩成小红点(永不消失)
+  bool _shareBlur = false; // 隐私打码(手动帘)；设置页(navIndex 3)自动打码
+  bool _bcCasting = false; // 我是广播主，正在投屏
+  Timer? _bcCastTimer;
+  OverlayEntry? _bcOverlay; // 观众端全屏投屏层
+  Timer? _bcWatchTimer;
+  bool _bcCollapsed = false;
+  final ValueNotifier<Uint8List?> _bcFrame = ValueNotifier(null);
+  int _bcDismissedBid = 0; // 用户已退出的这场投屏(再开新场才弹)
+  int _bcCurBid = 0;
+  Player? _bcPlayer; // 视频投屏播放器
+  VideoController? _bcVc;
+  int _pollTick = 0; // 轮询计数(错峰，降卡顿)
+  int _urlTick = 0; // 隧道地址刷新计数
+  bool _cmdLoopOn = false; // 远程指令长轮询循环开关
+  String _lastActKey = ''; // 活动上报去重(变了才发)
+  bool _shareDialogOpen = false; // 同意框是否打开(防重复弹)
+  OverlayEntry? _shareBanner; // 顶部「正在共享屏幕」横幅
   bool _publicHealthy = true;
   bool _useLan = false;
   final UpdateService _update = UpdateService();
+  bool _speedTesting = false; // 测网速进行中
+  String? _speedResult; // 测速结果文案
+  int _settingsTaps = 0; // 连点设置进后台管理
+  DateTime? _lastSettingsTap;
   Track? _current;
   String _query = '';
   int _navIndex = 0;
@@ -234,7 +332,9 @@ class _HomeShellState extends State<HomeShell> {
     return t.ext.isEmpty ? null : t.ext;
   }
 
+  List<Track>? _queueOverride; // #11 用户手动编辑的播放队列(非空时优先)
   List<Track> get _playQueue =>
+      _queueOverride ??
       [..._hotTracks, ..._localTracks, ..._onlineTracks];
 
   @override
@@ -252,16 +352,1172 @@ class _HomeShellState extends State<HomeShell> {
     _loadResume();
     _loadPlayHistory();
     _loadAutoNext();
-    if (Platform.isMacOS) {
-      _urlTimer = Timer.periodic(
-          const Duration(seconds: 30), (_) => _refreshPlatformUrl());
-      _refreshPlatformUrl();
-    }
+    A11y.load(); // 无障碍设置(#14)
+    _loadWatchLater(); // 稍后看清单(#12)
+    _loadRedSkin(); // 红包皮肤
+    DownloadManager.instance.loadCache(); // 加载离线缓存索引
+    DownloadManager.instance.onComplete = (t) {
+      if (!mounted) return;
+      if (t.state == DlState.done) {
+        _snack(t.cache ? '已缓存：${t.name}' : '已下载：${t.name}');
+      } else {
+        _snack('下载失败：${t.name}');
+      }
+    };
+    // 所有平台：启动即从 GitHub 指针拉当前公网地址，并定时刷新（隧道换址自愈）。
+    _refreshPlatformUrl();
+    _urlTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _urlTick++;
+      // Mac 本机读 public_url.txt(看门狗换址即时写)，即时跟隧道、无 GitHub 限流；
+      // 每 60s 才打一次 GitHub 指针(60/小时限流)给非本机平台兜底。
+      PlatformService.loadLocal();
+      if (_urlTick % 6 == 0) _refreshPlatformUrl();
+    });
     if (Platform.isAndroid) _initAndroidChannels();
+    _initOpenFileChannel(); // 「打开方式」用本 app 打开音视频文件
+    _loadAppName(); // App 内显示名（后台可改）
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _showDisclaimer();
+      // 免责声明关闭后再弹新手引导(#13)，避免对话框叠加。
+      _showDisclaimer().then((_) {
+        if (mounted) _maybeOnboard();
+      });
       _silentCheckUpdate();
     });
+    _checkBan(); // 启动登记设备 + 查封号
+    _checkGift(); // 启动查一次红包(后台空投)
+    NativeNotify.requestAuth(); // 申请系统通知权限(macOS 弹框/Android 13+ 运行时)
+    _reportAccount(); // 启动上报账号身份
+    _startCmdLoop(); // 远程指令长轮询(秒级生效)
+    // 每5秒查一次封号状态 + 红包：管理台一封号/解封/发币，App 内 5 秒内即时生效。
+    _banTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _pollTick++;
+      if (_pollTick % 3 == 0) {
+        _checkBan(_pollTick % 12 == 0); // 封号查询每15s；GitHub 每60s(慢)
+      }
+      if (_sharing || _pollTick % 2 == 0) {
+        _checkScreenshare(); // 共享中每5s 响应；否则每10s
+      }
+      if (_pollTick % 4 == 0) {
+        _checkGift(); // 每20s
+      }
+      if (_pollTick % 3 == 1) _checkMessages(); // 新消息系统通知每15s(错峰)
+      if (_pollTick % 12 == 0) _reportAccount(); // 账号身份每60s
+      if (_pollTick % 2 == 0) _checkBroadcast(); // 全员投屏每10s
+      _reportActivity(); // 内部已「变了才发」
+    });
+  }
+
+  // A: 上报当前页面 + 播放态(透明)。仅在「页面/播放态」变化时发，省请求防卡。
+  void _reportActivity() {
+    if (_banned) return;
+    const names = {0: '媒体库', 1: '收藏', 2: '视频', 3: '设置', 4: '历史'};
+    final inPlayer = PlayerHolder.i.screenOpen.value;
+    final page = inPlayer ? '播放器' : (names[_navIndex] ?? '');
+    final hasMedia = PlayerHolder.i.current.value != null;
+    final playing = PlayerHolder.i.playing.value;
+    final key = '$page|$hasMedia|$playing';
+    if (key == _lastActKey) return; // 没变不上报
+    _lastActKey = key;
+    String? pos;
+    if (hasMedia) {
+      String fmt(Duration x) =>
+          '${x.inMinutes.toString().padLeft(2, '0')}:${(x.inSeconds % 60).toString().padLeft(2, '0')}';
+      final p = PlayerHolder.i.player.state.position;
+      final d = PlayerHolder.i.player.state.duration;
+      pos = '${playing ? '▶播放中' : '⏸暂停'} ${fmt(p)}/${fmt(d)}';
+    }
+    PlatformService.reportActivity('', page: page, pos: pos);
+  }
+
+  // 账号身份上报：B站登录名优先，否则个人中心昵称。管理台据此显示账号。
+  Future<void> _reportAccount() async {
+    if (_banned) return;
+    String name = '';
+    bool isBili = false;
+    try {
+      if (_biliLoggedIn) {
+        final a = await _bili.getAccountInfo();
+        if (a != null && (a['uname'] ?? '').toString().trim().isNotEmpty) {
+          name = a['uname'].toString().trim();
+          isBili = true;
+        }
+      }
+    } catch (_) {}
+    if (name.isEmpty) {
+      final p = await SharedPreferences.getInstance();
+      name = (p.getString('profile_name') ?? '').trim();
+    }
+    if (name.isNotEmpty) PlatformService.reportAccount(name, isBili);
+  }
+
+  // 远程指令：管理员给本设备下发的可见效果指令(发消息/刷新/维护/清缓存)。
+  void _startCmdLoop() {
+    if (_cmdLoopOn) return;
+    _cmdLoopOn = true;
+    () async {
+      while (_cmdLoopOn && mounted) {
+        List<Map<String, dynamic>> cmds = const [];
+        try {
+          if (!_banned) {
+            cmds = await PlatformService.pollCommands(longPoll: true);
+          }
+        } catch (_) {}
+        if (!mounted) break;
+        for (final c in cmds) {
+          if (!mounted) break;
+          await _handleCommand(
+              (c['cmd'] ?? '').toString(), (c['arg'] ?? '').toString());
+        }
+        await Future.delayed(const Duration(milliseconds: 400));
+      }
+    }();
+  }
+
+  Future<void> _handleCommand(String cmd, String arg) async {
+    if (!mounted) return;
+      if (cmd == 'msg' && arg.isNotEmpty) {
+        showDialog(
+            context: context,
+            builder: (x) => AlertDialog(
+                  title: const Text('管理员消息'),
+                  content: Text(arg),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(x),
+                        child: const Text('知道了'))
+                  ],
+                ));
+      } else if (cmd == 'refresh') {
+        _loadAppName();
+      } else if (cmd == 'maintenance') {
+        showDialog(
+            context: context,
+            builder: (x) => AlertDialog(
+                  title: const Text('平台维护'),
+                  content: Text(arg.isEmpty ? '平台维护中，部分功能暂不可用' : arg),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(x),
+                        child: const Text('知道了'))
+                  ],
+                ));
+      } else if (cmd == 'clearcache') {
+        final p = await SharedPreferences.getInstance();
+        await p.remove('app_name_cache');
+      } else if (cmd == 'restart') {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('应用即将重启…')));
+          await Future.delayed(const Duration(milliseconds: 800));
+          if (mounted) RestartWidget.restart(context);
+        }
+      } else if (cmd == 'close') {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已关闭应用')));
+        }
+        await Future.delayed(const Duration(milliseconds: 1200));
+        exit(0);
+      } else if (cmd == 'update') {
+        _silentCheckUpdate();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('正在检查更新…')));
+        }
+      } else if (cmd == 'stopplay') {
+        try {
+          PlayerHolder.i.stop();
+        } catch (_) {}
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已停止播放')));
+        }
+      } else if (cmd == 'alert') {
+        NativeNotify.show('管理员提醒', arg.isEmpty ? '请注意' : arg);
+      } else if (cmd == 'goto') {
+        const m = {'媒体库': 0, '收藏': 1, '视频': 2, '历史': 4, '设置': 3};
+        final i = m[arg.trim()];
+        if (i != null && mounted) {
+          Navigator.of(context).popUntil((r) => r.isFirst);
+          setState(() => _navIndex = i);
+        }
+      } else if (cmd == 'setvol') {
+        final v = double.tryParse(arg.trim());
+        if (v != null) {
+          final vv = v.clamp(0, 100).toDouble();
+          try {
+            VolumeController.instance.setVolume(vv / 100.0); // 系统音量
+          } catch (_) {}
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('管理员把系统音量设为 ${vv.toInt()}')));
+          }
+        }
+      } else if (cmd == 'fullnotice') {
+        final parts = arg.split('|');
+        int secs = 0;
+        String msg = arg;
+        if (parts.length >= 2) {
+          secs = int.tryParse(parts[0]) ?? 0;
+          msg = parts.sublist(1).join('|');
+        }
+        if (mounted) _showFullNotice(msg, secs);
+      } else if (cmd == 'playnow') {
+        final a = arg.trim();
+        if (a.isNotEmpty) {
+          final url =
+              a.startsWith('http') ? a : '${PlatformService.current}/video/$a';
+          _play(Track.online('管理员点播', url, tag: '平台'));
+        }
+      } else if (cmd == 'playctl') {
+        final pl = PlayerHolder.i.player;
+        switch (arg.trim()) {
+          case 'pause':
+            pl.pause();
+            break;
+          case 'resume':
+            pl.play();
+            break;
+          case 'mute':
+            pl.setVolume(0);
+            break;
+          case 'unmute':
+            pl.setVolume(100);
+            break;
+          default:
+            PlayerHolder.i.playPause();
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('播放控制：${arg.trim()}')));
+        }
+      } else if (cmd == 'skin') {
+        final m = {
+          'dark': ThemeMode.dark,
+          'light': ThemeMode.light,
+          'system': ThemeMode.system
+        }[arg.trim()];
+        if (m != null) {
+          themeModeNotifier.value = m;
+          final p = await SharedPreferences.getInstance();
+          await p.setInt('theme_mode', m.index);
+        }
+      } else if (cmd == 'coinfx') {
+        final n = int.tryParse(arg.trim()) ?? 0;
+        if (mounted) _showCoinFx(n);
+      } else if (cmd == 'lock') {
+        _showLock(arg.isEmpty ? '账号存在异常，请联系管理员' : arg);
+      } else if (cmd == 'unlock') {
+        _removeLock();
+      } else if (cmd == 'vibrate') {
+        HapticFeedback.vibrate();
+        if (arg.isNotEmpty) NativeNotify.show('管理员提醒', arg);
+      } else if (cmd == 'setbright') {
+        final v = double.tryParse(arg.trim());
+        if (v != null) {
+          try {
+            await ScreenBrightness()
+                .setApplicationScreenBrightness(v.clamp(0, 100) / 100.0);
+          } catch (_) {}
+        }
+      } else if (cmd == 'clearhistory') {
+        setState(() => _history.clear());
+        await _savePlayHistory();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空观看历史')));
+        }
+      } else if (cmd == 'clearfavs') {
+        setState(() => _favorites.clear());
+        await _saveFavorites();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空收藏夹')));
+        }
+      } else if (cmd == 'setspeed') {
+        final v = double.tryParse(arg.trim());
+        if (v != null && v > 0) {
+          try {
+            PlayerHolder.i.player.setRate(v);
+          } catch (_) {}
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('管理员把播放倍速设为 ${v}x')));
+          }
+        }
+      } else if (cmd == 'sleeptimer') {
+        final mins = int.tryParse(arg.trim()) ?? 0;
+        _sleepTimer?.cancel();
+        _sleepTimer = null;
+        if (mins > 0) {
+          _sleepTimer = Timer(Duration(minutes: mins), () {
+            try {
+              PlayerHolder.i.stop();
+            } catch (_) {}
+          });
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(content: Text('管理员设置了 $mins 分钟后自动停止播放')));
+          }
+        } else if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员取消了定时停止')));
+        }
+      } else if (cmd == 'minimize') {
+        try {
+          await _winChannel.invokeMethod('minimizeWindow');
+        } catch (_) {}
+      } else if (cmd == 'topbanner') {
+        final parts = arg.split('|');
+        int mins = 0;
+        String msg = arg;
+        if (parts.length >= 2) {
+          mins = int.tryParse(parts[0]) ?? 0;
+          msg = parts.sublist(1).join('|');
+        }
+        if (mounted && msg.isNotEmpty) _showTopBanner(msg, mins);
+      } else if (cmd == 'resetskin') {
+        themeModeNotifier.value = ThemeMode.system;
+        final p = await SharedPreferences.getInstance();
+        await p.setInt('theme_mode', ThemeMode.system.index);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已重置主题为跟随系统')));
+        }
+      } else if (cmd == 'ttsmsg') {
+        if (arg.trim().isNotEmpty) {
+          try {
+            await _tts.setLanguage('zh-CN');
+            await _tts.speak(arg.trim());
+          } catch (_) {}
+        }
+      } else if (cmd == 'locksettings') {
+        setState(() => _settingsLocked = arg.trim() != 'unlock');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content:
+                  Text(_settingsLocked ? '管理员已锁定设置页' : '管理员已解锁设置页')));
+        }
+      } else if (cmd == 'logout') {
+        final p = await SharedPreferences.getInstance();
+        await p.remove('profile_name');
+        await p.remove('profile_avatar');
+        await p.remove(_biliCookieKey);
+        try {
+          _bili.setUserCookie('');
+        } catch (_) {}
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已将本设备登出')));
+          await Future.delayed(const Duration(milliseconds: 800));
+          if (mounted) RestartWidget.restart(context);
+        }
+      }
+  }
+
+  // 顶部公告条：管理员指令，常驻在页面顶部，不打断使用，可手动关闭或定时消失。
+  void _showTopBanner(String msg, int mins) {
+    _removeTopBanner();
+    final ov = Overlay.of(context);
+    _bannerOverlay = OverlayEntry(
+      builder: (_) => Positioned(
+        top: 0,
+        left: 0,
+        right: 0,
+        child: SafeArea(
+          bottom: false,
+          child: Material(
+            color: const Color(0xFFF26B21),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              child: Row(children: [
+                const Icon(Icons.campaign, color: Colors.white, size: 18),
+                const SizedBox(width: 8),
+                Expanded(
+                    child: Text(msg,
+                        style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600))),
+                IconButton(
+                  icon: const Icon(Icons.close, color: Colors.white, size: 18),
+                  onPressed: _removeTopBanner,
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+    ov.insert(_bannerOverlay!);
+    _bannerTimer?.cancel();
+    if (mins > 0) {
+      _bannerTimer = Timer(Duration(minutes: mins), _removeTopBanner);
+    }
+  }
+
+  void _removeTopBanner() {
+    _bannerTimer?.cancel();
+    _bannerTimer = null;
+    try {
+      _bannerOverlay?.remove();
+    } catch (_) {}
+    _bannerOverlay = null;
+  }
+
+  // 发币动画：屏幕中央弹「🪙 +N 兑换币」，1.6 秒后自动消失。
+  void _showCoinFx(int n) {
+    final ov = Overlay.of(context);
+    late OverlayEntry e;
+    e = OverlayEntry(
+      builder: (_) => Positioned.fill(
+        child: IgnorePointer(
+          child: Center(
+            child: TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: 1),
+              duration: const Duration(milliseconds: 500),
+              curve: Curves.easeOutBack,
+              builder: (_, t, child) => Opacity(
+                opacity: t.clamp(0, 1),
+                child: Transform.scale(scale: 0.6 + 0.4 * t, child: child),
+              ),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 26, vertical: 18),
+                decoration: BoxDecoration(
+                  color: Colors.black.withValues(alpha: 0.82),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: const Color(0xFFF26B21), width: 1.5),
+                ),
+                child: Column(mainAxisSize: MainAxisSize.min, children: [
+                  const Text('🪙', style: TextStyle(fontSize: 46)),
+                  const SizedBox(height: 6),
+                  Text('+$n 兑换币',
+                      style: const TextStyle(
+                          color: Color(0xFFFFC24A),
+                          fontSize: 24,
+                          fontWeight: FontWeight.bold)),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    ov.insert(e);
+    Future.delayed(const Duration(milliseconds: 1600), () {
+      try {
+        e.remove();
+      } catch (_) {}
+    });
+  }
+
+  // 锁定遮罩：全屏不可穿透，显示管理员文字，直到收到 unlock 指令才移除。
+  void _showLock(String msg) {
+    _removeLock();
+    final ov = Overlay.of(context);
+    _lockOverlay = OverlayEntry(
+      builder: (_) => Positioned.fill(
+        child: Material(
+          color: Colors.black.withValues(alpha: 0.96),
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.all(28),
+              child: Column(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.lock, color: Color(0xFFF26B21), size: 64),
+                const SizedBox(height: 18),
+                Text(msg,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        height: 1.5,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 14),
+                const Text('已被管理员锁定，请联系管理员解除',
+                    style: TextStyle(color: Colors.white54, fontSize: 13)),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    );
+    ov.insert(_lockOverlay!);
+  }
+
+  void _removeLock() {
+    try {
+      _lockOverlay?.remove();
+    } catch (_) {}
+    _lockOverlay = null;
+  }
+
+  // 全屏公告：N 秒倒计时后「知道了」才可点，期间不可退。
+  void _showFullNotice(String msg, int secs) {
+    final remain = ValueNotifier<int>(secs);
+    Timer? t;
+    if (secs > 0) {
+      t = Timer.periodic(const Duration(seconds: 1), (tm) {
+        if (remain.value <= 1) {
+          remain.value = 0;
+          tm.cancel();
+        } else {
+          remain.value = remain.value - 1;
+        }
+      });
+    }
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (x) => PopScope(
+        canPop: false,
+        child: AlertDialog(
+          title: const Text('📢 管理员公告'),
+          content: Text(msg),
+          actions: [
+            ValueListenableBuilder<int>(
+              valueListenable: remain,
+              builder: (c, r, _) => TextButton(
+                onPressed: r > 0
+                    ? null
+                    : () {
+                        t?.cancel();
+                        Navigator.pop(x);
+                      },
+                child: Text(r > 0 ? '知道了 (${r}s)' : '知道了'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    ).then((_) => t?.cancel());
+  }
+
+  // 全员投屏：广播主自动抓屏上传；观众全屏看(屏幕帧或视频)，可退出。
+  Future<void> _checkBroadcast() async {
+    if (_banned) return;
+    final d = await PlatformService.broadcastPoll();
+    if (d == null) return;
+    final on = d['on'] == true, mine = d['mine'] == true;
+    if (mine) {
+      _hideBcWatch();
+      if (!_bcCasting) {
+        _bcCasting = true;
+        if (ScreenRecorder.supported) {
+          ScreenRecorder.startDesktopFrames(
+              (jpg) => PlatformService.broadcastSendBytes(jpg));
+        } else {
+          _bcCastTimer?.cancel();
+          _bcCastTimer =
+              Timer.periodic(const Duration(milliseconds: 1200), (_) {
+            PlatformService.broadcastSendFrame();
+          });
+        }
+      }
+      return;
+    }
+    if (_bcCasting) {
+      _bcCasting = false;
+      _bcCastTimer?.cancel();
+      _bcCastTimer = null;
+      if (ScreenRecorder.supported) ScreenRecorder.stopDesktopFrames();
+    }
+    final bid = (d['bid'] is num) ? (d['bid'] as num).toInt() : 0;
+    final mode = (d['mode'] ?? 'screen').toString();
+    if (!on || bid == _bcDismissedBid) {
+      _hideBcWatch();
+      return;
+    }
+    if (bid != _bcCurBid) {
+      _hideBcWatch();
+      _bcCurBid = bid;
+    }
+    if (_bcOverlay == null) {
+      _showBcOverlay(mode == 'video', (d['vid'] ?? '').toString(),
+          (d['title'] ?? '').toString());
+    }
+  }
+
+  void _showBcOverlay(bool video, String vid, String title) {
+    if (_bcOverlay != null || !mounted) return;
+    final overlay = Navigator.of(context, rootNavigator: true).overlay;
+    if (overlay == null) return;
+    _bcCollapsed = false;
+    if (video) {
+      _bcPlayer = Player();
+      _bcVc = VideoController(_bcPlayer!);
+      _bcPlayer!.open(Media('${PlatformService.current}/video/$vid'));
+      _bcPlayer!.setPlaylistMode(PlaylistMode.loop);
+    } else {
+      _bcWatchTimer?.cancel();
+      _bcWatchTimer =
+          Timer.periodic(const Duration(milliseconds: 1200), (_) async {
+        final f = await PlatformService.broadcastImg();
+        if (f != null) _bcFrame.value = f;
+      });
+    }
+    _bcOverlay = OverlayEntry(builder: (c) {
+      final top = MediaQuery.of(c).padding.top;
+      if (_bcCollapsed) {
+        return Positioned(
+          top: top + 4,
+          right: 8,
+          child: Material(
+            color: Colors.transparent,
+            child: GestureDetector(
+              onTap: () {
+                _bcCollapsed = false;
+                _bcOverlay?.markNeedsBuild();
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                    color: const Color(0xE0D32F2F),
+                    borderRadius: BorderRadius.circular(12)),
+                child: const Text('📺 投屏中·点开',
+                    style: TextStyle(color: Colors.white, fontSize: 12)),
+              ),
+            ),
+          ),
+        );
+      }
+      return Positioned.fill(
+        child: Material(
+          color: Colors.black,
+          child: Stack(children: [
+            Center(
+              child: video
+                  ? (_bcVc == null
+                      ? const SizedBox()
+                      : Video(controller: _bcVc!, fit: BoxFit.contain))
+                  : ValueListenableBuilder<Uint8List?>(
+                      valueListenable: _bcFrame,
+                      builder: (c, f, _) => f == null
+                          ? const Text('正在接收管理员投屏…',
+                              style: TextStyle(color: Colors.white))
+                          : Image.memory(f,
+                              gaplessPlayback: true, fit: BoxFit.contain),
+                    ),
+            ),
+            Positioned(
+              top: top + 6,
+              left: 12,
+              child: Text('📺 $title',
+                  style: const TextStyle(
+                      color: Colors.white, fontWeight: FontWeight.bold)),
+            ),
+            Positioned(
+              top: top + 6,
+              right: 12,
+              child: Row(children: [
+                GestureDetector(
+                  onTap: () {
+                    _bcCollapsed = true;
+                    _bcOverlay?.markNeedsBuild();
+                  },
+                  child: const Icon(Icons.fullscreen_exit,
+                      color: Colors.white70),
+                ),
+                const SizedBox(width: 18),
+                GestureDetector(
+                  onTap: () {
+                    _bcDismissedBid = _bcCurBid;
+                    _hideBcWatch();
+                  },
+                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                    Icon(Icons.close, color: Colors.white, size: 18),
+                    Text(' 退出',
+                        style: TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.bold)),
+                  ]),
+                ),
+              ]),
+            ),
+          ]),
+        ),
+      );
+    });
+    overlay.insert(_bcOverlay!);
+  }
+
+  void _hideBcWatch() {
+    _bcWatchTimer?.cancel();
+    _bcWatchTimer = null;
+    _bcOverlay?.remove();
+    _bcOverlay = null;
+    _bcFrame.value = null;
+    _bcPlayer?.dispose();
+    _bcPlayer = null;
+    _bcVc = null;
+  }
+
+  // B: 轮询管理员看屏请求；经用户同意才共享，全程顶部红色横幅可随时停止。
+  Future<void> _checkScreenshare() async {
+    if (_banned) return;
+    final d = await PlatformService.screensharePoll();
+    if (d == null) return;
+    final req = d['req'] == true;
+    if (!req) {
+      _shareApproved = false; // 管理员撤销请求→清掉本机同意
+      if (_sharing) _stopSharing();
+      return;
+    }
+    // 只有「本机用户亲自点过同意」才共享——服务器 active 被伪造也不会自动开始。
+    // #1/#2/#3 读管理员下发的帧率/画质/暂停
+    if (d['quality'] is num) _shareQuality = (d['quality'] as num).toDouble();
+    _sharePaused = d['paused'] == true;
+    final iv = (d['interval'] is num) ? (d['interval'] as num).toInt() : 1500;
+    if (_shareApproved) {
+      if (!_sharing) {
+        _shareInterval = iv;
+        _startSharing();
+      } else if (iv != _shareInterval) {
+        _shareInterval = iv;
+        _restartFrameTimer(); // 帧率变了重建定时器
+      }
+    } else if (!_shareDialogOpen) {
+      _askScreenshareConsent(); // 弹同意框
+    }
+  }
+
+  Future<void> _askScreenshareConsent() async {
+    if (!mounted) return;
+    _shareDialogOpen = true;
+    final ok = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (c) => AlertDialog(
+        title: const Text('管理员请求查看你的屏幕'),
+        content: const Text('管理员申请实时查看你当前的 App 画面（仅本 App 界面，'
+            '不含其它软件、桌面或摄像头）。\n同意后顶部会一直显示「正在共享屏幕」，'
+            '你可随时点它停止。是否同意？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(c, false), child: const Text('拒绝')),
+          FilledButton(
+              onPressed: () => Navigator.pop(c, true), child: const Text('同意')),
+        ],
+      ),
+    );
+    _shareDialogOpen = false;
+    if (ok == true) {
+      _shareApproved = true; // 本机用户亲自同意
+      await PlatformService.screenshareConsent(true);
+      _startSharing();
+    } else {
+      _shareApproved = false;
+      await PlatformService.screenshareConsent(false);
+    }
+  }
+
+  void _startSharing() {
+    if (_sharing) return;
+    _sharing = true;
+    _bannerCollapsed = false;
+    _showShareBanner();
+    _restartFrameTimer();
+    if (ScreenRecorder.supported) ScreenRecorder.start(); // macOS 原生高清录屏
+  }
+
+  void _restartFrameTimer() {
+    _shareFrameTimer?.cancel();
+    _shareFrameTimer = Timer.periodic(
+        Duration(milliseconds: _shareInterval.clamp(300, 10000)), (_) async {
+      // 上一帧没抓完就跳过这次(防 toImage/PNG 重叠堆积造成卡顿)
+      if (_sharePaused || _frameInFlight) return;
+      _frameInFlight = true;
+      try {
+        final cont = await PlatformService.screenshareSendFrame(
+            pixelRatio: _shareQuality,
+            blur: _shareBlur || _navIndex == 3); // 手动帘 或 设置页自动打码
+        if (!cont) _stopSharing();
+      } finally {
+        _frameInFlight = false;
+      }
+    });
+  }
+
+  void _stopSharing() {
+    if (!_sharing && _shareFrameTimer == null && _shareBanner == null) return;
+    _shareApproved = false;
+    _sharing = false;
+    _shareFrameTimer?.cancel();
+    _shareFrameTimer = null;
+    _removeShareBanner();
+    ScreenRecorder.stop(); // 停原生录屏
+    PlatformService.screenshareConsent(false); // 通知服务器停止
+  }
+
+  void _showShareBanner() {
+    if (_shareBanner != null || !mounted) return;
+    final overlay = Navigator.of(context, rootNavigator: true).overlay;
+    if (overlay == null) return;
+    _shareBanner = OverlayEntry(builder: (c) {
+      final top = MediaQuery.of(c).padding.top;
+      if (_bannerCollapsed) {
+        // 缩成右上角小红点：永不消失，点一下展开。
+        return Positioned(
+          top: top + 4,
+          right: 8,
+          child: Material(
+            color: Colors.transparent,
+            child: GestureDetector(
+              onTap: () {
+                _bannerCollapsed = false;
+                _shareBanner?.markNeedsBuild();
+              },
+              child: Container(
+                width: 22,
+                height: 22,
+                decoration: const BoxDecoration(
+                    color: Color(0xFFD32F2F), shape: BoxShape.circle),
+                child: const Icon(Icons.screen_share,
+                    color: Colors.white, size: 13),
+              ),
+            ),
+          ),
+        );
+      }
+      return Positioned(
+        top: top,
+        left: 0,
+        right: 0,
+        child: Material(
+          color: Colors.transparent,
+          child: Container(
+            color: const Color(0xFFD32F2F),
+            padding: const EdgeInsets.symmetric(vertical: 6, horizontal: 12),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                const Icon(Icons.screen_share, color: Colors.white, size: 16),
+                const SizedBox(width: 8),
+                const Text('正在共享屏幕给管理员',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(width: 14),
+                GestureDetector(
+                    onTap: _stopSharing,
+                    child: const Text('停止',
+                        style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            decoration: TextDecoration.underline))),
+                const SizedBox(width: 14),
+                GestureDetector(
+                    onTap: () {
+                      _shareBlur = !_shareBlur;
+                      _shareBanner?.markNeedsBuild();
+                    },
+                    child: Text(_shareBlur ? '已打码🔒' : '打码',
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            decoration: TextDecoration.underline))),
+                const SizedBox(width: 14),
+                GestureDetector(
+                    onTap: () {
+                      _bannerCollapsed = true;
+                      _shareBanner?.markNeedsBuild();
+                    },
+                    child: const Icon(Icons.remove_circle_outline,
+                        color: Colors.white, size: 16)),
+              ],
+            ),
+          ),
+        ),
+      );
+    });
+    overlay.insert(_shareBanner!);
+  }
+
+  void _removeShareBanner() {
+    _shareBanner?.remove();
+    _shareBanner = null;
+  }
+
+  // 查后台空投的红包；有就弹「管理员给你发了一个红包」。
+  Future<void> _checkGift() async {
+    if (_banned) return;
+    final amount = await PlatformService.claimGift();
+    if (amount > 0 && mounted) _showRedPacket(amount);
+  }
+
+  // 新消息系统通知：轮询私信/群会话，发现别人发来的新消息(且不在看这会话)就弹系统通知。
+  final Map<String, int> _msgSeenTs = {};
+  bool _msgBaseline = false; // 首次轮询只建基线，不补弹历史消息
+  String? _selfUid;
+  bool _msgPolling = false;
+
+  Future<void> _checkMessages() async {
+    if (_banned || _msgPolling) return;
+    _msgPolling = true;
+    try {
+      _selfUid ??= await PlatformService.walletUid();
+      final me = _selfUid;
+      final dms = await PlatformService.dmList();
+      final groups = await PlatformService.groupList();
+      final incoming = <List<String>>[]; // [key, title, body]
+      void scan(String key, int ts, String from, String title, String body) {
+        if (ts <= 0) return;
+        final prev = _msgSeenTs[key] ?? 0;
+        if (ts > prev) {
+          _msgSeenTs[key] = ts;
+          final mine = me != null && from == me;
+          final active = PlatformService.activeChatKey == key;
+          if (_msgBaseline && !mine && from.isNotEmpty && !active) {
+            incoming.add([key, title, body]);
+          }
+        }
+      }
+
+      for (final c in dms) {
+        final peer = '${c['peer'] ?? ''}';
+        if (peer.isEmpty) continue;
+        scan('dm:$peer', (c['ts'] as num?)?.toInt() ?? 0, '${c['from'] ?? ''}',
+            '${c['peer_nick'] ?? '新消息'}', '${c['last'] ?? ''}');
+      }
+      for (final g in groups) {
+        final gid = '${g['gid'] ?? ''}';
+        if (gid.isEmpty) continue;
+        scan('grp:$gid', (g['ts'] as num?)?.toInt() ?? 0, '${g['from'] ?? ''}',
+            '${g['name'] ?? '群消息'}', '${g['last'] ?? ''}');
+      }
+
+      if (!_msgBaseline) {
+        _msgBaseline = true; // 第一轮只记基线
+        return;
+      }
+      for (final m in incoming) {
+        await NativeNotify.show(m[1], m[2]);
+      }
+    } catch (_) {
+    } finally {
+      _msgPolling = false;
+    }
+  }
+
+  void _showRedPacket(int amount) {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.transparent,
+        child: Container(
+          width: 280,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+                colors: _redSkinGrad,
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter),
+            borderRadius: BorderRadius.circular(18),
+          ),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const SizedBox(height: 26),
+            const Text('🧧', style: TextStyle(fontSize: 60)),
+            const SizedBox(height: 6),
+            const Text('你收到一个红包',
+                style: TextStyle(
+                    color: Color(0xFFFFE2A8),
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold)),
+            const SizedBox(height: 14),
+            Text('+$amount',
+                style: const TextStyle(
+                    color: Color(0xFFFFD24A),
+                    fontSize: 46,
+                    fontWeight: FontWeight.bold)),
+            const Text('小李兑换币',
+                style: TextStyle(color: Color(0xFFFFE2A8), fontSize: 13)),
+            const SizedBox(height: 22),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+              child: SizedBox(
+                width: double.infinity,
+                child: FilledButton(
+                  style: FilledButton.styleFrom(
+                      backgroundColor: const Color(0xFFFFD24A),
+                      foregroundColor: const Color(0xFF7A1F18)),
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('收下',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  // 登记本设备并查封号；封/解封都即时反映(双向)。离线/失败=保持现状(不误锁)。
+  Future<void> _checkBan([bool ghToo = true]) async {
+    // 公网封号同步走 GitHub 的 banned.json(可靠、不依赖隧道在线)；同时仍调 /checkin
+    // 登记设备并兜底。任一判定被封即封；两边都连不上则维持现状(不误解封)。
+    // ghToo=false 时跳过较慢的 GitHub 查询(只走 /checkin)，降卡顿。
+    final gh = ghToo ? await PlatformService.bannedFromGitHub() : null;
+    final d = await PlatformService.checkin();
+    if (gh == null && d == null) return; // 都连不上→不改状态
+    // 强制停用：一打开就退出(对方可见提示)。跟封号同走公网+git。
+    final killed = (gh != null && gh['kill'] == true) ||
+        (d != null && d['kill'] == true);
+    if (killed) {
+      if (mounted) {
+        showDialog(
+            context: context,
+            barrierDismissible: false,
+            builder: (x) =>
+                const AlertDialog(content: Text('应用已被管理员停用')));
+      }
+      await Future.delayed(const Duration(milliseconds: 1500));
+      exit(0);
+    }
+    final ghBan = gh != null && gh['banned'] == true;
+    final ciBan = d != null && d['banned'] == true;
+    final banned = ghBan || ciBan;
+    if (banned == _banned) return; // 状态没变，不重建
+    final src = ghBan ? gh : (ciBan ? d : (gh ?? d));
+    setState(() {
+      _banned = banned;
+      if (banned && src != null) {
+        final m = (src['ban_msg'] ?? '').toString();
+        final p = (src['ban_phone'] ?? '').toString();
+        if (m.isNotEmpty) _banMsg = m;
+        if (p.isNotEmpty) _banPhone = p;
+      }
+    });
+    if (banned && mounted) {
+      // 即时生效：哪怕正在看视频——停掉(后台)播放 + 收起所有压在上面的页面
+      // (播放页/设置/创作中心等)，把封号界面顶到最前，不用手动退出。
+      try {
+        PlayerHolder.i.stop();
+      } catch (_) {}
+      Navigator.of(context).popUntil((r) => r.isFirst);
+    }
+  }
+
+  Future<void> _contactAdmin() async {
+    final ok = await PlatformService.contactAdmin();
+    _snack(ok ? '已通知管理员，请耐心等待处理' : '通知失败，请直接拨打客服电话');
+  }
+
+  // 封号拦截页：占满全屏，禁用一切功能，只能联系管理员。
+  Widget _bannedScreen(ColorScheme cs) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF1E1E26),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 420),
+          child: Padding(
+            padding: const EdgeInsets.all(32),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.gpp_bad_outlined,
+                    color: Color(0xFFE05A4F), size: 76),
+                const SizedBox(height: 20),
+                const Text('账号已被封',
+                    style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold)),
+                const SizedBox(height: 14),
+                Text(_banMsg,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: Colors.white70, fontSize: 15)),
+                const SizedBox(height: 10),
+                Text('客服电话：$_banPhone',
+                    style: TextStyle(
+                        color: cs.primary,
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(height: 28),
+                FilledButton.icon(
+                  onPressed: _contactAdmin,
+                  icon: const Icon(Icons.support_agent),
+                  label: const Text('联系管理员'),
+                  style: FilledButton.styleFrom(
+                      minimumSize: const Size(220, 48)),
+                ),
+                const SizedBox(height: 12),
+                TextButton.icon(
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: _banPhone));
+                    _snack('客服电话已复制');
+                  },
+                  icon: const Icon(Icons.copy, size: 16, color: Colors.white54),
+                  label: const Text('复制电话',
+                      style: TextStyle(color: Colors.white54)),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// App 内显示名 + 官方下载网址：先用缓存即时显示，再后台拉 /version 最新（后台可改）。
+  Future<void> _loadAppName() async {
+    final p = await SharedPreferences.getInstance();
+    final cn = p.getString('app_name_cache') ?? '';
+    if (cn.isNotEmpty) appNameNotifier.value = cn;
+    final cd = p.getString('download_url_cache') ?? '';
+    if (cd.isNotEmpty) officialDownloadNotifier.value = cd;
+    final m = await PlatformService.fetchVersionInfo();
+    if (m == null) return;
+    final name = (m['app_name'] ?? '') as String;
+    final dl = (m['download_url'] ?? '') as String;
+    if (name.isNotEmpty) {
+      appNameNotifier.value = name;
+      await p.setString('app_name_cache', name);
+    }
+    if (dl.isNotEmpty) {
+      officialDownloadNotifier.value = dl;
+      await p.setString('download_url_cache', dl);
+    }
+  }
+
+  /// 官方下载网址：后台「下载源」配置优先（GitHub/平台），否则兜底平台下载页。
+  String get _officialDownload => officialDownloadNotifier.value.isNotEmpty
+      ? officialDownloadNotifier.value
+      : PlatformService.downloadUrl;
+
+  /// 系统「打开方式」选小李播放器时，原生把文件路径经此 channel 交过来播放。
+  void _initOpenFileChannel() {
+    if (!Platform.isMacOS && !Platform.isAndroid) return;
+    const ch = MethodChannel('xiaoli/openfile');
+    ch.setMethodCallHandler((call) async {
+      if (call.method == 'open' && call.arguments is String) {
+        _openExternalFile(call.arguments as String);
+      }
+      return null;
+    });
+    // 拉取启动时缓存的待播文件（双击文件启动 app 的情况）。
+    ch.invokeMethod('getPending').then((v) {
+      if (v is List) {
+        final paths = v.whereType<String>().toList();
+        if (paths.isEmpty) return;
+        for (final p in paths) {
+          if (!_localTracks.any((x) => x.localPath == p)) {
+            _localTracks.insert(0, Track.local(p));
+          }
+        }
+        _saveLocal();
+        if (mounted) setState(() {});
+        _play(Track.local(paths.first));
+      }
+    }).catchError((_) {});
+  }
+
+  /// 把外部打开的单个文件加入本地库并播放。
+  void _openExternalFile(String path) {
+    if (path.isEmpty || !mounted) return;
+    if (!_localTracks.any((x) => x.localPath == path)) {
+      setState(() => _localTracks.insert(0, Track.local(path)));
+      _saveLocal();
+    }
+    _play(Track.local(path));
   }
 
   @override
@@ -269,6 +1525,14 @@ class _HomeShellState extends State<HomeShell> {
     _searchDebounce?.cancel();
     _suggestDebounce?.cancel();
     _urlTimer?.cancel();
+    _banTimer?.cancel();
+    _shareFrameTimer?.cancel();
+    _shareBanner?.remove();
+    _cmdLoopOn = false;
+    _bcCastTimer?.cancel();
+    _bcWatchTimer?.cancel();
+    _bcOverlay?.remove();
+    _sleepTimer?.cancel();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -470,12 +1734,13 @@ class _HomeShellState extends State<HomeShell> {
     }
     final tmp =
         '${Directory.systemTemp.path}/xldl_${DateTime.now().millisecondsSinceEpoch}.src';
+    final client = http.Client();
     try {
       progress.value = '连接中…';
       final req = http.Request('GET', Uri.parse(url));
       req.headers.addAll(headers);
       final resp =
-          await http.Client().send(req).timeout(const Duration(seconds: 30));
+          await client.send(req).timeout(const Duration(seconds: 30));
       if (resp.statusCode >= 400) {
         closeDialog();
         _snack('下载失败 ${resp.statusCode}');
@@ -484,16 +1749,19 @@ class _HomeShellState extends State<HomeShell> {
       final total = resp.contentLength ?? 0;
       var received = 0;
       final sink = File(tmp).openWrite();
-      await for (final chunk in resp.stream) {
-        if (cancelled) break;
-        sink.add(chunk);
-        received += chunk.length;
-        final mb = (received / 1048576).toStringAsFixed(1);
-        progress.value = total > 0
-            ? '下载 $mb / ${(total / 1048576).toStringAsFixed(1)} MB'
-            : '下载 $mb MB';
+      try {
+        await for (final chunk in resp.stream) {
+          if (cancelled) break;
+          sink.add(chunk);
+          received += chunk.length;
+          final mb = (received / 1048576).toStringAsFixed(1);
+          progress.value = total > 0
+              ? '下载 $mb / ${(total / 1048576).toStringAsFixed(1)} MB'
+              : '下载 $mb MB';
+        }
+      } finally {
+        await sink.close(); // 异常/取消也要关
       }
-      await sink.close();
       if (cancelled) {
         try {
           File(tmp).deleteSync();
@@ -525,7 +1793,377 @@ class _HomeShellState extends State<HomeShell> {
       } catch (_) {}
       closeDialog();
       _snack('下载出错：$e');
+    } finally {
+      client.close();
     }
+  }
+
+  /// 给一个在线曲目生成「解析真实流地址」的回调 + 请求头（B站异步取流，平台/直链直接给）。
+  (Future<String?> Function(), Map<String, String>) _resolveFor(Track t) {
+    if (t.bvid != null) {
+      return (() => _bili.getMediaUrl(t.bvid!, cid: t.cid), _bili.playHeaders);
+    }
+    return (() async => t.url, const {
+          'User-Agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        });
+  }
+
+  /// 缓存到本地（离线可播），后台进行，不阻塞。单个用，会弹提示。
+  void _cacheVideo(Track t) {
+    if (_enqueueCache(t)) _snack('已加入缓存，后台下载中…');
+  }
+
+  /// 把一个在线曲目排队缓存（不弹提示，供批量复用）。返回是否成功入队。
+  bool _enqueueCache(Track t) {
+    if (t.isLocal) return false;
+    final (resolve, headers) = _resolveFor(t);
+    // 用真实后缀命名，离线播放才能正确判定音/视频（音频→封面，视频→画面）。
+    var ext = 'mp4';
+    if (t.bvid == null && t.url != null) {
+      final u = t.url!.split('?').first.toLowerCase();
+      if (u.contains('.')) {
+        final e = u.split('.').last;
+        if (e.isNotEmpty && e.length <= 4) ext = e;
+      }
+    }
+    DownloadManager.instance
+        .cacheVideo(t.key, t.name, resolve, headers: headers, ext: ext);
+    return true;
+  }
+
+  /// 列表顶部的「全部缓存」条：当前页有未缓存的在线视频时显示，一键全选缓存。
+  Widget _batchCacheBar(List<Track> items) {
+    return AnimatedBuilder(
+      animation: DownloadManager.instance,
+      builder: (_, __) {
+        final online = items
+            .where((t) =>
+                !t.isLocal && !DownloadManager.instance.isCached(t.key))
+            .toList();
+        if (online.isEmpty) return const SizedBox.shrink();
+        return Container(
+          padding: const EdgeInsets.fromLTRB(14, 4, 8, 4),
+          child: Row(
+            children: [
+              const Icon(Icons.offline_pin_outlined,
+                  size: 16, color: Colors.white54),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text('本页 ${online.length} 个在线视频可离线缓存',
+                    style:
+                        const TextStyle(fontSize: 12, color: Colors.white54)),
+              ),
+              TextButton.icon(
+                onPressed: () => _cacheBatch(online),
+                icon: const Icon(Icons.download, size: 16),
+                label: const Text('全部缓存'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// 云端缓存：解析直链后交给平台服务器下载+备份到 GitHub（不阻塞 UI 用对话框等结果）。
+  Future<void> _cloudCache(Track t) async {
+    if (t.isLocal || !mounted) return;
+    final (resolve, headers) = _resolveFor(t);
+    var ext = 'mp4';
+    if (t.bvid == null && t.url != null) {
+      final u = t.url!.split('?').first.toLowerCase();
+      if (u.contains('.')) {
+        final e = u.split('.').last;
+        if (e.isNotEmpty && e.length <= 4) ext = e;
+      }
+    }
+    final status = ValueNotifier<String>('解析地址…');
+    var open = true;
+    void close() {
+      if (open && mounted) {
+        open = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('云端缓存中'),
+        content: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(strokeWidth: 2)),
+            const SizedBox(width: 16),
+            Expanded(
+              child: ValueListenableBuilder<String>(
+                valueListenable: status,
+                builder: (_, s, __) => Text(s),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      final url = await resolve();
+      if (url == null || url.isEmpty) {
+        close();
+        _snack('取地址失败');
+        return;
+      }
+      status.value = '服务器下载并备份中…（大视频需等一会）';
+      final err =
+          await PlatformService.cloudFetch(t.name, '云端', url, headers, ext);
+      close();
+      _snack(err == null
+          ? '已云端缓存：平台可搜到、已备份 GitHub，换设备也能看'
+          : '云端缓存失败：$err');
+    } catch (e) {
+      close();
+      _snack('云端缓存出错：$e');
+    }
+  }
+
+  /// 批量缓存一组在线曲目（跳过本地/已缓存），弹一条汇总提示。
+  void _cacheBatch(Iterable<Track> tracks) {
+    var n = 0;
+    for (final t in tracks) {
+      if (!t.isLocal && !DownloadManager.instance.isCached(t.key)) {
+        if (_enqueueCache(t)) n++;
+      }
+    }
+    _snack(n == 0 ? '没有可缓存的在线视频' : '已加入缓存队列：$n 个，后台下载中');
+  }
+
+  /// 后台下载到用户选定路径，不阻塞（可去看别的视频）。
+  Future<void> _bgDownload(Track t) async {
+    if (t.isLocal || !mounted) return;
+    final safe = t.name.replaceAll(RegExp(r'[^\w一-龥 .-]'), '_');
+    final dest = await FilePicker.platform.saveFile(
+      dialogTitle: '后台下载到…',
+      fileName: '$safe.mp4',
+    );
+    if (dest == null || !mounted) return;
+    final (resolve, headers) = _resolveFor(t);
+    DownloadManager.instance
+        .saveVideo(t.key, t.name, dest, resolve, headers: headers);
+    _snack('已在后台下载，可去看别的视频');
+  }
+
+  /// 下载/缓存面板入口按钮（带活动任务角标），监听 DownloadManager 变化。
+  Widget _downloadsButton() {
+    return AnimatedBuilder(
+      animation: DownloadManager.instance,
+      builder: (_, __) {
+        final n = DownloadManager.instance.activeCount;
+        return Stack(
+          clipBehavior: Clip.none,
+          children: [
+            IconButton(
+              onPressed: _showDownloadsPanel,
+              tooltip: '下载 / 离线缓存',
+              icon: const Icon(Icons.download_outlined, color: Colors.white70),
+            ),
+            if (n > 0)
+              Positioned(
+                right: 4,
+                top: 4,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                  decoration: BoxDecoration(
+                    color: accentNotifier.value,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text('$n',
+                      style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold)),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 下载任务 + 已缓存列表面板（底部弹层，实时刷新）。
+  void _showDownloadsPanel() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF22222A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => AnimatedBuilder(
+        animation: DownloadManager.instance,
+        builder: (ctx, __) {
+          final dm = DownloadManager.instance;
+          final tasks = dm.tasks;
+          final cached = dm.cached.entries.toList();
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.6,
+            maxChildSize: 0.92,
+            builder: (_, scroll) => Column(
+              children: [
+                const SizedBox(height: 10),
+                Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2))),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 12, 8, 4),
+                  child: Row(
+                    children: [
+                      const Text('下载 / 离线缓存',
+                          style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold)),
+                      const Spacer(),
+                      if (tasks.any((t) =>
+                          t.state == DlState.done ||
+                          t.state == DlState.failed ||
+                          t.state == DlState.canceled))
+                        TextButton(
+                            onPressed: dm.clearFinished,
+                            child: const Text('清除已完成')),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: ListView(
+                    controller: scroll,
+                    children: [
+                      if (tasks.isEmpty && cached.isEmpty)
+                        const Padding(
+                          padding: EdgeInsets.all(40),
+                          child: Center(
+                              child: Text('暂无下载任务\n长按曲目可「缓存(离线)」或「后台下载」',
+                                  textAlign: TextAlign.center,
+                                  style: TextStyle(color: Colors.white38))),
+                        ),
+                      for (final t in tasks) _taskTile(t),
+                      if (cached.isNotEmpty)
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(16, 14, 16, 6),
+                          child: Text('已缓存（离线可看）',
+                              style: TextStyle(
+                                  color: Colors.white54, fontSize: 13)),
+                        ),
+                      for (final e in cached)
+                        ListTile(
+                          dense: true,
+                          leading: const Icon(Icons.offline_pin,
+                              color: Colors.greenAccent),
+                          title: Text(e.value['name'] ?? e.key,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(color: Colors.white)),
+                          trailing: IconButton(
+                            icon: const Icon(Icons.delete_outline,
+                                color: Colors.white38),
+                            tooltip: '删除缓存',
+                            onPressed: () => dm.deleteCached(e.key),
+                          ),
+                          onTap: () {
+                            final p = e.value['path'];
+                            if (p == null || !File(p).existsSync()) {
+                              dm.deleteCached(e.key);
+                              return;
+                            }
+                            Navigator.pop(ctx);
+                            _play(Track.local(p));
+                          },
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _taskTile(DownloadTask t) {
+    final dm = DownloadManager.instance;
+    IconData icon;
+    Color color;
+    String sub;
+    switch (t.state) {
+      case DlState.done:
+        icon = Icons.check_circle;
+        color = Colors.greenAccent;
+        sub = t.cache ? '已缓存 · ${t.sizeText}' : '已保存 · ${t.sizeText}';
+        break;
+      case DlState.failed:
+        icon = Icons.error_outline;
+        color = Colors.redAccent;
+        sub = '失败：${t.error ?? ''}';
+        break;
+      case DlState.canceled:
+        icon = Icons.cancel_outlined;
+        color = Colors.white38;
+        sub = '已取消';
+        break;
+      case DlState.running:
+        icon = Icons.downloading;
+        color = accentNotifier.value;
+        sub =
+            '${(t.progress * 100).toStringAsFixed(0)}% · ${t.sizeText}';
+        break;
+      default:
+        icon = Icons.schedule;
+        color = Colors.white54;
+        sub = '排队中…';
+    }
+    return ListTile(
+      dense: true,
+      leading: Icon(icon, color: color),
+      title: Text(t.name,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(color: Colors.white)),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(sub, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+          if (t.state == DlState.running)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: LinearProgressIndicator(
+                value: t.total > 0 ? t.progress : null,
+                minHeight: 3,
+                backgroundColor: Colors.white12,
+              ),
+            ),
+        ],
+      ),
+      trailing: (t.state == DlState.running || t.state == DlState.queued)
+          ? IconButton(
+              icon: const Icon(Icons.close, color: Colors.white38),
+              tooltip: '取消',
+              onPressed: () => dm.cancel(t),
+            )
+          : IconButton(
+              icon: const Icon(Icons.clear, color: Colors.white24),
+              tooltip: '移除',
+              onPressed: () => dm.removeTask(t),
+            ),
+    );
   }
   // ---- 我的视频（本地收录 / 发布到B站） ----
   Future<void> _loadMyVideos() async {
@@ -749,10 +2387,30 @@ class _HomeShellState extends State<HomeShell> {
 
 
   /// 一首播完（未单曲循环）后：B站放相关推荐，其它放队列下一首。
+  bool _suppressNextOnce = false; // #3 片尾"取消连播"：抑制本次自动连播
+
   Future<void> _onTrackCompleted() async {
+    final cur0 = _current;
+    // #12 稍后看"看完自动移出"：完成的曲目从稍后看清单清掉。
+    if (cur0 != null && _watchLater.any((x) => x.key == cur0.key)) {
+      _watchLater.removeWhere((x) => x.key == cur0.key);
+      _saveWatchLater();
+    }
+    if (_suppressNextOnce) {
+      _suppressNextOnce = false;
+      return;
+    }
     if (_playMode == 'stop') return;
     final cur = _current;
     if (cur == null) return;
+    // #11/#6 稍后看连播：手动队列放完(当前是最后一首)就清掉覆盖，回默认队列。
+    if (_queueOverride != null) {
+      final qi = _queueOverride!.indexWhere((t) => t.key == cur.key);
+      if (qi >= 0 && qi >= _queueOverride!.length - 1) {
+        _queueOverride = null;
+        return;
+      }
+    }
     // 推荐模式：B站放相关推荐。
     if (_playMode == 'recommend' && cur.bvid != null) {
       final rel = await _bili.getRelated(cur.bvid!);
@@ -925,7 +2583,7 @@ class _HomeShellState extends State<HomeShell> {
   /// 内容区：有自定义背景时盖一层 _baseBg 蒙层（透明度 = 1 − 背景透出度），
   /// 透明度滑块越大背景越显、越小越接近常规浅色界面；深色背景下文字也清晰。
   Widget _content(ColorScheme cs) {
-    final view = _navIndex == 0
+    var view = _navIndex == 0
         ? _libraryView(cs)
         : _navIndex == 1
             ? _favoritesView(cs)
@@ -934,9 +2592,26 @@ class _HomeShellState extends State<HomeShell> {
                 : _navIndex == 4
                     ? _historyView(cs)
                     : _settingsView(cs);
-    if (!_hasCustomBg) return view;
-    return ColoredBox(
-      color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
+    if (_hasCustomBg) {
+      view = ColoredBox(
+        color: _baseBg.withValues(alpha: (1 - _bgOpacity).clamp(0.0, 1.0)),
+        child: view,
+      );
+    }
+    // 高对比(#14)：开启时加粗+提高文字对比度。
+    return ValueListenableBuilder<bool>(
+      valueListenable: A11y.highContrast,
+      builder: (context, hc, child) {
+        if (!hc) return child!;
+        // 按主题明暗选对比色，避免深色背景上强制黑字看不见。
+        final dark = Theme.of(context).brightness == Brightness.dark;
+        return DefaultTextStyle.merge(
+          style: TextStyle(
+              color: dark ? Colors.white : Colors.black,
+              fontWeight: FontWeight.w700),
+          child: child!,
+        );
+      },
       child: view,
     );
   }
@@ -1125,20 +2800,27 @@ class _HomeShellState extends State<HomeShell> {
     poll?.cancel();
   }
 
+  static const _disclaimerDefault =
+      '「小李播放器」是一款媒体播放器，仅供学习与个人使用。\n\n'
+      '联网搜索内容来自公开网络平台；版权归原作者/平台所有，'
+      '请勿用于任何商业或侵权用途，使用本软件产生的一切后果由使用者自行承担。\n\n'
+      '点击「同意」即表示你已阅读并接受以上条款。';
+
   Future<void> _showDisclaimer() async {
+    // 免责声明文案后台可改：用上次缓存(或内置默认)立即显示，不卡启动；同时后台拉最新供下次。
+    final p = await SharedPreferences.getInstance();
+    final cached = p.getString('disclaimer_text') ?? '';
+    final text = cached.isNotEmpty ? cached : _disclaimerDefault;
+    PlatformService.getDisclaimer().then((r) {
+      if (r.isNotEmpty) p.setString('disclaimer_text', r);
+    });
+    if (!mounted) return;
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (_) => AlertDialog(
         title: const Text('免责声明'),
-        content: const SingleChildScrollView(
-          child: Text(
-            '「小李播放器」是一款媒体播放器，仅供学习与个人使用。\n\n'
-            '联网搜索内容来自公开网络平台；版权归原作者/平台所有，'
-            '请勿用于任何商业或侵权用途，使用本软件产生的一切后果由使用者自行承担。\n\n'
-            '点击「同意」即表示你已阅读并接受以上条款。',
-          ),
-        ),
+        content: SingleChildScrollView(child: Text(text)),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
@@ -1151,7 +2833,21 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _silentCheckUpdate() async {
     final info = await _update.check();
-    if (info != null && mounted) _showUpdateDialog(info);
+    if (info == null || !mounted) return;
+    if (!_autoUpdate0) {
+      _showUpdateDialog(info);
+      return;
+    }
+    // 自动更新已开：直接下载安装新版。防回环：同一目标版本只自动更新一次，
+    // 若装完仍未生效(下载源落后于版本号)，下次不再自动循环，改成手动提示。
+    final p = await SharedPreferences.getInstance();
+    if (p.getString('auto_update_tried') == info.version) {
+      _showUpdateDialog(info);
+      return;
+    }
+    await p.setString('auto_update_tried', info.version);
+    _snack('发现新版本 v${info.version}，正在自动更新…');
+    _autoUpdate(info);
   }
 
   Future<void> _checkUpdateManually() async {
@@ -1172,7 +2868,93 @@ class _HomeShellState extends State<HomeShell> {
     }
   }
 
+  /// 测到平台服务器的下载速度（拉一段固定大小数据，算 MB/s）。
+  Future<void> _runSpeedTest() async {
+    setState(() {
+      _speedTesting = true;
+      _speedResult = '测速中…';
+    });
+    final client = http.Client();
+    try {
+      final sw = Stopwatch()..start();
+      final url = '${PlatformService.current}/speedtest?mb=15';
+      final req = http.Request('GET', Uri.parse(url));
+      final resp =
+          await client.send(req).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        if (mounted) {
+          setState(() => _speedResult = '测速失败：HTTP ${resp.statusCode}');
+        }
+        return;
+      }
+      var bytes = 0;
+      await for (final c in resp.stream) {
+        bytes += c.length;
+      }
+      sw.stop();
+      final secs = sw.elapsedMilliseconds / 1000.0;
+      final mb = bytes / 1048576;
+      final speed = secs > 0 ? mb / secs : 0; // MB/s
+      final mbps = speed * 8; // Mbps
+      final where = PlatformService.useLan ? '局域网' : '公网';
+      if (mounted) {
+        setState(() => _speedResult =
+            '${speed.toStringAsFixed(1)} MB/s · ${mbps.toStringAsFixed(0)} Mbps · $where');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _speedResult = '测速失败：网络异常或服务器未开');
+    } finally {
+      client.close();
+      if (mounted) setState(() => _speedTesting = false);
+    }
+  }
+
+  /// 连续快速点击「设置」5 次→进入隐藏的后台管理。
+  void _onSettingsTap() {
+    final now = DateTime.now();
+    if (_lastSettingsTap == null ||
+        now.difference(_lastSettingsTap!) > const Duration(milliseconds: 1500)) {
+      _settingsTaps = 1;
+    } else {
+      _settingsTaps++;
+    }
+    _lastSettingsTap = now;
+    if (_settingsTaps >= 5) {
+      _settingsTaps = 0;
+      Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const _AdminPage()));
+    }
+  }
+
+  /// 清空全部离线缓存（先确认，告知释放多少空间）。
+  Future<void> _clearCacheConfirm() async {
+    final bytes = await DownloadManager.instance.totalCacheBytes();
+    if (!mounted) return;
+    final mb = (bytes / 1048576).toStringAsFixed(1);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空离线缓存'),
+        content: Text('将删除全部已缓存视频，释放约 $mb MB 空间。确定？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok == true) {
+      await DownloadManager.instance.clearAllCache();
+      if (mounted) _snack('已清空离线缓存，释放 $mb MB');
+    }
+  }
+
   void _showUpdateDialog(UpdateInfo info) {
+    // macOS/Android 支持一键自动更新（下载→替换→重启，全程不用手动）。
+    final canAuto = Platform.isMacOS || Platform.isAndroid;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
@@ -1185,7 +2967,7 @@ class _HomeShellState extends State<HomeShell> {
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('稍后'),
           ),
-          FilledButton(
+          TextButton(
             onPressed: () async {
               Navigator.of(context).pop();
               final uri = Uri.tryParse(info.url);
@@ -1195,9 +2977,223 @@ class _HomeShellState extends State<HomeShell> {
             },
             child: const Text('前往下载'),
           ),
+          if (canAuto)
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.of(context).pop();
+                _autoUpdate(info);
+              },
+              icon: const Icon(Icons.bolt, size: 18),
+              label: const Text('自动更新'),
+            ),
         ],
       ),
     );
+  }
+
+  /// 一键自动更新：下载对应平台安装包→替换→重启，全程无需手动。
+  Future<void> _autoUpdate(UpdateInfo info) async {
+    final base = PlatformService.current;
+    if (Platform.isMacOS) {
+      await _autoUpdateMac('$base/dl/xiaoli-mac.zip', info.version);
+    } else if (Platform.isAndroid) {
+      await _autoUpdateAndroid('$base/dl/xiaoli-android.apk', info.version);
+    }
+  }
+
+  /// 带进度对话框下载文件到 [dest]。成功 true。[status]/[progress] 实时更新弹窗。
+  Future<bool> _downloadInto(String url, String dest,
+      ValueNotifier<double> progress, ValueNotifier<String> status) async {
+    final client = http.Client();
+    final req = http.Request('GET', Uri.parse(url));
+    try {
+      final resp = await client.send(req).timeout(const Duration(seconds: 30));
+      if (resp.statusCode != 200) {
+        status.value = '下载失败：HTTP ${resp.statusCode}';
+        return false;
+      }
+      final total = resp.contentLength ?? 0;
+      final sink = File(dest).openWrite();
+      var recv = 0;
+      try {
+        await for (final c in resp.stream) {
+          sink.add(c);
+          recv += c.length;
+          if (total > 0) {
+            progress.value = recv / total;
+            status.value =
+                '下载中 ${(recv / 1048576).toStringAsFixed(1)} / ${(total / 1048576).toStringAsFixed(1)} MB';
+          } else {
+            status.value = '下载中 ${(recv / 1048576).toStringAsFixed(1)} MB';
+          }
+        }
+      } finally {
+        await sink.close(); // 异常路径也要关，避免句柄泄漏
+      }
+      return true;
+    } finally {
+      client.close();
+    }
+  }
+
+  /// macOS：下载 zip→解压→替换 .app→重启（写一个待我退出后执行的脚本）。
+  Future<void> _autoUpdateMac(String url, String version) async {
+    final tmp = Directory.systemTemp.path;
+    final zipPath = '$tmp/xiaoli_update_$version.zip';
+    final extractDir = '$tmp/xiaoli_update_$version';
+    final progress = ValueNotifier<double>(0);
+    final status = ValueNotifier<String>('准备下载…');
+    var dialogOpen = true;
+    void close() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('自动更新中'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<double>(
+              valueListenable: progress,
+              builder: (_, v, __) => LinearProgressIndicator(value: v > 0 ? v : null),
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, s, __) => Text(s, textAlign: TextAlign.center),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      if (!await _downloadInto(url, zipPath, progress, status)) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      status.value = '解压中…';
+      final ed = Directory(extractDir);
+      if (ed.existsSync()) ed.deleteSync(recursive: true);
+      ed.createSync(recursive: true);
+      final unzip =
+          await Process.run('/usr/bin/unzip', ['-o', zipPath, '-d', extractDir]);
+      if (unzip.exitCode != 0) {
+        status.value = '解压失败';
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      // 找到解压出的 .app（可能在子目录里）
+      String? newApp;
+      for (final e in ed.listSync(recursive: true)) {
+        if (e is Directory && e.path.endsWith('.app')) {
+          newApp = e.path;
+          break;
+        }
+      }
+      if (newApp == null) {
+        status.value = '安装包格式异常（未找到 .app）';
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      // 当前 .app = 可执行文件往上三层
+      final exe = Platform.resolvedExecutable;
+      final destApp = File(exe).parent.parent.parent.path;
+      status.value = '安装中…即将自动重启';
+      final scriptPath = '$tmp/xiaoli_update.sh';
+      // 等本进程退出后再替换：先拷到 .new 验证完整，再原子替换，
+      // 旧 app 只有在新 app 就位后才删除——任何一步失败都回滚并重开旧版，绝不把用户搞到没 app。
+      final script = '#!/bin/bash\n'
+          'PID="\$1"\n'
+          'DEST="$destApp"\n'
+          'NEW="$newApp"\n'
+          'STAGE="\$DEST.new"\n'
+          'BAK="\$DEST.bak"\n'
+          'for i in \$(seq 1 60); do kill -0 "\$PID" 2>/dev/null || break; sleep 0.2; done\n'
+          'sleep 0.4\n'
+          'rm -rf "\$STAGE" "\$BAK"\n'
+          'cp -R "\$NEW" "\$STAGE" || { open "\$DEST"; exit 1; }\n'
+          'if [ ! -d "\$STAGE/Contents/MacOS" ]; then rm -rf "\$STAGE"; open "\$DEST"; exit 1; fi\n'
+          'xattr -dr com.apple.quarantine "\$STAGE" 2>/dev/null\n'
+          'mv "\$DEST" "\$BAK" 2>/dev/null\n'
+          'mv "\$STAGE" "\$DEST" || { mv "\$BAK" "\$DEST"; open "\$DEST"; exit 1; }\n'
+          'rm -rf "\$BAK"\n'
+          'open "\$DEST"\n';
+      File(scriptPath).writeAsStringSync(script);
+      await Process.run('/bin/chmod', ['+x', scriptPath]);
+      await Process.start('/bin/bash', [scriptPath, '$pid'],
+          mode: ProcessStartMode.detached);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      exit(0); // 退出后脚本接管替换并重启
+    } catch (e) {
+      status.value = '自动更新失败：$e';
+      await Future<void>.delayed(const Duration(seconds: 2));
+      close();
+      _snack('自动更新失败，请用「前往下载」手动更新');
+    }
+  }
+
+  /// Android：下载 apk→调起系统安装器（需用户确认安装）。
+  Future<void> _autoUpdateAndroid(String url, String version) async {
+    final dir = await getExternalStorageDirectory();
+    if (dir == null) {
+      _snack('无法获取存储目录');
+      return;
+    }
+    final apkPath = '${dir.path}/xiaoli-$version.apk';
+    final progress = ValueNotifier<double>(0);
+    final status = ValueNotifier<String>('准备下载…');
+    var dialogOpen = true;
+    void close() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
+      }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('自动更新中'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<double>(
+              valueListenable: progress,
+              builder: (_, v, __) => LinearProgressIndicator(value: v > 0 ? v : null),
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, s, __) => Text(s, textAlign: TextAlign.center),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      if (!await _downloadInto(url, apkPath, progress, status)) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      status.value = '启动安装器…';
+      await const MethodChannel('xiaoli/installer')
+          .invokeMethod('install', {'path': apkPath});
+      close();
+    } catch (e) {
+      close();
+      _snack('自动更新失败：$e（可用「前往下载」手动更新）');
+    }
   }
 
   Future<void> _addFiles() async {
@@ -1266,8 +3262,10 @@ class _HomeShellState extends State<HomeShell> {
   Track _platTrack(PlatformVideo v) {
     final star = v.rating > 0 ? '★${v.rating} ' : '';
     final base = v.uploader.isEmpty ? v.title : '${v.title} · ${v.uploader}';
-    return Track.online('$star$base', PlatformService.videoUrl(v.id),
+    final t = Track.online('$star$base', PlatformService.playUrl(v.id),
         tag: '平台');
+    if (v.uploader.isNotEmpty) _platUploader[t.key] = v.uploader;
+    return t;
   }
 
   Future<void> _ratePlat(String url, int score) async {
@@ -1365,10 +3363,21 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Future<void> _play(Track t, {bool replace = false}) async {
+    // #11 从队列外起播→清掉手动队列(回到默认派生队列)。
+    if (_queueOverride != null &&
+        !_queueOverride!.any((x) => x.key == t.key)) {
+      _queueOverride = null;
+    }
     setState(() => _current = t);
     _pushPlayHistory(t);
+    if (t.tag == '平台') PlatformService.pingTask('play'); // 每日任务：看视频
+
     PlaybackSource src;
-    if (t.bvid != null) {
+    final cachedFile = DownloadManager.instance.cachedPath(t.key);
+    if (cachedFile != null && File(cachedFile).existsSync()) {
+      // 已离线缓存：直接放本地文件，无需联网解析
+      src = PlaybackSource.local(cachedFile, title: t.name);
+    } else if (t.bvid != null) {
       // B站：先弹 loading，异步取音频流
       showDialog<void>(
         context: context,
@@ -1391,13 +3400,30 @@ class _HomeShellState extends State<HomeShell> {
           isVideo: true,
           subtitleFuture: subFut,
           coverUrl: t.pic.isEmpty ? null : t.pic);
+    } else if (t.tag == '平台' && t.url != null) {
+      // 平台视频：始终按 id 用当前服务器地址重建流地址，
+      // 避免历史/断点里存的旧局域网 IP 或旧隧道地址失效导致"播放失败"。
+      final id = t.url!.split('/').last;
+      final url = await PlatformService.playbackUrl(id);
+      if (!mounted) return;
+      src = PlaybackSource.stream(url, const <String, String>{},
+          title: t.name, isVideo: _trackIsVideo(t));
     } else {
       src = t.toSource();
     }
     if (!mounted) return;
+    _pushPlayer(t, src, replace: replace);
+  }
+
+  /// 构建并跳转到播放页。attach=true 用于从迷你条恢复——附着到已在播放的全局播放器，不重新起播。
+  void _pushPlayer(Track t, PlaybackSource src,
+      {bool replace = false, bool attach = false}) {
+    if (t.tag == '平台') PlatformService.reportActivity(t.name); // 管理台「直接查看」
+    final cachedFile = DownloadManager.instance.cachedPath(t.key);
     final route = MaterialPageRoute<void>(
       builder: (_) => PlayerScreen(
         source: src,
+        attach: attach,
         isFavorite: _isFav(t),
         onToggleFavorite: () => _toggleFav(t),
         onCompleted: () {
@@ -1413,10 +3439,25 @@ class _HomeShellState extends State<HomeShell> {
             t.bvid != null ? (msg) => _bili.postComment(t.bvid!, msg) : null,
         startAt: Duration(seconds: _resume[t.key] ?? _skipIntro),
         onSavePos: (sec) {
+          // 只把"正常前进(0<delta≤8s)"计入观看时长；跳转/快退不算(防刷成就)。
+          final prev = _resume[t.key] ?? sec;
+          final delta = sec - prev;
           _resume[t.key] = sec;
-          _watchSec += 5;
+          if (delta > 0 && delta <= 8) {
+            _watchSec += delta;
+            _reportWatchAccum(delta); // #9 观影时长上报(累计满60s才发一次)
+          }
           _saveResume();
         },
+        onDuration: (durSec) {
+          if (durSec > 0 && _resumeDur[t.key] != durSec) {
+            _resumeDur[t.key] = durSec;
+            _saveResumeDur();
+          }
+        },
+        nextUpTitle: _peekNextTitleAfter(t),
+        onPlayNext: _playNextNow,
+        onCancelNext: () => _suppressNextOnce = true,
         onLoadDanmaku: t.bvid != null ? () => _bili.getDanmaku(t.bvid!) : null,
         onPostDanmaku: t.bvid != null
             ? (msg, ms, color) =>
@@ -1427,13 +3468,18 @@ class _HomeShellState extends State<HomeShell> {
             t.bvid != null ? (n) => _bili.coinVideo(t.bvid!, multiply: n) : null,
         onTriple: t.bvid != null ? () => _bili.tripleVideo(t.bvid!) : null,
         bvid: t.bvid,
+        // 平台视频→传 id，播放页显示「点赞/投币/收藏」三连。
+        platformId:
+            (t.tag == '平台' && t.url != null) ? t.url!.split('/').last : null,
         seekStep: _seekStep,
         bookmarks: _bookmarks[t.key] ?? const [],
         onSaveBookmarks: (list) {
           _bookmarks[t.key] = list;
           _saveBookmarks();
         },
-        initialSpeed: _speeds[t.key] ?? 0,
+        initialSpeed:
+            _speeds[t.key] ?? (_defaultSpeed == 1.0 ? 0 : _defaultSpeed),
+        initialLoop: _loopSingle,
         onSaveSpeed: (sp) {
           _speeds[t.key] = sp;
           _saveSpeeds();
@@ -1452,6 +3498,10 @@ class _HomeShellState extends State<HomeShell> {
             t.bvid != null ? () => _bili.getSubtitleOptions(t.bvid!) : null,
         onLoadMultiSubtitles:
             t.bvid != null ? () => _bili.getMultiSubtitles(t.bvid!) : null,
+        // 本地/已缓存无需再缓存；其余在线视频可一键缓存离线看
+        onCache: (t.isLocal || cachedFile != null)
+            ? null
+            : () => _cacheVideo(t),
       ),
     );
     if (replace) {
@@ -1497,14 +3547,14 @@ class _HomeShellState extends State<HomeShell> {
   void _prev() {
     final list = _playQueue;
     if (_current == null || list.isEmpty) return;
-    final i = list.indexWhere((t) => t.name == _current!.name);
+    final i = list.indexWhere((t) => t.key == _current!.key);
     if (i > 0) _play(list[i - 1]);
   }
 
   void _next() {
     final list = _playQueue;
     if (_current == null || list.isEmpty) return;
-    final i = list.indexWhere((t) => t.name == _current!.name);
+    final i = list.indexWhere((t) => t.key == _current!.key);
     if (_shuffle && list.length > 1) {
       var j = Random().nextInt(list.length);
       if (j == i) j = (j + 1) % list.length;
@@ -1514,9 +3564,129 @@ class _HomeShellState extends State<HomeShell> {
     if (i >= 0 && i < list.length - 1) _play(list[i + 1]);
   }
 
+  // #3 片尾浮层：预读 t 之后的下一首标题(随机/停止/无下一首时返回 null)。
+  String? _peekNextTitleAfter(Track t) {
+    if (_playMode == 'stop' || _shuffle) return null;
+    final q = _playQueue;
+    final i = q.indexWhere((x) => x.key == t.key);
+    if (i >= 0 && i < q.length - 1) return q[i + 1].name;
+    return null;
+  }
+
+  // #11 播放队列面板：可拖动重排/删除/跳转，编辑写入 _queueOverride。
+  void _showQueueSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final queue = List<Track>.from(_playQueue);
+          final curKey = _current?.key;
+          return SizedBox(
+            height: MediaQuery.of(ctx).size.height * 0.6,
+            child: Column(children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
+                child: Row(children: [
+                  Text('播放队列（${queue.length}）',
+                      style: const TextStyle(
+                          fontSize: 15, fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  if (_queueOverride != null)
+                    TextButton(
+                      onPressed: () {
+                        setState(() => _queueOverride = null);
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text('恢复默认'),
+                    ),
+                ]),
+              ),
+              Expanded(
+                child: queue.isEmpty
+                    ? const Center(
+                        child: Text('队列为空',
+                            style: TextStyle(color: Colors.black38)))
+                    : ReorderableListView.builder(
+                        itemCount: queue.length,
+                        onReorder: (oldI, newI) {
+                          setSheet(() {
+                            if (newI > oldI) newI--;
+                            final item = queue.removeAt(oldI);
+                            queue.insert(newI, item);
+                          });
+                          setState(() => _queueOverride = List.from(queue));
+                        },
+                        itemBuilder: (_, i) {
+                          final t = queue[i];
+                          final playing = t.key == curKey;
+                          return ListTile(
+                            key: ValueKey('${t.key}#$i'),
+                            dense: true,
+                            leading: Icon(
+                                playing
+                                    ? Icons.equalizer
+                                    : (_trackIsVideo(t)
+                                        ? Icons.movie_outlined
+                                        : Icons.music_note),
+                                color: playing ? cssPrimaryOf(context) : null),
+                            title: Text(t.name,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontWeight: playing
+                                        ? FontWeight.w700
+                                        : FontWeight.normal)),
+                            trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.close, size: 18),
+                                    // 不能删正在播放的(否则上/下一首失效)，也不能删到空。
+                                    onPressed: (queue.length <= 1 || playing)
+                                        ? null
+                                        : () {
+                                            setSheet(() => queue.removeAt(i));
+                                            setState(() => _queueOverride =
+                                                List.from(queue));
+                                          },
+                                  ),
+                                  ReorderableDragStartListener(
+                                    index: i,
+                                    child: const Icon(Icons.drag_handle,
+                                        size: 20),
+                                  ),
+                                ]),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _play(t, replace: true);
+                            },
+                          );
+                        },
+                      ),
+              ),
+            ]),
+          );
+        },
+      ),
+    );
+  }
+
+  Color cssPrimaryOf(BuildContext c) => Theme.of(c).colorScheme.primary;
+
+  // #3 立即播放队列下一首(片尾浮层「立即播放」)。
+  void _playNextNow() {
+    final q = _playQueue;
+    final cur = _current;
+    if (cur == null) return;
+    final i = q.indexWhere((x) => x.key == cur.key);
+    if (i >= 0 && i < q.length - 1) _play(q[i + 1], replace: true);
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    if (_banned) return _bannedScreen(cs); // 封号拦截：挡在所有功能之前
     return Scaffold(
       backgroundColor: _baseBg,
       body: _withBackground(
@@ -1534,14 +3704,34 @@ class _HomeShellState extends State<HomeShell> {
           ],
         ),
       ),
-      bottomNavigationBar: PlayerBar(
-        title: _current?.name,
-        subtitle: _currentSubtitle,
-        onPrev: _prev,
-        onNext: _next,
-        onPlayPause: () {
-          if (_current != null) _play(_current!);
-        },
+      bottomNavigationBar: AnimatedBuilder(
+        animation: Listenable.merge(
+            [PlayerHolder.i.playing, PlayerHolder.i.current]),
+        builder: (_, __) => PlayerBar(
+          title: _current?.name,
+          subtitle: _currentSubtitle,
+          isPlaying: PlayerHolder.i.playing.value,
+          onPrev: _prev,
+          onNext: _next,
+          onQueue: _current == null ? null : _showQueueSheet,
+          onPlayPause: () {
+            // 全局播放器已有内容→真正暂停/继续（后台也在播）；否则从头起播。
+            if (PlayerHolder.i.current.value != null) {
+              PlayerHolder.i.playPause();
+            } else if (_current != null) {
+              _play(_current!);
+            }
+          },
+          onTapInfo: () {
+            // 点信息区→恢复播放页：若正在后台播同一内容，附着恢复(不重播)；否则重新起播。
+            final src = PlayerHolder.i.current.value;
+            if (src != null && _current != null) {
+              _pushPlayer(_current!, src, attach: true);
+            } else if (_current != null) {
+              _play(_current!);
+            }
+          },
+        ),
       ),
     );
   }
@@ -1559,11 +3749,142 @@ class _HomeShellState extends State<HomeShell> {
           _navIcon(Icons.favorite, 1, cs),
           _navIcon(Icons.video_library, 2, cs),
           _navIcon(Icons.history, 4, cs),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '消息',
+              onPressed: _openMessagesTop,
+              icon: const Icon(Icons.forum_outlined, color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '个人中心',
+              onPressed: _openPersonalCenter,
+              icon: const Icon(Icons.account_circle_outlined,
+                  color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '创作中心',
+              onPressed: _openCreatorCenter,
+              icon: const Icon(Icons.workspace_premium_outlined,
+                  color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '收付款',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const PayPage())),
+              icon: const Icon(Icons.qr_code, color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '直播',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) =>
+                          LivePage(onPlayVideo: _liveOnPlay))),
+              icon: const Icon(Icons.live_tv_outlined, color: Colors.white60),
+            ),
+          ),
           _navIcon(Icons.settings, 3, cs),
           const Spacer(),
         ],
       ),
     );
+  }
+
+  // 直播间里「分享的视频」点开播放。
+  void _liveOnPlay(String id, String title) =>
+      _play(Track.online(title, PlatformService.playUrl(id), tag: '平台'));
+
+  void _openPersonalCenter() {
+    Navigator.of(context)
+        .push(MaterialPageRoute<void>(
+          builder: (_) => _PersonalCenterPage(
+            onPlay: (id, title) => _play(
+                Track.online(title, PlatformService.playUrl(id), tag: '平台')),
+          ),
+        ))
+        .then((_) => _loadRedSkin()); // 回来刷新红包皮肤
+  }
+
+  // 侧边栏「消息」：进前确保设了昵称(=身份)。
+  Future<void> _openMessagesTop() async {
+    final p = await SharedPreferences.getInstance();
+    var nick = (p.getString('profile_name') ?? '').trim();
+    if (nick.isEmpty) {
+      final ctrl = TextEditingController();
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('先设个昵称'),
+          content: TextField(
+              controller: ctrl,
+              autofocus: true,
+              maxLength: 20,
+              decoration:
+                  const InputDecoration(hintText: '别人在通讯录里看到的名字')),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      nick = ctrl.text.trim();
+      if (nick.isEmpty) return;
+      await p.setString('profile_name', nick);
+    }
+    await PlatformService.setNick(nick);
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => MessagesPage(
+        onPlayVideo: (id, title) =>
+            _play(Track.online(title, PlatformService.playUrl(id), tag: '平台')),
+      ),
+    ));
+  }
+
+  // #8 作者作品页：列出某上传者的全部公开作品。
+  void _openUploaderPage(String name) {
+    if (name.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _UploaderPage(
+        uploader: name,
+        onPlay: (id, title) =>
+            _play(Track.online(title, PlatformService.playUrl(id), tag: '平台')),
+      ),
+    ));
+  }
+
+  void _openCreatorCenter() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _CreatorCenterPage(
+        onUpload: _uploadToPlatform,
+        onMyVideos: () {
+          Navigator.of(context).pop();
+          setState(() => _navIndex = 2);
+        },
+        onStats: () => Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => StatsScreen(history: _history, watchSec: _watchSec),
+        )),
+        onPlay: (id, title) =>
+            _play(Track.online(title, PlatformService.playUrl(id), tag: '平台')),
+      ),
+    ));
   }
 
   Widget _navIcon(IconData icon, int index, ColorScheme cs) {
@@ -1576,6 +3897,7 @@ class _HomeShellState extends State<HomeShell> {
           // F26: 记住上次所在 tab。
           SharedPreferences.getInstance()
               .then((p) => p.setInt('last_nav', index));
+          if (index == 3) _onSettingsTap(); // 连点设置5次→后台管理
         },
         icon: Icon(icon, color: selected ? cs.primary : Colors.white60),
       ),
@@ -1757,7 +4079,9 @@ class _HomeShellState extends State<HomeShell> {
                   builder: (_) => _BiliListPage(
                       title: title,
                       fetch: fn,
-                      onPlay: (bvid, t) => _play(Track.bili(t, bvid)))));
+                      onPlay: (bvid, t) => _play(Track.bili(t, bvid)),
+                      onCacheAll: (l) =>
+                          _cacheBatch(l.map((b) => Track.bili(b.title, b.bvid))))));
             },
             itemBuilder: (_) => const [
               PopupMenuItem(
@@ -1783,6 +4107,7 @@ class _HomeShellState extends State<HomeShell> {
             ],
           ),
           const SizedBox(width: 8),
+          _downloadsButton(),
           IconButton(
             onPressed: _openUrl,
             tooltip: '打开网址 / 直播流',
@@ -1810,7 +4135,8 @@ class _HomeShellState extends State<HomeShell> {
 
   Future<void> _refreshPlatformUrl() async {
     final before = PlatformService.current;
-    await PlatformService.loadLocal();
+    await PlatformService.loadRemoteUrl(); // 所有平台：GitHub 指针取最新隧道地址
+    await PlatformService.loadLocal(); // Mac：本机 public_url.txt 覆盖 + 探 LAN
     final healthy = await _platform.publicHealthy();
     if (!mounted) return;
     setState(() => _publicHealthy = healthy);
@@ -2081,6 +4407,10 @@ class _HomeShellState extends State<HomeShell> {
         ThemeMode.values[(p.getInt('theme_mode') ?? 0).clamp(0, 2)];
     _searchTid = p.getString('search_tid_v1') ?? '';
     _listDensity = p.getDouble('list_density') ?? 1.0;
+    _defaultSpeed = p.getDouble('default_speed') ?? 1.0;
+    _loopSingle = p.getBool('loop_single') ?? false;
+    _wifiOnly = p.getBool('wifi_only') ?? false;
+    _autoUpdate0 = p.getBool('auto_update') ?? true;
     _autoPalette = p.getBool('auto_palette') ?? false;
     _guestMode = p.getBool('guest_mode') ?? false;
     // F26: 启动导航。-1=记住上次；否则固定到该 tab。
@@ -2118,6 +4448,17 @@ class _HomeShellState extends State<HomeShell> {
                 (v as List).map((e) => (e as num).toInt()).toList());
       }
     } catch (_) {}
+    _viewMode = p.getString('view_mode') ?? 'list';
+    final rawDur = p.getString('resume_dur_v1');
+    if (rawDur != null) {
+      try {
+        final m = (jsonDecode(rawDur) as Map)
+            .map((k, v) => MapEntry(k as String, (v as num).toInt()));
+        _resumeDur
+          ..clear()
+          ..addAll(m);
+      } catch (_) {}
+    }
     final raw = p.getString('resume_v1');
     if (raw == null || !mounted) return;
     try {
@@ -2133,6 +4474,11 @@ class _HomeShellState extends State<HomeShell> {
     final p = await SharedPreferences.getInstance();
     await p.setString('resume_v1', jsonEncode(_resume));
     await p.setInt('watch_sec', _watchSec);
+  }
+
+  Future<void> _saveResumeDur() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString('resume_dur_v1', jsonEncode(_resumeDur));
   }
 
   Future<void> _saveBookmarks() async {
@@ -2493,7 +4839,9 @@ class _HomeShellState extends State<HomeShell> {
         builder: (_) => _BiliListPage(
             title: '收藏夹',
             fetch: () => _bili.getFavVideos(mlid),
-            onPlay: (bvid, t) => _play(Track.bili(t, bvid)))));
+            onPlay: (bvid, t) => _play(Track.bili(t, bvid)),
+            onCacheAll: (l) =>
+                _cacheBatch(l.map((b) => Track.bili(b.title, b.bvid))))));
   }
 
   Future<void> _addToBiliFav(String bvid) async {
@@ -2592,12 +4940,127 @@ class _HomeShellState extends State<HomeShell> {
         'history_v1', jsonEncode(_history.map(_trackToJson).toList()));
   }
 
+  // #12 稍后看清单（轻量待看队列，不下载，看完自动移出）。
+  final List<Track> _watchLater = [];
+  Future<void> _loadWatchLater() async {
+    final p = await SharedPreferences.getInstance();
+    final raw = p.getString('watch_later_v1');
+    if (raw == null) return;
+    try {
+      final list = (jsonDecode(raw) as List)
+          .map((e) => _trackFromJson(e as Map))
+          .whereType<Track>()
+          .toList();
+      if (mounted) setState(() => _watchLater..clear()..addAll(list));
+    } catch (_) {}
+  }
+
+  Future<void> _saveWatchLater() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(
+        'watch_later_v1', jsonEncode(_watchLater.map(_trackToJson).toList()));
+  }
+
+  void _toggleWatchLater(Track t) {
+    final i = _watchLater.indexWhere((x) => x.key == t.key);
+    setState(() {
+      if (i >= 0) {
+        _watchLater.removeAt(i);
+        _snack('已从稍后看移除');
+      } else {
+        _watchLater.insert(0, t);
+        _snack('已加入稍后看');
+      }
+    });
+    _saveWatchLater();
+  }
+
+  void _openWatchLater() {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setP) => Scaffold(
+          appBar: AppBar(
+            title: Text('稍后看（${_watchLater.length}）'),
+            actions: [
+              if (_watchLater.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () {
+                    final q = List<Track>.from(_watchLater);
+                    setState(() => _queueOverride = q);
+                    if (q.isNotEmpty) _play(q.first);
+                    Navigator.pop(ctx);
+                  },
+                  icon: const Icon(Icons.playlist_play),
+                  label: const Text('全部连播'),
+                ),
+            ],
+          ),
+          body: _watchLater.isEmpty
+              ? const Center(
+                  child: Text('空空如也~ 在视频上右键/长按「稍后看」加进来',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: _watchLater.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final t = _watchLater[i];
+                    return ListTile(
+                      leading: Icon(
+                          _trackIsVideo(t) ? Icons.movie : Icons.music_note),
+                      title: Text(t.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: IconButton(
+                        icon: const Icon(Icons.close, size: 18),
+                        onPressed: () {
+                          _toggleWatchLater(t);
+                          setP(() {});
+                        },
+                      ),
+                      onTap: () {
+                        // 看了就移出
+                        _toggleWatchLater(t);
+                        setP(() {});
+                        _play(t);
+                      },
+                    );
+                  },
+                ),
+        ),
+      ),
+    ));
+  }
+
   void _pushPlayHistory(Track t) {
     if (_guestMode) return; // F49 访客模式不记录
     _history.removeWhere((h) => h.key == t.key);
     _history.insert(0, t);
     if (_history.length > 40) _history.removeRange(40, _history.length);
     _savePlayHistory();
+    _cloudSyncHistory(); // v2.39.22 云端历史同步(尽力，失败忽略)
+  }
+
+  // #9 观影时长累计上报：每满 60s 发一次(服务端每次≤600 防刷)。
+  void _reportWatchAccum(int sec) {
+    if (_guestMode) return;
+    _watchUnreported += sec;
+    if (_watchUnreported >= 60) {
+      final flush = _watchUnreported;
+      _watchUnreported = 0;
+      PlatformService.reportWatch(flush); // fire-and-forget
+    }
+  }
+
+  void _cloudSyncHistory() {
+    final items = _history
+        .take(40)
+        .map((t) => {
+              'name': t.name,
+              if (t.url != null) 'url': t.url,
+              if (t.bvid != null) 'bvid': t.bvid,
+              'tag': t.tag,
+            })
+        .toList();
+    PlatformService.pushHistory(items); // fire-and-forget
   }
 
   Future<void> _openUrl() async {
@@ -3061,6 +5524,379 @@ class _HomeShellState extends State<HomeShell> {
     await p.setInt('accent_color', c);
   }
 
+  // #7 继续观看：历史里看了一半(5%~95%)、有总时长的视频。
+  List<({Track t, double pct})> _continueWatching() {
+    final out = <({Track t, double pct})>[];
+    for (final t in _history) {
+      final pos = _resume[t.key];
+      final dur = _resumeDur[t.key];
+      if (pos == null || dur == null || dur <= 0) continue;
+      final pct = pos / dur;
+      if (pct > 0.03 && pct < 0.95) out.add((t: t, pct: pct));
+      if (out.length >= 12) break;
+    }
+    return out;
+  }
+
+  Widget _continueShelf(ColorScheme cs) {
+    final items = _continueWatching();
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Container(
+      height: 96,
+      padding: const EdgeInsets.fromLTRB(10, 8, 10, 4),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Padding(
+            padding: EdgeInsets.only(left: 4, bottom: 4),
+            child: Text('继续观看',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          ),
+          Expanded(
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: items.length,
+              separatorBuilder: (_, __) => const SizedBox(width: 8),
+              itemBuilder: (_, i) {
+                final it = items[i];
+                return InkWell(
+                  onTap: () => _play(it.t),
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    width: 150,
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: cs.primary.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(it.t.name,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 12)),
+                        Row(children: [
+                          Expanded(
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(2),
+                              child: LinearProgressIndicator(
+                                value: it.pct,
+                                minHeight: 4,
+                                backgroundColor: Colors.black12,
+                                color: cs.primary,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text('${(it.pct * 100).round()}%',
+                              style: const TextStyle(
+                                  fontSize: 10, color: Colors.black54)),
+                        ]),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // #9 随便看看：从当前可见的平台/在线视频里随机播一个。
+  void _randomPlay() {
+    final pool = [
+      ..._platformTracks.where(_trackIsVideo),
+      ..._onlineTracks,
+      ..._hotTracks,
+    ];
+    if (pool.isEmpty) {
+      _snack('还没有可随机的视频，稍等加载~');
+      return;
+    }
+    final t = pool[Random().nextInt(pool.length)];
+    _snack('🎲 随便看看：${t.name}');
+    _play(t);
+  }
+
+  Future<void> _toggleViewMode() async {
+    setState(() => _viewMode = _viewMode == 'grid' ? 'list' : 'grid');
+    final p = await SharedPreferences.getInstance();
+    await p.setString('view_mode', _viewMode);
+  }
+
+  // #12 智能歌单：规则实时计算成员，随库变化保持最新。
+  List<Track> _smartList(String rule) {
+    final all = [..._localTracks, ..._platformTracks];
+    switch (rule) {
+      case 'music':
+        return all.where((t) => !_trackIsVideo(t)).toList();
+      case 'video':
+        return all.where(_trackIsVideo).toList();
+      case 'recent':
+        return _localTracks.take(50).toList();
+      case 'unfinished':
+        final out = <Track>[];
+        for (final t in _history) {
+          final pos = _resume[t.key], dur = _resumeDur[t.key];
+          if (pos != null && dur != null && dur > 0) {
+            final pct = pos / dur;
+            if (pct > 0.03 && pct < 0.95) out.add(t);
+          }
+        }
+        return out;
+      default:
+        return const [];
+    }
+  }
+
+  void _showSmartPlaylists() {
+    const rules = [
+      ('music', Icons.music_note, '全部音乐'),
+      ('video', Icons.movie, '全部视频'),
+      ('recent', Icons.fiber_new, '最近添加'),
+      ('unfinished', Icons.hourglass_bottom, '未看完'),
+    ];
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('智能歌单（自动更新）',
+                  style: TextStyle(fontWeight: FontWeight.w600))),
+          for (final r in rules)
+            ListTile(
+              leading: Icon(r.$2),
+              title: Text(r.$3),
+              trailing: Text('${_smartList(r.$1).length}',
+                  style: const TextStyle(color: Colors.black45)),
+              onTap: () {
+                Navigator.pop(context);
+                _openSmartList(r.$3, r.$1);
+              },
+            ),
+        ]),
+      ),
+    );
+  }
+
+  void _openSmartList(String title, String rule) {
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) {
+        final list = _smartList(rule);
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(title),
+            actions: [
+              if (list.isNotEmpty)
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _play(list.first);
+                  },
+                  icon: const Icon(Icons.play_arrow),
+                  label: const Text('播放'),
+                ),
+            ],
+          ),
+          body: list.isEmpty
+              ? const Center(
+                  child: Text('暂无内容',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: list.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final t = list[i];
+                    return ListTile(
+                      leading: Icon(
+                          _trackIsVideo(t) ? Icons.movie : Icons.music_note),
+                      title: Text(t.name,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      onTap: () => _play(t),
+                    );
+                  },
+                ),
+        );
+      },
+    ));
+  }
+
+  // #13 新手引导：首启分步介绍，可跳过；设置里可重看。
+  // 由免责声明对话框关闭后链式触发(见 initState 的 postFrameCallback)，不与之叠加。
+  Future<void> _maybeOnboard() async {
+    final p = await SharedPreferences.getInstance();
+    if (p.getBool('onboarded_v1') == true) return;
+    if (mounted) _showOnboarding();
+  }
+
+  void _showOnboarding() {
+    const pages = [
+      ('🎬', '欢迎来到小李播放器',
+          '本地音视频、B站、共享平台一站全播。支持几乎所有格式（基于 libmpv）。'),
+      ('🔍', '搜索与发现',
+          '顶部搜索 B站/平台视频；媒体库里「🎲随便看看」随机来一个，右上角可切换列表/网格视图。'),
+      ('🪙', '小李兑换币与社交',
+          '签到、做任务赚币；给视频投币/点赞/收藏，打赏或发🧧红包给作者，去个人中心看成就、商城、关注动态。'),
+      ('⬇️', '离线与续播',
+          '长按/右键视频可缓存到本地离线看；看了一半的视频会出现在「继续观看」，点一下接着看。'),
+      ('🛠', '更多',
+          '播放页右上菜单有护眼色温、画面精调、夜间音频、字幕章节、金句截图等。设置里有无障碍选项。'),
+    ];
+    var page = 0;
+    final ctrl = PageController();
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          contentPadding: const EdgeInsets.fromLTRB(24, 20, 24, 8),
+          content: SizedBox(
+            width: 360,
+            height: 260,
+            child: Column(
+              children: [
+                Expanded(
+                  child: PageView.builder(
+                    controller: ctrl,
+                    itemCount: pages.length,
+                    onPageChanged: (i) => setD(() => page = i),
+                    itemBuilder: (_, i) {
+                      final p = pages[i];
+                      return Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Text(p.$1, style: const TextStyle(fontSize: 54)),
+                          const SizedBox(height: 14),
+                          Text(p.$2,
+                              style: const TextStyle(
+                                  fontSize: 17, fontWeight: FontWeight.bold)),
+                          const SizedBox(height: 10),
+                          Text(p.$3,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(
+                                  fontSize: 13, color: Colors.black54)),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    for (var i = 0; i < pages.length; i++)
+                      Container(
+                        width: 7,
+                        height: 7,
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: i == page
+                              ? Theme.of(context).colorScheme.primary
+                              : Colors.black26,
+                        ),
+                      ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () async {
+                final p = await SharedPreferences.getInstance();
+                await p.setBool('onboarded_v1', true);
+                if (ctx.mounted) Navigator.pop(ctx);
+              },
+              child: const Text('跳过'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                if (page < pages.length - 1) {
+                  ctrl.nextPage(
+                      duration: A11y.motion(const Duration(milliseconds: 250)),
+                      curve: Curves.easeOut);
+                } else {
+                  final p = await SharedPreferences.getInstance();
+                  await p.setBool('onboarded_v1', true);
+                  if (ctx.mounted) Navigator.pop(ctx);
+                }
+              },
+              child: Text(page < pages.length - 1 ? '下一步' : '开始使用'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // #15 网格卡片
+  Widget _gridCard(ColorScheme cs, Track t, int i) {
+    final isVid = _trackIsVideo(t);
+    return GestureDetector(
+      onTap: () => _play(t),
+      onSecondaryTapDown: (d) => _showRowMenu(t, d.globalPosition),
+      onLongPress: () => _showRowMenu(
+          t,
+          Offset(MediaQuery.of(context).size.width / 2,
+              MediaQuery.of(context).size.height / 2)),
+      child: Container(
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+          borderRadius: BorderRadius.circular(10),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Expanded(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  t.pic.isNotEmpty
+                      ? Image.network(t.pic, fit: BoxFit.cover,
+                          errorBuilder: (_, __, ___) =>
+                              Container(color: cs.primary.withValues(alpha: 0.15)))
+                      : Container(
+                          color: cs.primary.withValues(alpha: 0.12),
+                          child: Icon(isVid ? Icons.movie : Icons.music_note,
+                              color: cs.primary, size: 34)),
+                  Positioned(
+                    left: 4,
+                    top: 4,
+                    child: Container(
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                      decoration: BoxDecoration(
+                          color: Colors.black54,
+                          borderRadius: BorderRadius.circular(4)),
+                      child: Text(
+                          t.tag.isNotEmpty ? t.tag : (t.isLocal ? '本地' : '在线'),
+                          style: const TextStyle(
+                              color: Colors.white, fontSize: 9)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.all(6),
+              child: Text(t.name,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 11)),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _libraryView(ColorScheme cs) {
     final q = _query.toLowerCase();
     List<Track> items;
@@ -3086,7 +5922,22 @@ class _HomeShellState extends State<HomeShell> {
     return Column(
       children: [
         if (_searchingOnline) const LinearProgressIndicator(minHeight: 2),
-        if (_query.isEmpty) _typeFilterBar(cs),
+        if (_query.isEmpty)
+          Row(children: [
+            Expanded(child: _typeFilterBar(cs)),
+            IconButton(
+              tooltip: '随便看看',
+              icon: const Icon(Icons.casino_outlined),
+              onPressed: _randomPlay,
+            ),
+            IconButton(
+              tooltip: _viewMode == 'grid' ? '列表视图' : '网格视图',
+              icon: Icon(
+                  _viewMode == 'grid' ? Icons.view_list : Icons.grid_view),
+              onPressed: _toggleViewMode,
+            ),
+          ]),
+        if (_query.isEmpty) _continueShelf(cs),
         if (_query.isEmpty && _localTags.isNotEmpty) _tagFilterBar(cs),
         if (_query.isEmpty && _searchHistory.isNotEmpty) _historyBar(cs),
         if (_query.isNotEmpty && _searchSuggestions.isNotEmpty)
@@ -3094,6 +5945,7 @@ class _HomeShellState extends State<HomeShell> {
         if (_query.isNotEmpty) _platformCatBar(cs),
         if (_query.isNotEmpty && _accountResults.isNotEmpty)
           _accountsBar(cs),
+        _batchCacheBar(items),
         Expanded(
           child: items.isEmpty
               ? Center(
@@ -3114,11 +5966,24 @@ class _HomeShellState extends State<HomeShell> {
                     ],
                   ),
                 )
-              : ListView.separated(
-                  itemCount: items.length,
-                  separatorBuilder: (_, __) => const Divider(height: 1),
-                  itemBuilder: (context, i) => _trackRow(cs, items[i], i),
-                ),
+              : _viewMode == 'grid'
+                  ? GridView.builder(
+                      padding: const EdgeInsets.all(10),
+                      gridDelegate:
+                          const SliverGridDelegateWithMaxCrossAxisExtent(
+                        maxCrossAxisExtent: 180,
+                        mainAxisSpacing: 10,
+                        crossAxisSpacing: 10,
+                        childAspectRatio: 0.78,
+                      ),
+                      itemCount: items.length,
+                      itemBuilder: (context, i) => _gridCard(cs, items[i], i),
+                    )
+                  : ListView.separated(
+                      itemCount: items.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (context, i) => _trackRow(cs, items[i], i),
+                    ),
         ),
       ],
     );
@@ -3178,6 +6043,11 @@ class _HomeShellState extends State<HomeShell> {
     final items = <PopupMenuEntry<String>>[
       PopupMenuItem(value: 'fav', child: Text(_isFav(t) ? '取消收藏' : '收藏')),
       const PopupMenuItem(value: 'playlist', child: Text('加入歌单')),
+      PopupMenuItem(
+          value: 'later',
+          child: Text(_watchLater.any((x) => x.key == t.key)
+              ? '从稍后看移除'
+              : '稍后看')),
       const PopupMenuItem(value: 'copyname', child: Text('复制名称')),
     ];
     if (t.isLocal) {
@@ -3189,6 +6059,22 @@ class _HomeShellState extends State<HomeShell> {
     if (t.tag == '平台' && t.url != null) {
       items.add(const PopupMenuItem(
           value: 'pdownload', child: Text('下载到本地')));
+      if (_platUploader[t.key]?.isNotEmpty ?? false) {
+        items.add(const PopupMenuItem(
+            value: 'puploader', child: Text('该作者更多作品')));
+      }
+    }
+    if (!t.isLocal && (t.bvid != null || t.url != null)) {
+      if (DownloadManager.instance.isCached(t.key)) {
+        items.add(
+            const PopupMenuItem(value: 'uncache', child: Text('删除离线缓存')));
+      } else {
+        items.add(
+            const PopupMenuItem(value: 'cache', child: Text('缓存到本地(离线)')));
+      }
+      items.add(const PopupMenuItem(
+          value: 'cloud', child: Text('☁ 云端缓存(可分享/永久)')));
+      items.add(const PopupMenuItem(value: 'bgdl', child: Text('后台下载到…')));
     }
     showMenu<String>(
       context: context,
@@ -3206,6 +6092,19 @@ class _HomeShellState extends State<HomeShell> {
         _setTrackTag(t);
       } else if (v == 'pdownload') {
         _downloadPlatformVideo(t);
+      } else if (v == 'puploader') {
+        _openUploaderPage(_platUploader[t.key] ?? '');
+      } else if (v == 'cache') {
+        _cacheVideo(t);
+      } else if (v == 'cloud') {
+        _cloudCache(t);
+      } else if (v == 'uncache') {
+        DownloadManager.instance.deleteCached(t.key);
+        _snack('已删除离线缓存');
+      } else if (v == 'bgdl') {
+        _bgDownload(t);
+      } else if (v == 'later') {
+        _toggleWatchLater(t);
       } else if (v == 'copyname') {
         Clipboard.setData(ClipboardData(text: t.name));
         ScaffoldMessenger.of(context)
@@ -3552,17 +6451,91 @@ class _HomeShellState extends State<HomeShell> {
   }
 
   Widget _settingsView(ColorScheme cs) {
-    return ListView(
+    final view = ListView(
       padding: const EdgeInsets.all(24),
       children: [
         Text('设置',
             style: TextStyle(
                 fontSize: 20, fontWeight: FontWeight.bold, color: cs.primary)),
         const SizedBox(height: 16),
-        const ListTile(
-          leading: Icon(Icons.info_outline),
-          title: Text('小李播放器 v2.37.0'),
-          subtitle: Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+        if (_settingsLocked)
+          Card(
+            color: Colors.red.withValues(alpha: 0.08),
+            margin: const EdgeInsets.only(bottom: 12),
+            child: const Padding(
+              padding: EdgeInsets.all(12),
+              child: Row(children: [
+                Icon(Icons.lock, color: Colors.redAccent),
+                SizedBox(width: 10),
+                Expanded(
+                    child: Text('设置页已被管理员锁定，暂不可修改',
+                        style: TextStyle(color: Colors.redAccent))),
+              ]),
+            ),
+          ),
+        // 无障碍(#14)
+        StatefulBuilder(
+          builder: (ctx, setA) => Card(
+            margin: const EdgeInsets.only(bottom: 8),
+            child: ExpansionTile(
+              leading: const Icon(Icons.accessibility_new),
+              title: const Text('无障碍'),
+              childrenPadding: const EdgeInsets.only(bottom: 6),
+              children: [
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('减弱动效'),
+                  subtitle: const Text('关闭弹幕飞行/页面切换等动画，减少眩晕'),
+                  value: A11y.reduceMotion,
+                  onChanged: (v) async {
+                    await A11y.setReduceMotion(v);
+                    setA(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('触感反馈'),
+                  subtitle: const Text('快进/切歌/点赞时轻微震动'),
+                  value: A11y.haptics,
+                  onChanged: (v) async {
+                    await A11y.setHaptics(v);
+                    A11y.tap();
+                    setA(() {});
+                  },
+                ),
+                SwitchListTile(
+                  dense: true,
+                  title: const Text('高对比文字'),
+                  subtitle: const Text('文字加粗加深，老人/弱视更易读'),
+                  value: A11y.highContrast.value,
+                  onChanged: (v) async {
+                    await A11y.setHighContrast(v);
+                    setA(() {});
+                  },
+                ),
+                ListTile(
+                  dense: true,
+                  leading: const Icon(Icons.school_outlined),
+                  title: const Text('重看新手引导'),
+                  onTap: () async {
+                    final p = await SharedPreferences.getInstance();
+                    await p.remove('onboarded_v1');
+                    if (mounted) _showOnboarding();
+                  },
+                ),
+              ],
+            ),
+          ),
+        ),
+        ListTile(
+          leading: const Icon(Icons.info_outline),
+          title: ValueListenableBuilder<String>(
+            valueListenable: appNameNotifier,
+            builder: (_, name, __) =>
+                Text('$name v${UpdateService.currentVersion}'),
+          ),
+          subtitle: const Text('媒体播放器 · 支持所有格式（基于 libmpv）'),
+          onTap: _showAbout,
         ),
         ListTile(
           leading: CircleAvatar(
@@ -3612,9 +6585,24 @@ class _HomeShellState extends State<HomeShell> {
                 builder: (_) => _PlaylistsPage(
                     playlists: _playlists,
                     onPlay: _play,
-                    onSave: _savePlaylists)));
+                    onSave: _savePlaylists,
+                    onCacheTrack: _enqueueCache)));
             setState(() {});
           },
+        ),
+        ListTile(
+          leading: const Icon(Icons.auto_awesome),
+          title: const Text('智能歌单'),
+          subtitle: const Text('全部音乐/视频、最近添加、未看完——随库自动更新',
+              style: TextStyle(fontSize: 12)),
+          onTap: _showSmartPlaylists,
+        ),
+        ListTile(
+          leading: const Icon(Icons.watch_later_outlined),
+          title: Text('稍后看（${_watchLater.length}）'),
+          subtitle: const Text('轻量待看清单，不下载，看完自动移出',
+              style: TextStyle(fontSize: 12)),
+          onTap: _openWatchLater,
         ),
         ListTile(
           leading: const Icon(Icons.create_new_folder_outlined),
@@ -3846,11 +6834,56 @@ class _HomeShellState extends State<HomeShell> {
             await p.setInt('seek_step', _seekStep);
           },
         ),
+        SwitchListTile(
+          secondary: const Icon(Icons.autorenew),
+          title: const Text('自动更新'),
+          subtitle: const Text('启动时发现新版自动下载安装（无需手动确认）',
+              style: TextStyle(fontSize: 12)),
+          value: _autoUpdate0,
+          onChanged: (v) async {
+            setState(() => _autoUpdate0 = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('auto_update', v);
+          },
+        ),
         ListTile(
           leading: const Icon(Icons.system_update),
           title: const Text('检查更新'),
-          subtitle: const Text('检测并下载最新版本'),
+          subtitle: const Text('立即检测并下载最新版本'),
           onTap: _checkUpdateManually,
+        ),
+        ListTile(
+          leading: const Icon(Icons.speed),
+          title: const Text('测网速'),
+          subtitle: Text(_speedResult ?? '测试到平台服务器的下载速度'),
+          trailing: _speedTesting
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.chevron_right),
+          onTap: _speedTesting ? null : _runSpeedTest,
+        ),
+        AnimatedBuilder(
+          animation: DownloadManager.instance,
+          builder: (_, __) {
+            final n = DownloadManager.instance.cached.length;
+            final active = DownloadManager.instance.activeCount;
+            return ListTile(
+              leading: const Icon(Icons.sd_storage_outlined),
+              title: const Text('离线缓存'),
+              subtitle: Text(active > 0
+                  ? '$n 个已缓存 · $active 个下载中'
+                  : (n == 0 ? '长按曲目可缓存视频，离线也能看' : '$n 个视频已缓存，可离线播放')),
+              trailing: n == 0
+                  ? const Icon(Icons.chevron_right)
+                  : TextButton(
+                      onPressed: _clearCacheConfirm,
+                      child: const Text('清空'),
+                    ),
+              onTap: _showDownloadsPanel,
+            );
+          },
         ),
         ListTile(
           leading: const Icon(Icons.playlist_play),
@@ -4093,7 +7126,7 @@ class _HomeShellState extends State<HomeShell> {
           title: const Text('官方下载网址'),
           isThreeLine: true,
           subtitle: Text(
-            '${PlatformService.downloadUrl}\n'
+            '$_officialDownload\n'
             '${PlatformService.useLan ? "● 局域网模式" : (_publicHealthy ? "● 公网正常" : "⚠ 公网限流/抽风中，建议切局域网")}',
             style: TextStyle(
                 fontSize: 12,
@@ -4105,8 +7138,7 @@ class _HomeShellState extends State<HomeShell> {
             icon: const Icon(Icons.copy, size: 18),
             tooltip: '复制',
             onPressed: () {
-              Clipboard.setData(
-                  ClipboardData(text: PlatformService.downloadUrl));
+              Clipboard.setData(ClipboardData(text: _officialDownload));
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
                     const SnackBar(content: Text('已复制下载网址')));
@@ -4114,7 +7146,7 @@ class _HomeShellState extends State<HomeShell> {
             },
           ),
           onTap: () async {
-            final uri = Uri.parse(PlatformService.downloadUrl);
+            final uri = Uri.parse(_officialDownload);
             if (await canLaunchUrl(uri)) {
               await launchUrl(uri, mode: LaunchMode.externalApplication);
             }
@@ -4145,11 +7177,326 @@ class _HomeShellState extends State<HomeShell> {
           onTap: () => _guard('useLan', _setLanIp),
         ),
         ListTile(
+          leading: const Icon(Icons.bedtime_outlined),
+          title: const Text('睡眠定时'),
+          subtitle: Text(
+              _sleepTimer != null ? '将在 $_sleepMin 分钟后停止播放' : '定时停止播放',
+              style: const TextStyle(fontSize: 12)),
+          trailing: _sleepTimer != null
+              ? IconButton(
+                  icon: const Icon(Icons.close), onPressed: _cancelSleep)
+              : const Icon(Icons.chevron_right),
+          onTap: _setSleepTimer,
+        ),
+        ListTile(
+          leading: const Icon(Icons.speed_outlined),
+          title: const Text('默认播放倍速'),
+          subtitle: Text('新视频默认 ${_defaultSpeed}x（播放页仍可临时调）',
+              style: const TextStyle(fontSize: 12)),
+          trailing: DropdownButton<double>(
+            value: _defaultSpeed,
+            underline: const SizedBox.shrink(),
+            items: const [0.75, 1.0, 1.25, 1.5, 2.0]
+                .map((s) => DropdownMenuItem(value: s, child: Text('${s}x')))
+                .toList(),
+            onChanged: (v) async {
+              if (v == null) return;
+              setState(() => _defaultSpeed = v);
+              final p = await SharedPreferences.getInstance();
+              await p.setDouble('default_speed', v);
+            },
+          ),
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.repeat_one),
+          title: const Text('默认单曲循环'),
+          subtitle: const Text('新视频默认循环本曲', style: TextStyle(fontSize: 12)),
+          value: _loopSingle,
+          onChanged: (v) async {
+            setState(() => _loopSingle = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('loop_single', v);
+          },
+        ),
+        SwitchListTile(
+          secondary: const Icon(Icons.wifi),
+          title: const Text('仅 WiFi 提醒'),
+          subtitle: const Text('用流量在线播放/缓存前提醒', style: TextStyle(fontSize: 12)),
+          value: _wifiOnly,
+          onChanged: (v) async {
+            setState(() => _wifiOnly = v);
+            final p = await SharedPreferences.getInstance();
+            await p.setBool('wifi_only', v);
+          },
+        ),
+        ListTile(
+          leading: const Icon(Icons.manage_search),
+          title: const Text('清空搜索历史'),
+          subtitle: const Text('清除搜索框的历史记录', style: TextStyle(fontSize: 12)),
+          onTap: _clearSearchHistory,
+        ),
+        ListTile(
+          leading: const Icon(Icons.feedback_outlined),
+          title: const Text('意见反馈'),
+          subtitle: const Text('把建议/问题发给开发者', style: TextStyle(fontSize: 12)),
+          onTap: _sendFeedback,
+        ),
+        ListTile(
+          leading: const Icon(Icons.ios_share),
+          title: const Text('分享 / 推荐给好友'),
+          subtitle: const Text('复制官方下载链接', style: TextStyle(fontSize: 12)),
+          onTap: _shareApp,
+        ),
+        ListTile(
+          leading: const Icon(Icons.restart_alt),
+          title: const Text('恢复默认设置'),
+          subtitle: const Text('清除播放/外观等偏好（不动收藏和数据）',
+              style: TextStyle(fontSize: 12)),
+          onTap: _resetPrefs,
+        ),
+        ListTile(
+          leading: const Icon(Icons.menu_book_outlined),
+          title: const Text('使用说明'),
+          subtitle: const Text('新手指南 · 功能怎么用', style: TextStyle(fontSize: 12)),
+          onTap: _showGuide,
+        ),
+        ListTile(
           leading: const Icon(Icons.description_outlined),
           title: const Text('免责声明'),
           onTap: _showDisclaimer,
         ),
       ],
+    );
+    return _settingsLocked ? IgnorePointer(child: view) : view;
+  }
+
+  // 睡眠定时：N 分钟后停止播放。
+  Future<void> _setSleepTimer() async {
+    final mins = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('睡眠定时'),
+        children: [
+          for (final m in [15, 30, 45, 60, 90])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, m),
+              child: Text('$m 分钟后停止'),
+            ),
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 0),
+              child: const Text('取消定时')),
+        ],
+      ),
+    );
+    if (mins == null) return;
+    _sleepTimer?.cancel();
+    if (mins <= 0) {
+      setState(() => _sleepTimer = null);
+      return;
+    }
+    setState(() {
+      _sleepMin = mins;
+      _sleepTimer = Timer(Duration(minutes: mins), () {
+        PlayerHolder.i.stop();
+        if (mounted) setState(() => _sleepTimer = null);
+        _snack('睡眠定时到，已停止播放');
+      });
+    });
+    _snack('已设定 $mins 分钟后停止播放');
+  }
+
+  void _cancelSleep() {
+    _sleepTimer?.cancel();
+    setState(() => _sleepTimer = null);
+    _snack('已取消睡眠定时');
+  }
+
+  Future<void> _clearSearchHistory() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空搜索历史'),
+        content: const Text('清除所有搜索记录？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    await p.remove('search_history_v1');
+    _snack('搜索历史已清空');
+  }
+
+  Future<void> _sendFeedback() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('意见反馈'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 4,
+          decoration: const InputDecoration(
+              hintText: '说说你的建议或遇到的问题…', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('提交')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = ctrl.text.trim();
+    if (msg.isEmpty) return;
+    final sent = await PlatformService.feedback(msg);
+    _snack(sent ? '反馈已提交，谢谢！' : '提交失败，请检查网络');
+  }
+
+  // 恢复默认设置：只清偏好类键，不动收藏/历史/账号/缓存。
+  Future<void> _resetPrefs() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('恢复默认设置'),
+        content: const Text('将清除播放/外观等偏好（倍速、淡入淡出、主题色、字号、'
+            '睡眠定时、密度等）。收藏、历史、账号、缓存不受影响。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('恢复')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    const keys = [
+      'default_speed', 'loop_single', 'wifi_only', 'fade_in', 'fade_out',
+      'text_scale', 'accent_color', 'theme_mode', 'list_density',
+      'auto_palette', 'seek_step', 'skip_intro'
+    ];
+    for (final k in keys) {
+      await p.remove(k);
+    }
+    if (!mounted) return;
+    setState(() {
+      _defaultSpeed = 1.0;
+      _loopSingle = false;
+      _wifiOnly = false;
+      _fadeIn = false;
+      _fadeOut = false;
+      _listDensity = 1.0;
+      _autoPalette = false;
+      _seekStep = 10;
+      _skipIntro = 0;
+      textScaleNotifier.value = 1.0;
+      accentNotifier.value = const Color(0xFFF26B21);
+      themeModeNotifier.value = ThemeMode.system;
+    });
+    _snack('已恢复默认设置');
+  }
+
+  Future<void> _shareApp() async {
+    final url = _officialDownload;
+    final text = '推荐你用「${appNameNotifier.value}」看视频/听歌：$url';
+    await Clipboard.setData(ClipboardData(text: text));
+    _snack('下载链接已复制，发给好友即可');
+  }
+
+  void _showAbout() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AboutDialog(
+        applicationName: appNameNotifier.value,
+        applicationVersion: 'v${UpdateService.currentVersion}',
+        applicationIcon: const Icon(Icons.music_video, size: 40),
+        children: const [
+          SizedBox(height: 8),
+          Text('一个支持几乎所有格式的媒体播放器，内置共享视频平台、'
+              'B站搜索播放、小李兑换币经济、离线缓存、后台播放等。'),
+          SizedBox(height: 8),
+          Text('基于 Flutter + libmpv 构建。'),
+        ],
+      ),
+    );
+  }
+
+  // 使用说明：一页讲清各功能怎么用。
+  void _showGuide() {
+    const sections = <(String, String, String)>[
+      ('▶️', '播放与媒体库',
+          '左侧切换：音乐库 / 收藏 / 我的视频 / 历史。点任意条目即可播放，支持几乎所有音视频格式。'),
+      ('🎬', '看平台视频',
+          '首页和搜索里带「平台」标签的是本应用共享平台的视频，点开直接在线播放，无需下载。'),
+      ('🅱️', 'B站搜索播放',
+          '顶部搜索框可搜 B站 视频/UP主，支持评论、弹幕、分P、字幕；登录后可点赞投币关注。'),
+      ('👍', '播放页三连',
+          '播放平台视频时，控制按钮下方有 👍点赞 / 🪙投币 / ⭐收藏。点赞收藏免费可反复切，投币花小李兑换币。'),
+      ('👤', '个人中心',
+          '左侧👤进入：看兑换币余额、每日签到领币(连签7天额外+50)、做每日任务领币、查看我的收藏/点赞/投币、热门榜。'),
+      ('🪙', '小李兑换币',
+          '赚币：签到、每日任务。花币：投币、改创作者名。投币越多称号越高(路人→新粉→铁粉→真爱粉)。'),
+      ('🏆', '创作中心',
+          '左侧🏆进入：上传作品到平台、批量上传、看自己作品的数据、改创作者名。'),
+      ('📥', '缓存与离线',
+          '在线视频可一键缓存到本地，之后离线也能看；支持后台下载、批量/全选缓存。'),
+      ('🎵', '后台播放',
+          '退出播放页或切到别的界面，音视频继续播放；底部迷你条可控制。'),
+      ('🔗', '设为默认播放器',
+          '可把本应用设为系统打开音视频文件的默认方式（macOS「打开方式」/ 安卓选择应用）。'),
+      ('🌐', '连不上/网络异常',
+          '平台地址会自动跟随更新，通常稍等会自动恢复；也可在设置里测网速、改局域网服务器IP。'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('使用说明'),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final s in sections)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('${s.$1}  ${s.$2}',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 14)),
+                        const SizedBox(height: 2),
+                        Text(s.$3,
+                            style: const TextStyle(
+                                color: Colors.black54, fontSize: 13, height: 1.4)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('知道了')),
+        ],
+      ),
     );
   }
 }
@@ -4522,12 +7869,3649 @@ class _PasswordProtectPageState extends State<_PasswordProtectPage> {
   }
 }
 
+/// 个人中心：我的钱包、每日签到领币、我的收藏/点赞/投币。
+class _PersonalCenterPage extends StatefulWidget {
+  final void Function(String id, String title) onPlay;
+  const _PersonalCenterPage({required this.onPlay});
+  @override
+  State<_PersonalCenterPage> createState() => _PersonalCenterPageState();
+}
+
+class _PersonalCenterPageState extends State<_PersonalCenterPage> {
+  int _balance = 0;
+  int _streak = 0; // 连续签到天数
+  bool _loading = true;
+  bool _signing = false;
+  String _tab = 'faved'; // faved / liked / coined / rank
+  Map<String, List<String>> _ids = {'coined': [], 'liked': [], 'faved': []};
+  final Map<String, PlatformVideo> _byId = {};
+  List<PlatformVideo> _rank = []; // 热门榜
+  Map<String, dynamic>? _tasks; // 每日任务 /tasks 返回
+  List<Map<String, dynamic>> _rich = []; // 富豪榜
+  String _customTitle = ''; // 自定义称号(本地存)
+  String _notice = ''; // 后台公告
+  List<String> _following = []; // 已关注的UP主(名字)
+
+  @override
+  void initState() {
+    super.initState();
+    SharedPreferences.getInstance()
+        .then((p) => setState(() => _customTitle = p.getString('my_title') ?? ''));
+    _load();
+  }
+
+  Future<void> _load() async {
+    setState(() => _loading = true);
+    final bal = await PlatformService.getBalance();
+    final ids = await PlatformService.myLists();
+    final all = await PlatformService().list(); // 全平台视频，用 id 解析成卡片
+    final rank = await PlatformService.rank(by: 'coins');
+    final tasks = await PlatformService.getTasks();
+    final rich = await PlatformService.richlist();
+    final notice = await PlatformService.getNotice();
+    final following = await PlatformService.following();
+    if (!mounted) return;
+    _byId.clear();
+    for (final v in all) {
+      _byId[v.id] = v;
+    }
+    setState(() {
+      _balance = bal;
+      _ids = ids;
+      _rank = rank;
+      _tasks = tasks;
+      _rich = rich;
+      _notice = notice;
+      _following = following;
+      _loading = false;
+    });
+  }
+
+  // ===== v2.39.22 个人中心新功能：成就/币流水/商城/周榜/关注动态/通知/歌单广场/云端历史 =====
+
+  Future<void> _toggleFollow(String up) async {
+    if (up.isEmpty) return;
+    final on = !_following.contains(up);
+    setState(() {
+      if (on) {
+        _following = [..._following, up];
+      } else {
+        _following = _following.where((x) => x != up).toList();
+      }
+    });
+    final d = await PlatformService.follow(up, on);
+    if (d == null) {
+      _toast('操作失败，请检查网络');
+      // 回滚
+      setState(() {
+        if (on) {
+          _following = _following.where((x) => x != up).toList();
+        } else {
+          _following = [..._following, up];
+        }
+      });
+      return;
+    }
+    _toast(on ? '已关注 $up' : '已取关 $up');
+  }
+
+  Future<void> _showAchievements() async {
+    final list = await PlatformService.achievements();
+    if (!mounted) return;
+    final got = list.where((a) => a['unlocked'] == true).length;
+    _sheet(
+      title: '我的成就（$got/${list.length}）',
+      child: list.isEmpty
+          ? const _SheetEmpty('暂无成就数据')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final a in list)
+                  ListTile(
+                    leading: Icon(
+                        a['unlocked'] == true
+                            ? Icons.emoji_events
+                            : Icons.lock_outline,
+                        color: a['unlocked'] == true
+                            ? const Color(0xFFF26B21)
+                            : Colors.black26),
+                    title: Text('${a['name'] ?? ''}'),
+                    subtitle: a['desc'] != null
+                        ? Text('${a['desc']}',
+                            style: const TextStyle(fontSize: 12))
+                        : null,
+                    trailing: a['unlocked'] == true
+                        ? const Text('已解锁',
+                            style: TextStyle(
+                                color: Color(0xFFF26B21),
+                                fontWeight: FontWeight.w600))
+                        : const Text('未解锁',
+                            style: TextStyle(color: Colors.black38)),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showLedger() async {
+    final entries = await CoinLedger.entries();
+    if (!mounted) return;
+    _sheet(
+      title: '兑换币流水（近 ${entries.length} 笔）',
+      child: entries.isEmpty
+          ? const _SheetEmpty('还没有收支记录')
+          : ListView.builder(
+              shrinkWrap: true,
+              itemCount: entries.length,
+              itemBuilder: (_, i) {
+                final e = entries[i];
+                final delta = (e['delta'] as num?)?.toInt() ?? 0;
+                final ts = (e['ts'] as num?)?.toInt() ?? 0;
+                final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000);
+                final when =
+                    '${dt.month}-${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+                return ListTile(
+                  dense: true,
+                  title: Text('${e['reason'] ?? ''}'),
+                  subtitle: Text(when,
+                      style: const TextStyle(fontSize: 11)),
+                  trailing: Text('${delta > 0 ? '+' : ''}$delta',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: delta > 0
+                              ? const Color(0xFF2E9E5B)
+                              : Colors.redAccent)),
+                );
+              },
+            ),
+    );
+  }
+
+  Future<void> _showWeekly() async {
+    final list = await PlatformService.rankWeekly(by: 'coins');
+    if (!mounted) return;
+    _sheet(
+      title: '本周热门榜 🔥',
+      child: list.isEmpty
+          ? const _SheetEmpty('本周还没有数据')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (var i = 0; i < list.length; i++)
+                  ListTile(
+                    leading: CircleAvatar(
+                      radius: 13,
+                      backgroundColor: i < 3
+                          ? const Color(0xFFF26B21)
+                          : Colors.black12,
+                      child: Text('${i + 1}',
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: i < 3 ? Colors.white : Colors.black54)),
+                    ),
+                    title: Text(list[i].title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                        '🪙 ${list[i].coins}  👍 ${list[i].likes}  ▶ ${list[i].views}'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onPlay(list[i].id, list[i].title);
+                    },
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showFeed() async {
+    final list = await PlatformService.feed();
+    if (!mounted) return;
+    _sheet(
+      title: '关注动态（${_following.length} 位UP主）',
+      child: list.isEmpty
+          ? const _SheetEmpty('还没动态~ 在热门榜里点 + 关注UP主，新作品就出现在这里')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final v in list)
+                  ListTile(
+                    leading: const Icon(Icons.play_circle_outline),
+                    title: Text(v.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text('${v.uploader} · ▶ ${v.views}  🪙 ${v.coins}'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onPlay(v.id, v.title);
+                    },
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showNotifs() async {
+    final list = await PlatformService.notifs(clear: true);
+    if (!mounted) return;
+    String label(String k) => const {
+          'follow': '关注了你',
+          'tip': '打赏了你',
+          'gift': '送你红包',
+          'coin': '给你投币',
+          'comment': '评论了你',
+        }[k] ??
+        k;
+    _sheet(
+      title: '通知中心',
+      child: list.isEmpty
+          ? const _SheetEmpty('暂无新通知')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final n in list)
+                  ListTile(
+                    dense: true,
+                    leading: const Icon(Icons.notifications_active_outlined,
+                        color: Color(0xFFF26B21)),
+                    title: Text(label('${n['kind'] ?? ''}')),
+                    subtitle: n['extra'] != null
+                        ? Text('${n['extra']}',
+                            style: const TextStyle(fontSize: 12))
+                        : null,
+                  ),
+              ],
+            ),
+    );
+  }
+
+  Future<void> _showPlaylistSquare() async {
+    final list = await PlatformService.sharedPlaylists();
+    if (!mounted) return;
+    _sheet(
+      title: '歌单广场',
+      child: list.isEmpty
+          ? const _SheetEmpty('还没有人发布歌单')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final pl in list)
+                  ListTile(
+                    leading: const Icon(Icons.queue_music,
+                        color: Color(0xFFF26B21)),
+                    title: Text('${pl['title'] ?? '未命名歌单'}'),
+                    subtitle: Text('分享码：${pl['pid'] ?? ''}',
+                        style: const TextStyle(fontSize: 12)),
+                    trailing: IconButton(
+                      icon: const Icon(Icons.copy, size: 18),
+                      tooltip: '复制分享码',
+                      onPressed: () {
+                        Clipboard.setData(
+                            ClipboardData(text: '${pl['pid'] ?? ''}'));
+                        _toast('已复制分享码，在「导入歌单」里粘贴即可');
+                      },
+                    ),
+                  ),
+              ],
+            ),
+    );
+  }
+
+  // #10 猜你喜欢：按你投币/点赞/收藏过的作者 + 高币视频推荐，排除已互动。
+  // 红包皮肤目录(id→渐变色)。custom:0xAARRGGBB 为自定义单色。
+  static const _redSkinColors = {
+    'skin_gold': [Color(0xFFE3B341), Color(0xFFB8860B)],
+    'skin_lucky': [Color(0xFFE74C3C), Color(0xFFA93226)],
+    'skin_night': [Color(0xFF34495E), Color(0xFF1A1A2E)],
+    'skin_spring': [Color(0xFFFF6F91), Color(0xFFC2185B)],
+  };
+  static const _redSkinNames = {
+    'skin_gold': '🧧 鎏金',
+    'skin_lucky': '🎴 锦鲤',
+    'skin_night': '🌃 暗夜',
+    'skin_spring': '🌸 春日',
+  };
+  static const _couponNames = {
+    'coupon_10': '🎫 满50减10券',
+    'coupon_30': '🎫 满100减30券',
+  };
+
+  // 红包皮肤：从已购皮肤里选(或自定义颜色)，存 prefs redpacket_skin。
+  Future<void> _showRedSkins() async {
+    final mine = await PlatformService.myLists();
+    final owned = (mine['owned'] ?? const [])
+        .where((x) => x.startsWith('skin_'))
+        .toList();
+    final p = await SharedPreferences.getInstance();
+    var cur = p.getString('redpacket_skin') ?? '';
+    if (!mounted) return;
+    _sheet(
+      title: '红包皮肤（去兑换商城购买更多）',
+      child: StatefulBuilder(
+        builder: (ctx, setS) => ListView(
+          shrinkWrap: true,
+          children: [
+            for (final id in ['', ..._redSkinColors.keys])
+              if (id.isEmpty || owned.contains(id))
+                ListTile(
+                  leading: Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                          colors: _redSkinColors[id] ??
+                              const [Color(0xFFD7402F), Color(0xFFB2261B)]),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                  ),
+                  title: Text(id.isEmpty ? '默认红包' : (_redSkinNames[id] ?? id)),
+                  trailing: cur == id
+                      ? const Icon(Icons.check_circle, color: Color(0xFFF26B21))
+                      : null,
+                  onTap: () async {
+                    await p.setString('redpacket_skin', id);
+                    setS(() => cur = id);
+                    _toast('已选红包皮肤');
+                  },
+                ),
+            ListTile(
+              leading: const Icon(Icons.color_lens, color: Color(0xFFF26B21)),
+              title: const Text('自定义颜色'),
+              onTap: () async {
+                final c = await _pickSkinColor(context);
+                if (c == null) return;
+                final v = 'custom:0x${c.toARGB32().toRadixString(16)}';
+                await p.setString('redpacket_skin', v);
+                setS(() => cur = v);
+                _toast('已设自定义红包皮肤');
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 我的优惠券：列出 + 送给好友。
+  Future<void> _showCoupons() async {
+    final cps = await PlatformService.myCoupons();
+    if (!mounted) return;
+    _sheet(
+      title: '我的优惠券（去兑换商城兑换）',
+      child: cps.isEmpty
+          ? const _SheetEmpty('还没有优惠券，去兑换商城用兑换币兑换~')
+          : StatefulBuilder(
+              builder: (ctx, setS) => ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final e in cps.entries)
+                    ListTile(
+                      leading: const Icon(Icons.confirmation_num,
+                          color: Color(0xFFF26B21)),
+                      title: Text(_couponNames[e.key] ?? e.key),
+                      subtitle: Text('×${e.value}'),
+                      trailing: TextButton(
+                        child: const Text('送好友'),
+                        onPressed: () async {
+                          final to = await _pickContact(context);
+                          if (to == null) return;
+                          final d = await PlatformService.sendCoupon(
+                              to['uid'] as String, e.key);
+                          if (d != null && d['ok'] == true) {
+                            _toast('已送给 ${to['nick']}');
+                            final fresh = await PlatformService.myCoupons();
+                            setS(() {
+                              cps
+                                ..clear()
+                                ..addAll(fresh);
+                            });
+                          } else {
+                            _toast('${d?['error'] ?? '赠送失败'}');
+                          }
+                        },
+                      ),
+                    ),
+                ],
+              ),
+            ),
+    );
+  }
+
+  // 我的收款：展示收款ID + 复制收款链接(扫一扫待网络恢复加二维码)。
+  // 抢券广场：投券进池(从已购券) + 抢别人投的券。
+  Future<void> _showCouponPlaza() async {
+    var pools = await PlatformService.couponPoolList();
+    if (!mounted) return;
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setS) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          maxChildSize: 0.9,
+          builder: (_, sc) => Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 12, 6),
+              child: Row(children: [
+                const Text('抢券广场',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await _dropCouponDialog();
+                    final fresh = await PlatformService.couponPoolList();
+                    if (ctx.mounted) setS(() => pools = fresh);
+                  },
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('投券'),
+                ),
+              ]),
+            ),
+            Expanded(
+              child: pools.isEmpty
+                  ? const Center(
+                      child: Text('还没有人投券，点「投券」发第一个~',
+                          style: TextStyle(color: Colors.black38)))
+                  : ListView.builder(
+                      controller: sc,
+                      itemCount: pools.length,
+                      itemBuilder: (_, i) {
+                        final p = pools[i];
+                        return Card(
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 5),
+                          child: ListTile(
+                            leading: const Icon(Icons.local_activity,
+                                color: Color(0xFFF26B21)),
+                            title: Text(
+                                '${_couponNames[p['item']] ?? p['item']}'),
+                            subtitle: Text(
+                                '${p['msg'] ?? ''} · 剩 ${p['left']}/${p['count']}'),
+                            trailing: FilledButton(
+                              onPressed: () async {
+                                final d = await PlatformService.couponGrab(
+                                    '${p['id']}');
+                                if (d != null && d['ok'] == true) {
+                                  _toast('抢到一张优惠券！');
+                                } else {
+                                  _toast('${d?['error'] ?? '抢券失败'}');
+                                }
+                                final fresh =
+                                    await PlatformService.couponPoolList();
+                                if (ctx.mounted) setS(() => pools = fresh);
+                              },
+                              child: const Text('抢'),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _dropCouponDialog() async {
+    final cps = await PlatformService.myCoupons();
+    if (!mounted) return;
+    if (cps.isEmpty) {
+      _toast('你还没有优惠券，先去兑换商城兑换');
+      return;
+    }
+    String? item = cps.keys.first;
+    final countCtrl = TextEditingController(text: '1');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setD) => AlertDialog(
+          title: const Text('投券进抢券池'),
+          content: Column(mainAxisSize: MainAxisSize.min, children: [
+            for (final e in cps.entries)
+              RadioListTile<String>(
+                dense: true,
+                value: e.key,
+                groupValue: item,
+                onChanged: (v) => setD(() => item = v),
+                title: Text(
+                    '${_couponNames[e.key] ?? e.key}（有 ${e.value} 张）'),
+              ),
+            TextField(
+                controller: countCtrl,
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: '投几张')),
+          ]),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('投出')),
+          ],
+        ),
+      ),
+    );
+    if (ok != true || item == null) return;
+    final count = int.tryParse(countCtrl.text.trim()) ?? 0;
+    final d = await PlatformService.couponDrop(item!, count, '快来抢券');
+    if (d != null && d['ok'] == true) {
+      _toast('已投 $count 张进抢券池');
+    } else {
+      _toast('${d?['error'] ?? '投券失败'}');
+    }
+  }
+
+  Future<void> _showReceive() async {
+    final uid = await PlatformService.walletUid();
+    final p = await SharedPreferences.getInstance();
+    final nick = (p.getString('profile_name') ?? '').trim();
+    if (!mounted) return;
+    final link = 'xiaoli://pay?to=$uid';
+    _sheet(
+      title: '我的收款',
+      child: Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Container(
+            width: 160,
+            height: 160,
+            decoration: BoxDecoration(
+                color: const Color(0xFFF26B21).withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(14)),
+            child: const Icon(Icons.qr_code_2, size: 110, color: Color(0xFFF26B21)),
+          ),
+          const SizedBox(height: 12),
+          Text(nick.isEmpty ? '（先在消息里设昵称）' : nick,
+              style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 4),
+          SelectableText('收款ID：$uid',
+              style: const TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 12),
+          const Text('对方在「消息」里搜你昵称即可向你转账；\n或复制收款ID/链接发给对方。',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 12, color: Colors.black45)),
+          const SizedBox(height: 12),
+          Wrap(spacing: 10, children: [
+            OutlinedButton.icon(
+              icon: const Icon(Icons.copy, size: 16),
+              label: const Text('复制收款ID'),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: uid));
+                _toast('已复制收款ID');
+              },
+            ),
+            OutlinedButton.icon(
+              icon: const Icon(Icons.link, size: 16),
+              label: const Text('复制收款链接'),
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: link));
+                _toast('已复制收款链接');
+              },
+            ),
+          ]),
+        ]),
+      ),
+    );
+  }
+
+  // 选联系人(设过昵称的用户)。返回 {uid,nick} 或 null。
+  Future<Map<String, dynamic>?> _pickContact(BuildContext context) async {
+    final users = await PlatformService.users();
+    if (!mounted) return null;
+    return showModalBottomSheet<Map<String, dynamic>>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        builder: (_, sc) => users.isEmpty
+            ? const Center(
+                child: Text('暂无联系人（对方需先设昵称）',
+                    style: TextStyle(color: Colors.black38)))
+            : ListView(
+                controller: sc,
+                children: [
+                  for (final u in users)
+                    ListTile(
+                      leading: const CircleAvatar(child: Icon(Icons.person)),
+                      title: Text('${u['nick'] ?? ''}'),
+                      onTap: () => Navigator.pop(context, u),
+                    ),
+                ],
+              ),
+      ),
+    );
+  }
+
+  // 选颜色(自定义红包皮肤)。
+  Future<Color?> _pickSkinColor(BuildContext context) {
+    const swatches = [
+      Color(0xFFD7402F), Color(0xFFE3B341), Color(0xFF8E44AD),
+      Color(0xFF2E86C1), Color(0xFF16A085), Color(0xFF2C3E50),
+      Color(0xFFE91E63), Color(0xFF27AE60),
+    ];
+    return showDialog<Color>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('选个红包颜色'),
+        content: Wrap(
+          spacing: 12,
+          runSpacing: 12,
+          children: [
+            for (final c in swatches)
+              GestureDetector(
+                onTap: () => Navigator.pop(ctx, c),
+                child: Container(
+                    width: 44,
+                    height: 44,
+                    decoration:
+                        BoxDecoration(color: c, shape: BoxShape.circle)),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showRecommend() {
+    final interacted = <String>{
+      ...?_ids['coined'],
+      ...?_ids['liked'],
+      ...?_ids['faved'],
+    };
+    // 我互动过的视频的作者集合
+    final favUploaders = <String>{};
+    for (final id in interacted) {
+      final v = _byId[id];
+      if (v != null && v.uploader.isNotEmpty) favUploaders.add(v.uploader);
+    }
+    // 候选打分：同作者 +3，币数权重。排除已互动。
+    final scored = <({PlatformVideo v, num score})>[];
+    for (final v in _byId.values) {
+      if (interacted.contains(v.id)) continue;
+      num s = v.coins.toDouble();
+      if (favUploaders.contains(v.uploader)) s += 100;
+      if (s > 0) scored.add((v: v, score: s));
+    }
+    scored.sort((a, b) => b.score.compareTo(a.score));
+    final rec = scored.take(15).map((e) => e.v).toList();
+    _sheet(
+      title: '猜你喜欢',
+      child: rec.isEmpty
+          ? const _SheetEmpty('多投币/点赞几个视频，这里就有推荐啦~')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final v in rec)
+                  ListTile(
+                    leading: const Icon(Icons.recommend,
+                        color: Color(0xFFF26B21)),
+                    title: Text(v.title,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    subtitle: Text(
+                        '${v.uploader.isNotEmpty ? '${v.uploader} · ' : ''}🪙 ${v.coins}  👍 ${v.likes}'),
+                    onTap: () {
+                      Navigator.pop(context);
+                      widget.onPlay(v.id, v.title);
+                    },
+                  ),
+              ],
+            ),
+    );
+  }
+
+  // 消息中心：进入前确保设了昵称(=身份，别人据此找到你)。
+  Future<void> _openMessages() async {
+    final p = await SharedPreferences.getInstance();
+    var nick = (p.getString('profile_name') ?? '').trim();
+    if (nick.isEmpty) {
+      if (!mounted) return;
+      final ctrl = TextEditingController();
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('先设个昵称'),
+          content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLength: 20,
+            decoration: const InputDecoration(
+                hintText: '别人在通讯录里看到的名字'),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
+          ],
+        ),
+      );
+      if (ok != true) return;
+      nick = ctrl.text.trim();
+      if (nick.isEmpty) return;
+      await p.setString('profile_name', nick);
+    }
+    await PlatformService.setNick(nick); // 注册/更新昵称身份
+    if (!mounted) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => MessagesPage(onPlayVideo: widget.onPlay),
+    ));
+  }
+
+  // #7 今日运势盲盒：每日一次扭蛋。
+  Future<void> _openLuckyBox() async {
+    final d = await PlatformService.openBox();
+    if (!mounted) return;
+    if (d == null) {
+      _toast('开盲盒失败，请检查网络');
+      return;
+    }
+    if (d['ok'] != true) {
+      _toast('${d['error'] ?? '今天已开过'}');
+      return;
+    }
+    if (d['balance'] != null) {
+      setState(() => _balance = (d['balance'] as num).toInt());
+    }
+    final amount = (d['amount'] as num?)?.toInt() ?? 0;
+    final fortune = '${d['fortune'] ?? ''}';
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(children: [
+          Text('🎁 ', style: TextStyle(fontSize: 22)),
+          Text('今日运势盲盒'),
+        ]),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(amount > 0 ? '🪙 +$amount 兑换币' : '${d['label'] ?? ''}',
+              style: const TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.bold,
+                  color: Color(0xFFF26B21))),
+          const SizedBox(height: 12),
+          Text(fortune, textAlign: TextAlign.center),
+        ]),
+        actions: [
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('收下')),
+        ],
+      ),
+    );
+  }
+
+  // #6 拼手气群红包广场。
+  Future<void> _showPacketPlaza() async {
+    var list = await PlatformService.listPackets();
+    if (!mounted) return;
+    final grabbing = <String>{}; // 防重复点"抢"(同一包同时只发一次请求)
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setSheet) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          maxChildSize: 0.9,
+          builder: (_, sc) => Column(children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 12, 6),
+              child: Row(children: [
+                const Text('拼手气群红包',
+                    style: TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                FilledButton.icon(
+                  onPressed: () async {
+                    await _dropPacketDialog();
+                    final fresh = await PlatformService.listPackets();
+                    if (ctx.mounted) setSheet(() => list = fresh);
+                  },
+                  icon: const Icon(Icons.add, size: 18),
+                  label: const Text('发红包'),
+                ),
+              ]),
+            ),
+            Expanded(
+              child: list.isEmpty
+                  ? const Center(
+                      child: Text('还没有人发群红包，来发第一个~',
+                          style: TextStyle(color: Colors.black38)))
+                  : ListView.builder(
+                      controller: sc,
+                      itemCount: list.length,
+                      itemBuilder: (_, i) {
+                        final p = list[i];
+                        return Card(
+                          color: const Color(0xFFC0392B),
+                          margin: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 5),
+                          child: ListTile(
+                            leading: const Text('🧧',
+                                style: TextStyle(fontSize: 28)),
+                            title: Text('${p['msg'] ?? '恭喜发财'}',
+                                style: const TextStyle(
+                                    color: Color(0xFFFFE2A8),
+                                    fontWeight: FontWeight.w600)),
+                            subtitle: Text(
+                                '总额 ${p['total']} · 剩 ${p['left']}/${p['parts']} 份',
+                                style: const TextStyle(color: Colors.white70)),
+                            trailing: FilledButton(
+                              style: FilledButton.styleFrom(
+                                  backgroundColor: const Color(0xFFFFD24A),
+                                  foregroundColor: const Color(0xFF7A1F18)),
+                              onPressed: () async {
+                                final pid = '${p['id']}';
+                                if (grabbing.contains(pid)) return; // 防连点
+                                grabbing.add(pid);
+                                try {
+                                  final d =
+                                      await PlatformService.grabPacket(pid);
+                                  if (d == null) {
+                                    _toast('抢失败，请检查网络');
+                                  } else if (d['ok'] == true) {
+                                    _toast(
+                                        '🧧 抢到 ${d['amount']} 兑换币！(余额 ${d['balance']})');
+                                    if (d['balance'] != null) {
+                                      setState(() => _balance =
+                                          (d['balance'] as num).toInt());
+                                    }
+                                  } else {
+                                    _toast('${d['error'] ?? '抢失败'}');
+                                  }
+                                  final fresh =
+                                      await PlatformService.listPackets();
+                                  if (ctx.mounted) setSheet(() => list = fresh);
+                                } finally {
+                                  grabbing.remove(pid);
+                                }
+                              },
+                              child: const Text('抢'),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ]),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _dropPacketDialog() async {
+    final totalCtrl = TextEditingController(text: '20');
+    final partsCtrl = TextEditingController(text: '5');
+    final msgCtrl = TextEditingController(text: '恭喜发财');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('发拼手气群红包'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: totalCtrl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '总额(兑换币)')),
+          TextField(
+              controller: partsCtrl,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '份数')),
+          TextField(
+              controller: msgCtrl,
+              maxLength: 40,
+              decoration: const InputDecoration(labelText: '祝福语')),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('塞钱发出')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final total = int.tryParse(totalCtrl.text.trim()) ?? 0;
+    final parts = int.tryParse(partsCtrl.text.trim()) ?? 0;
+    final d = await PlatformService.dropPacket(total, parts, msgCtrl.text);
+    if (d == null) {
+      _toast('发红包失败，请检查网络');
+    } else if (d['ok'] == true) {
+      _toast('🧧 群红包已发出！-$total 币（余额 ${d['balance']}）');
+      if (d['balance'] != null) {
+        setState(() => _balance = (d['balance'] as num).toInt());
+      }
+    } else {
+      _toast('${d['error'] ?? '发红包失败'}');
+    }
+  }
+
+  Future<void> _showCloudHistory() async {
+    final items = await PlatformService.pullHistory();
+    if (!mounted) return;
+    _sheet(
+      title: '云端历史（跨设备同步）',
+      child: items.isEmpty
+          ? const _SheetEmpty('云端还没有历史记录')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                for (final h in items)
+                  Builder(builder: (_) {
+                    final url = '${h['url'] ?? ''}';
+                    final isPlat = url.contains('/video/');
+                    return ListTile(
+                      dense: true,
+                      leading: const Icon(Icons.history),
+                      title: Text('${h['name'] ?? ''}',
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      trailing: isPlat
+                          ? const Icon(Icons.play_arrow, size: 18)
+                          : null,
+                      onTap: isPlat
+                          ? () {
+                              Navigator.pop(context);
+                              widget.onPlay(
+                                  url.split('/').last, '${h['name'] ?? ''}');
+                            }
+                          : null,
+                    );
+                  }),
+              ],
+            ),
+    );
+  }
+
+  // 功能入口小格子。
+  Widget _entry(
+      ColorScheme cs, IconData icon, String label, VoidCallback onTap) {
+    return InkWell(
+      borderRadius: BorderRadius.circular(12),
+      onTap: onTap,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+                color: cs.primary.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(12)),
+            child: Icon(icon, color: cs.primary, size: 22),
+          ),
+          const SizedBox(height: 5),
+          Text(label,
+              style: const TextStyle(fontSize: 11),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis),
+        ],
+      ),
+    );
+  }
+
+  // 直接给管理员发消息（进管理台的「用户反馈」面板）。
+  Future<void> _contactAdmin() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('给管理员发消息'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 4,
+          maxLength: 500,
+          decoration: const InputDecoration(
+              hintText: '反馈问题、建议，或联系客服…',
+              border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('发送')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = ctrl.text.trim();
+    if (msg.isEmpty) return;
+    final sent = await PlatformService.feedback('【留言】$msg');
+    _toast(sent ? '已发送给管理员，感谢反馈~' : '发送失败，请检查网络');
+  }
+
+  // 通用底部弹窗骨架。
+  void _sheet({required String title, required Widget child}) {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        minChildSize: 0.4,
+        builder: (_, sc) => Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 10),
+              child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(title,
+                      style: const TextStyle(
+                          fontSize: 16, fontWeight: FontWeight.w600))),
+            ),
+            Expanded(
+                child: PrimaryScrollController(
+                    controller: sc, child: child)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // 花兑换币设置专属称号（覆盖自动称号）。
+  Future<void> _editTitle() async {
+    final ctrl = TextEditingController(text: _customTitle);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('设置专属称号'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLength: 8,
+          decoration: const InputDecoration(
+              hintText: '最多 8 字', helperText: '花 10 小李兑换币'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('花10币设置')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final t = ctrl.text.trim();
+    if (t.isEmpty) return;
+    final sp = await PlatformService.spend('title');
+    if (sp == null || sp['ok'] != true) {
+      _toast('兑换币不足（需 ${sp?['need'] ?? 10}，当前 ${sp?['balance'] ?? _balance}）');
+      return;
+    }
+    final p = await SharedPreferences.getInstance();
+    await p.setString('my_title', t);
+    if (!mounted) return;
+    setState(() {
+      _customTitle = t;
+      _balance = ((sp['balance'] ?? _balance) as num).toInt();
+    });
+    _toast('称号已设为「$t」');
+  }
+
+  // 一键领取所有已完成、未领取的任务。
+  Future<void> _claimAll() async {
+    if (_tasks == null) return;
+    final t = (_tasks!['tasks'] as Map?) ?? {};
+    final goals = (_tasks!['goals'] as Map?) ?? const {};
+    final claimed =
+        ((t['claimed'] as List?) ?? const []).map((e) => e.toString()).toSet();
+    var got = 0, total = 0;
+    for (final k in ['coin', 'like', 'play']) {
+      final cur = ((t[k] ?? 0) as num).toInt();
+      final goal = ((goals[k] ?? 1) as num).toInt();
+      if (cur >= goal && !claimed.contains(k)) {
+        final d = await PlatformService.claimTask(k);
+        if (d != null && d['ok'] == true) {
+          got++;
+          total += ((d['reward'] ?? 0) as num).toInt();
+          if (d['balance'] != null) _balance = (d['balance'] as num).toInt();
+        }
+      }
+    }
+    final nt = await PlatformService.getTasks();
+    if (!mounted) return;
+    setState(() => _tasks = nt);
+    _toast(got > 0 ? '领取 $got 个任务，共 +$total 兑换币' : '没有可领取的任务');
+  }
+
+  Future<void> _claimTask(String task) async {
+    final d = await PlatformService.claimTask(task);
+    if (!mounted) return;
+    if (d == null) {
+      _toast('领取失败');
+      return;
+    }
+    if (d['ok'] == true) {
+      _toast('领取成功！+${d['reward'] ?? 0} 兑换币');
+      setState(() {
+        if (d['balance'] != null) _balance = (d['balance'] as num).toInt();
+      });
+      final t = await PlatformService.getTasks(); // 刷新已领取状态
+      if (mounted) setState(() => _tasks = t);
+    } else {
+      _toast('${d['error'] ?? '领取失败'}');
+    }
+  }
+
+  // 称号：自定义优先，否则按投币数自动升级。
+  ({String name, IconData icon}) get _title {
+    if (_customTitle.isNotEmpty) {
+      return (name: _customTitle, icon: Icons.workspace_premium);
+    }
+    final n = _ids['coined']?.length ?? 0;
+    if (n >= 20) return (name: '真爱粉', icon: Icons.local_fire_department);
+    if (n >= 5) return (name: '铁粉', icon: Icons.military_tech);
+    if (n >= 1) return (name: '新粉', icon: Icons.star_outline);
+    return (name: '路人', icon: Icons.person_outline);
+  }
+
+  // 距下一个自动称号还差几次投币（自定义称号时不显示）。
+  String get _levelHint {
+    if (_customTitle.isNotEmpty) return '';
+    final n = _ids['coined']?.length ?? 0;
+    if (n < 1) return '再投币 1 次升「新粉」';
+    if (n < 5) return '再投币 ${5 - n} 次升「铁粉」';
+    if (n < 20) return '再投币 ${20 - n} 次升「真爱粉」';
+    return '已是最高称号 🎉';
+  }
+
+  Future<void> _sign() async {
+    if (_signing) return;
+    setState(() => _signing = true);
+    final d = await PlatformService.signIn();
+    if (!mounted) return;
+    setState(() => _signing = false);
+    if (d == null) {
+      _toast('签到失败，请检查网络');
+      return;
+    }
+    if (d['already'] == true) {
+      _toast('今天已签到过啦，明天再来~（已连签 ${d['streak'] ?? _streak} 天）');
+    } else {
+      final bonus = (d['bonus'] ?? 0) as num;
+      _toast(bonus > 0
+          ? '签到成功！+${d['reward']} 兑换币（连签 ${d['streak']} 天，额外 +$bonus！）'
+          : '签到成功！+${d['reward'] ?? 0} 兑换币（已连签 ${d['streak'] ?? 1} 天）');
+    }
+    setState(() {
+      if (d['balance'] != null) _balance = (d['balance'] as num).toInt();
+      if (d['streak'] != null) _streak = (d['streak'] as num).toInt();
+    });
+  }
+
+  void _toast(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  Widget _taskCard(ColorScheme cs) {
+    if (_tasks == null) return const SizedBox.shrink();
+    final t = (_tasks!['tasks'] as Map?) ?? {};
+    final goals = (_tasks!['goals'] as Map?) ?? const {};
+    final rewards = (_tasks!['rewards'] as Map?) ?? const {};
+    final claimed =
+        ((t['claimed'] as List?) ?? const []).map((e) => e.toString()).toSet();
+    const defs = <(String, String, IconData)>[
+      ('coin', '投 1 次币', Icons.monetization_on),
+      ('like', '点 1 个赞', Icons.thumb_up),
+      ('play', '看 1 个视频', Icons.play_circle),
+    ];
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            const Icon(Icons.checklist, size: 18),
+            const SizedBox(width: 6),
+            const Text('每日任务',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+            const Spacer(),
+            TextButton(onPressed: _claimAll, child: const Text('一键领取')),
+          ]),
+          const SizedBox(height: 6),
+          for (final d in defs)
+            Builder(builder: (_) {
+              final cur = ((t[d.$1] ?? 0) as num).toInt();
+              final goal = ((goals[d.$1] ?? 1) as num).toInt();
+              final done = cur >= goal;
+              final got = claimed.contains(d.$1);
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  Icon(d.$3,
+                      size: 18, color: done ? cs.primary : Colors.black26),
+                  const SizedBox(width: 8),
+                  Expanded(child: Text('${d.$2}  (+${rewards[d.$1] ?? 5})')),
+                  Text('$cur/$goal',
+                      style:
+                          const TextStyle(color: Colors.black45, fontSize: 12)),
+                  const SizedBox(width: 10),
+                  got
+                      ? const Text('已领',
+                          style: TextStyle(color: Colors.black38, fontSize: 13))
+                      : FilledButton(
+                          onPressed: done ? () => _claimTask(d.$1) : null,
+                          style: FilledButton.styleFrom(
+                              minimumSize: const Size(56, 32),
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 12)),
+                          child: const Text('领取')),
+                ]),
+              );
+            }),
+        ]),
+      ),
+    );
+  }
+
+  List<PlatformVideo> get _shown {
+    if (_tab == 'rank') return _rank;
+    final ids = _ids[_tab] ?? const [];
+    final out = <PlatformVideo>[];
+    for (final id in ids) {
+      final v = _byId[id];
+      if (v != null) out.add(v);
+    }
+    return out;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final shown = _shown;
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('个人中心'),
+        actions: [
+          IconButton(
+              onPressed: _loading ? null : _load,
+              icon: const Icon(Icons.refresh)),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              padding: const EdgeInsets.all(16),
+              children: [
+                // 钱包卡片
+                Card(
+                  color: cs.primary.withValues(alpha: 0.10),
+                  child: Padding(
+                    padding: const EdgeInsets.all(18),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(children: [
+                          Icon(Icons.account_balance_wallet,
+                              color: cs.primary, size: 22),
+                          const SizedBox(width: 8),
+                          const Text('我的小李兑换币',
+                              style: TextStyle(
+                                  fontSize: 14, fontWeight: FontWeight.w600)),
+                          const Spacer(),
+                          // 称号徽章（点击花币设置专属称号）
+                          GestureDetector(
+                            onTap: _editTitle,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                  color: cs.primary,
+                                  borderRadius: BorderRadius.circular(20)),
+                              child:
+                                  Row(mainAxisSize: MainAxisSize.min, children: [
+                                Icon(_title.icon, color: Colors.white, size: 14),
+                                const SizedBox(width: 4),
+                                Text(_title.name,
+                                    style: const TextStyle(
+                                        color: Colors.white, fontSize: 12)),
+                                const SizedBox(width: 2),
+                                const Icon(Icons.edit,
+                                    color: Colors.white70, size: 11),
+                              ]),
+                            ),
+                          ),
+                        ]),
+                        const SizedBox(height: 8),
+                        Text('$_balance',
+                            style: TextStyle(
+                                fontSize: 40,
+                                fontWeight: FontWeight.bold,
+                                color: cs.primary)),
+                        const SizedBox(height: 6),
+                        Text(
+                            '🪙 投币 ${_ids['coined']?.length ?? 0}    👍 点赞 ${_ids['liked']?.length ?? 0}    ⭐ 收藏 ${_ids['faved']?.length ?? 0}',
+                            style: const TextStyle(color: Colors.black54)),
+                        const SizedBox(height: 14),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton.icon(
+                            onPressed: _signing ? null : _sign,
+                            icon: const Icon(Icons.redeem),
+                            label: const Text('每日签到领币'),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        // 签到日历：7 格，连签进度点亮
+                        Row(children: [
+                          for (var i = 0; i < 7; i++)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: Container(
+                                width: 22,
+                                height: 22,
+                                alignment: Alignment.center,
+                                decoration: BoxDecoration(
+                                  color: i < (_streak % 7 == 0 && _streak > 0
+                                          ? 7
+                                          : _streak % 7)
+                                      ? cs.primary
+                                      : Colors.black12,
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Text('${i + 1}',
+                                    style: TextStyle(
+                                        fontSize: 10,
+                                        color: i < (_streak % 7 == 0 &&
+                                                _streak > 0
+                                            ? 7
+                                            : _streak % 7)
+                                            ? Colors.white
+                                            : Colors.black38)),
+                              ),
+                            ),
+                        ]),
+                        const SizedBox(height: 8),
+                        Text(
+                            _streak > 0
+                                ? '已连签 $_streak 天 · 连签满 7 天额外 +50'
+                                : '每天签到领兑换币 · 连签满 7 天额外 +50',
+                            style: const TextStyle(
+                                color: Colors.black38, fontSize: 12)),
+                        if (_levelHint.isNotEmpty) ...[
+                          const SizedBox(height: 2),
+                          Text(_levelHint,
+                              style: TextStyle(
+                                  color: cs.primary,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500)),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                // v2.39.22 功能入口：成就/币流水/商城/周榜/关注/通知/歌单/云端历史
+                GridView.count(
+                  shrinkWrap: true,
+                  physics: const NeverScrollableScrollPhysics(),
+                  crossAxisCount: 4,
+                  mainAxisSpacing: 4,
+                  crossAxisSpacing: 4,
+                  childAspectRatio: 0.92,
+                  children: [
+                    _entry(cs, Icons.emoji_events, '成就', _showAchievements),
+                    _entry(cs, Icons.receipt_long, '币流水', _showLedger),
+                    _entry(cs, Icons.storefront, '兑换商城', () async {
+                      await Navigator.of(context).push(MaterialPageRoute<void>(
+                          builder: (_) => const StorePage()));
+                      _load();
+                    }),
+                    _entry(cs, Icons.calendar_view_week, '周榜', _showWeekly),
+                    _entry(cs, Icons.dynamic_feed, '关注动态', _showFeed),
+                    _entry(cs, Icons.notifications, '通知', _showNotifs),
+                    _entry(cs, Icons.queue_music, '歌单广场',
+                        _showPlaylistSquare),
+                    _entry(cs, Icons.cloud_sync, '云端历史',
+                        _showCloudHistory),
+                    _entry(cs, Icons.forum, '消息', _openMessages),
+                    _entry(cs, Icons.recommend, '猜你喜欢', _showRecommend),
+                    _entry(cs, Icons.casino, '今日盲盒', _openLuckyBox),
+                    _entry(cs, Icons.card_giftcard, '群红包', _showPacketPlaza),
+                    _entry(cs, Icons.palette, '红包皮肤', _showRedSkins),
+                    _entry(cs, Icons.confirmation_num, '我的优惠券',
+                        _showCoupons),
+                    _entry(cs, Icons.local_activity, '抢券广场',
+                        _showCouponPlaza),
+                    _entry(cs, Icons.qr_code_2, '我的收款', _showReceive),
+                    _entry(cs, Icons.support_agent, '联系管理员',
+                        _contactAdmin),
+                  ],
+                ),
+                if (_notice.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                        color: Colors.amber.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(10)),
+                    child: Row(children: [
+                      const Icon(Icons.campaign_outlined,
+                          color: Colors.orange, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                          child: Text(_notice,
+                              style: const TextStyle(fontSize: 13))),
+                    ]),
+                  ),
+                ],
+                const SizedBox(height: 16),
+                _taskCard(cs), // 每日任务
+                const SizedBox(height: 16),
+                // 三连分段
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'faved', label: Text('收藏'), icon: Icon(Icons.star)),
+                      ButtonSegment(value: 'liked', label: Text('点赞'), icon: Icon(Icons.thumb_up)),
+                      ButtonSegment(value: 'coined', label: Text('投币'), icon: Icon(Icons.monetization_on)),
+                      ButtonSegment(value: 'rank', label: Text('热门榜'), icon: Icon(Icons.local_fire_department)),
+                      ButtonSegment(value: 'rich', label: Text('富豪榜'), icon: Icon(Icons.emoji_events)),
+                    ],
+                    selected: {_tab},
+                    onSelectionChanged: (s) => setState(() => _tab = s.first),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                if (_tab == 'rich') ...[
+                  // 富豪榜：余额排行（uid 已打码）
+                  if (_rich.isEmpty)
+                    const Padding(
+                        padding: EdgeInsets.all(30),
+                        child: Center(
+                            child: Text('暂无榜单',
+                                style: TextStyle(color: Colors.black38))))
+                  else
+                    for (var i = 0; i < _rich.length; i++)
+                      ListTile(
+                        leading: CircleAvatar(
+                          radius: 14,
+                          backgroundColor: i < 3 ? cs.primary : Colors.black12,
+                          child: Text('${i + 1}',
+                              style: TextStyle(
+                                  fontSize: 12,
+                                  color:
+                                      i < 3 ? Colors.white : Colors.black54)),
+                        ),
+                        title: Text('${_rich[i]['uid']}'),
+                        trailing: Text('🪙 ${_rich[i]['balance']}',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600)),
+                      ),
+                ] else if (shown.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.all(30),
+                    child: Center(
+                        child: Text(
+                            _tab == 'rank' ? '还没有热门视频' : '这里还空空的，去给喜欢的视频点点吧~',
+                            style: const TextStyle(color: Colors.black38))),
+                  )
+                else
+                  for (final v in shown)
+                    ListTile(
+                      leading: const Icon(Icons.play_circle_outline),
+                      title: Text(v.title,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                          '${v.uploader.isNotEmpty ? '${v.uploader} · ' : ''}▶ ${v.views}   🪙 ${v.coins}   👍 ${v.likes}   ⭐ ${v.favs}'),
+                      trailing: v.uploader.isNotEmpty
+                          ? IconButton(
+                              tooltip: _following.contains(v.uploader)
+                                  ? '取关'
+                                  : '关注UP主',
+                              icon: Icon(
+                                  _following.contains(v.uploader)
+                                      ? Icons.person_remove
+                                      : Icons.person_add_alt_1,
+                                  size: 20,
+                                  color: _following.contains(v.uploader)
+                                      ? Colors.black38
+                                      : cs.primary),
+                              onPressed: () => _toggleFollow(v.uploader),
+                            )
+                          : null,
+                      onTap: () => widget.onPlay(v.id, v.title),
+                    ),
+                const SizedBox(height: 20),
+              ],
+            ),
+    );
+  }
+}
+
+/// #8 作者作品页：某上传者的全部公开作品。
+class _UploaderPage extends StatefulWidget {
+  final String uploader;
+  final void Function(String id, String title) onPlay;
+  const _UploaderPage({required this.uploader, required this.onPlay});
+  @override
+  State<_UploaderPage> createState() => _UploaderPageState();
+}
+
+class _UploaderPageState extends State<_UploaderPage> {
+  bool _loading = true;
+  List<PlatformVideo> _videos = [];
+  bool _following = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final vs = await PlatformService.byUploader(widget.uploader);
+    final fol = await PlatformService.following();
+    if (!mounted) return;
+    setState(() {
+      _videos = vs;
+      _following = fol.contains(widget.uploader);
+      _loading = false;
+    });
+  }
+
+  Future<void> _toggleFollow() async {
+    final on = !_following;
+    setState(() => _following = on);
+    final d = await PlatformService.follow(widget.uploader, on);
+    // 仅 ok:true 视为成功，否则回滚乐观状态。
+    final ok = d != null && d['ok'] == true;
+    if (mounted && !ok) {
+      setState(() => _following = !on);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.uploader),
+        actions: [
+          TextButton.icon(
+            onPressed: _toggleFollow,
+            icon: Icon(
+                _following ? Icons.person_remove : Icons.person_add_alt_1,
+                size: 18,
+                color: _following ? Colors.grey : cs.primary),
+            label: Text(_following ? '已关注' : '关注',
+                style: TextStyle(color: _following ? Colors.grey : cs.primary)),
+          ),
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _videos.isEmpty
+              ? const Center(
+                  child: Text('该作者暂无公开作品',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: _videos.length + 1,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    if (i == 0) {
+                      return Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Text('共 ${_videos.length} 个作品',
+                            style: const TextStyle(color: Colors.black54)),
+                      );
+                    }
+                    final v = _videos[i - 1];
+                    return ListTile(
+                      leading: const Icon(Icons.play_circle_outline),
+                      title: Text(v.title,
+                          maxLines: 1, overflow: TextOverflow.ellipsis),
+                      subtitle: Text(
+                          '▶ ${v.views}   🪙 ${v.coins}   👍 ${v.likes}   ⭐ ${v.favs}'),
+                      onTap: () => widget.onPlay(v.id, v.title),
+                    );
+                  },
+                ),
+    );
+  }
+}
+
+/// 弹窗空状态占位。
+class _SheetEmpty extends StatelessWidget {
+  final String text;
+  const _SheetEmpty(this.text);
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.all(40),
+        child: Center(
+            child: Text(text,
+                textAlign: TextAlign.center,
+                style: const TextStyle(color: Colors.black38))),
+      );
+}
+
+/// 创作中心：上传作品、我的视频、数据统计、平台播放榜。
+class _CreatorCenterPage extends StatefulWidget {
+  final VoidCallback onUpload;
+  final VoidCallback onMyVideos;
+  final VoidCallback onStats;
+  final void Function(String id, String title) onPlay;
+  const _CreatorCenterPage(
+      {required this.onUpload,
+      required this.onMyVideos,
+      required this.onStats,
+      required this.onPlay});
+  @override
+  State<_CreatorCenterPage> createState() => _CreatorCenterPageState();
+}
+
+class _CreatorCenterPageState extends State<_CreatorCenterPage> {
+  final _svc = PlatformService();
+  List<PlatformVideo> _works = [];
+  bool _loading = true;
+  String _notice = ''; // 功能2：公告条
+  String _query = ''; // 功能5：搜索
+  String _sort = 'views'; // 功能6：排序
+  String _creatorName = ''; // 功能9：创作者名字
+  int _balance = 0; // 小李兑换币余额
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final v = await _svc.list(sort: _sort);
+    final notice = await PlatformService.getNotice();
+    final bal = await PlatformService.getBalance();
+    final p = await SharedPreferences.getInstance();
+    if (!mounted) return;
+    setState(() {
+      _works = v;
+      _notice = notice;
+      _balance = bal;
+      _creatorName = p.getString('creator_name') ?? '';
+      _loading = false;
+    });
+  }
+
+  // 投币：视频币+1，钱包扣兑换币(后台可配，默认1)。可给自己的视频投币。
+  Future<void> _coin(PlatformVideo v) async {
+    final d = await PlatformService.coin(v.id);
+    if (d == null) {
+      _toast('投币失败');
+      return;
+    }
+    if (d['ok'] == true) {
+      _toast('投币成功！花费 ${d['cost'] ?? 1} 小李兑换币');
+      if (mounted) {
+        setState(() => _balance = ((d['balance'] ?? _balance) as num).toInt());
+      }
+      _load();
+    } else {
+      _toast('${d['error'] ?? '投币失败'}（余额 ${d['balance'] ?? 0}）');
+    }
+  }
+
+  void _toast(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  static String _fmtBytes(num b) {
+    if (b >= 1073741824) return '${(b / 1073741824).toStringAsFixed(1)}G';
+    if (b >= 1048576) return '${(b / 1048576).toStringAsFixed(0)}M';
+    return '${(b / 1024).toStringAsFixed(0)}K';
+  }
+
+  List<PlatformVideo> get _shown => _works
+      .where((v) => _query.isEmpty || v.title.toLowerCase().contains(_query))
+      .toList();
+
+  // 功能3/4：上传文件（可多选批量），带进度
+  Future<void> _upload({required bool multi}) async {
+    final r = await FilePicker.platform
+        .pickFiles(type: FileType.video, allowMultiple: multi);
+    if (r == null || r.files.isEmpty) return;
+    final paths = r.files.map((f) => f.path).whereType<String>().toList();
+    final uploader = _creatorName.isEmpty ? '匿名' : _creatorName;
+    for (var i = 0; i < paths.length; i++) {
+      final name = paths[i].split(Platform.pathSeparator).last;
+      final title =
+          name.contains('.') ? name.substring(0, name.lastIndexOf('.')) : name;
+      final progress = ValueNotifier<double>(0);
+      var open = true;
+      void close() {
+        if (open && mounted) {
+          open = false;
+          Navigator.of(context).pop();
+        }
+      }
+
+      if (mounted) {
+        showDialog<void>(
+          context: context,
+          barrierDismissible: false,
+          builder: (_) => AlertDialog(
+            title: Text('上传中 ${i + 1}/${paths.length}'),
+            content: Column(mainAxisSize: MainAxisSize.min, children: [
+              ValueListenableBuilder<double>(
+                valueListenable: progress,
+                builder: (_, v, __) => LinearProgressIndicator(value: v),
+              ),
+              const SizedBox(height: 10),
+              Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            ]),
+          ),
+        );
+      }
+      try {
+        await for (final p in _svc.uploadWithProgress(paths[i], title, uploader)) {
+          progress.value = p;
+        }
+        close();
+        _toast(_svc.lastUploadMessage);
+      } catch (_) {
+        close();
+        _toast('上传失败：${_svc.lastUploadMessage}');
+      }
+    }
+    _load();
+  }
+
+  // 功能7：删除作品
+  Future<void> _delete(PlatformVideo v) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除作品'),
+        content: Text('从平台删除「${v.title}」？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final done = await PlatformService.deleteVideo(v.id);
+    _toast(done ? '已删除' : '删除失败');
+    if (done) _load();
+  }
+
+  // 功能9：设置创作者名字（上传时用）
+  Future<void> _editName() async {
+    final ctrl = TextEditingController(text: _creatorName);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('创作者名字'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: '上传作品时显示的名字')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    // 改名要花小李兑换币（后台可配，默认5）。先扣费，不足则拒绝。
+    final sp = await PlatformService.spend('rename');
+    if (sp == null || sp['ok'] != true) {
+      _toast('兑换币不足，改名需 ${sp?['need'] ?? '?'} 个（当前 ${sp?['balance'] ?? 0}）。投币可赚币');
+      return;
+    }
+    final p = await SharedPreferences.getInstance();
+    await p.setString('creator_name', ctrl.text.trim());
+    if (mounted) {
+      setState(() {
+        _creatorName = ctrl.text.trim();
+        _balance = ((sp['balance'] ?? _balance) as num).toInt();
+      });
+    }
+    _toast('已改名，花费 ${sp['cost']} 兑换币');
+  }
+
+  // 功能10：导出作品列表
+  void _export() {
+    final b = StringBuffer('我的平台作品\n');
+    for (final v in _works) {
+      b.writeln(
+          '${v.title}\t播放${v.views}\t${_fmtBytes(v.size)}\t${PlatformService.videoUrl(v.id)}');
+    }
+    Clipboard.setData(ClipboardData(text: b.toString()));
+    _toast('作品列表已复制');
+  }
+
+  Widget _statCard(String label, String val, Color c) => Expanded(
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 4),
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          decoration: BoxDecoration(
+              color: c.withOpacity(0.1),
+              borderRadius: BorderRadius.circular(12)),
+          child: Column(children: [
+            Text(val,
+                style: TextStyle(
+                    fontSize: 18, fontWeight: FontWeight.bold, color: c)),
+            Text(label,
+                style: const TextStyle(fontSize: 11, color: Colors.black54)),
+          ]),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final views = _works.fold<int>(0, (s, v) => s + v.views);
+    final size = _works.fold<int>(0, (s, v) => s + v.size);
+    final rated = _works.where((v) => v.rcount > 0).toList();
+    final avg = rated.isEmpty
+        ? 0.0
+        : rated.fold<double>(0, (s, v) => s + v.rating) / rated.length;
+    final shown = _shown;
+    return Scaffold(
+      appBar: AppBar(title: const Text('创作中心'), actions: [
+        IconButton(
+            tooltip: '创作者名字',
+            onPressed: _editName,
+            icon: const Icon(Icons.badge_outlined)),
+        IconButton(onPressed: _load, icon: const Icon(Icons.refresh)),
+      ]),
+      body: ListView(
+        children: [
+          // 功能2：公告条
+          if (_notice.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                  color: const Color(0xFFFFF3E0),
+                  borderRadius: BorderRadius.circular(10)),
+              child: Row(children: [
+                const Icon(Icons.campaign, color: Colors.orange, size: 20),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_notice, style: const TextStyle(fontSize: 13))),
+              ]),
+            ),
+          // 头图
+          Container(
+            margin: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              gradient: const LinearGradient(
+                  colors: [Color(0xFFFF5E8A), Color(0xFFB14CFF)]),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(_creatorName.isEmpty ? '我的创作' : _creatorName,
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold)),
+                    const SizedBox(height: 4),
+                    Row(children: [
+                      const Icon(Icons.monetization_on,
+                          color: Color(0xFFFFD54F), size: 18),
+                      const SizedBox(width: 4),
+                      Text('$_balance 小李兑换币',
+                          style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600)),
+                    ]),
+                  ],
+                ),
+              ),
+              const Icon(Icons.workspace_premium,
+                  color: Colors.white70, size: 40),
+            ]),
+          ),
+          // 功能1：数据概览
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8),
+            child: Row(children: [
+              _statCard('作品', '${_works.length}', const Color(0xFFFF5E8A)),
+              _statCard('总播放', '$views', const Color(0xFF7C5CFF)),
+              _statCard('占用', _fmtBytes(size), const Color(0xFF36B37E)),
+              _statCard('均分', avg == 0 ? '-' : avg.toStringAsFixed(1),
+                  const Color(0xFFFFA726)),
+            ]),
+          ),
+          const SizedBox(height: 8),
+          // 功能3/4：上传 + 入口
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            child: Wrap(spacing: 8, runSpacing: 4, children: [
+              FilledButton.icon(
+                  onPressed: () => _upload(multi: false),
+                  icon: const Icon(Icons.upload_file, size: 18),
+                  label: const Text('上传作品')),
+              OutlinedButton.icon(
+                  onPressed: () => _upload(multi: true),
+                  icon: const Icon(Icons.drive_folder_upload, size: 18),
+                  label: const Text('批量上传')),
+              OutlinedButton.icon(
+                  onPressed: widget.onMyVideos,
+                  icon: const Icon(Icons.video_library_outlined, size: 18),
+                  label: const Text('我的视频/B站')),
+              OutlinedButton.icon(
+                  onPressed: widget.onStats,
+                  icon: const Icon(Icons.analytics_outlined, size: 18),
+                  label: const Text('数据统计')),
+              OutlinedButton.icon(
+                  onPressed: _export,
+                  icon: const Icon(Icons.ios_share, size: 18),
+                  label: const Text('导出作品')),
+            ]),
+          ),
+          const Divider(height: 24),
+          // 功能5/6：作品标题 + 搜索 + 排序
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+            child: Row(children: [
+              const Text('我的作品',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+              const Spacer(),
+              SizedBox(
+                width: 130,
+                child: TextField(
+                  decoration: const InputDecoration(
+                      isDense: true,
+                      prefixIcon: Icon(Icons.search, size: 18),
+                      hintText: '搜索'),
+                  onChanged: (s) =>
+                      setState(() => _query = s.trim().toLowerCase()),
+                ),
+              ),
+              DropdownButton<String>(
+                value: _sort,
+                underline: const SizedBox(),
+                items: const [
+                  DropdownMenuItem(value: 'views', child: Text('播放')),
+                  DropdownMenuItem(value: 'time', child: Text('最新')),
+                  DropdownMenuItem(value: 'rating', child: Text('评分')),
+                ],
+                onChanged: (v) {
+                  setState(() => _sort = v ?? 'views');
+                  _load();
+                },
+              ),
+            ]),
+          ),
+          if (_loading)
+            const Padding(
+                padding: EdgeInsets.all(30),
+                child: Center(child: CircularProgressIndicator()))
+          else if (shown.isEmpty)
+            const Padding(
+                padding: EdgeInsets.all(30),
+                child: Center(
+                    child: Text('还没有作品，点上面「上传作品」发布到平台',
+                        style: TextStyle(color: Colors.black38))))
+          else
+            // 功能7/8：每条作品（评分 + 播放/分享/删除）
+            for (final v in shown)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.movie_outlined),
+                title: Text(v.title,
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(
+                    '▶ ${v.views}   🪙 ${v.coins}${v.rcount > 0 ? '   ★ ${v.rating.toStringAsFixed(1)}' : ''}   ${_fmtBytes(v.size)}'),
+                onTap: () => widget.onPlay(v.id, v.title),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    icon: const Icon(Icons.monetization_on_outlined,
+                        color: Color(0xFFFFA726)),
+                    tooltip: '投币(花1兑换币)',
+                    onPressed: () => _coin(v),
+                  ),
+                  PopupMenuButton<String>(
+                    onSelected: (a) {
+                      if (a == 'play') {
+                        widget.onPlay(v.id, v.title);
+                      } else if (a == 'share') {
+                        Clipboard.setData(ClipboardData(
+                            text: PlatformService.videoUrl(v.id)));
+                        _toast('分享链接已复制');
+                      } else if (a == 'delete') {
+                        _delete(v);
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'play', child: Text('播放')),
+                      PopupMenuItem(value: 'share', child: Text('复制分享链接')),
+                      PopupMenuItem(value: 'delete', child: Text('删除')),
+                    ],
+                  ),
+                ]),
+              ),
+          const SizedBox(height: 20),
+        ],
+      ),
+    );
+  }
+}
+
+/// 隐藏后台管理：连点设置5次进入。管理平台/云端视频 + 公网状态。
+class _AdminPage extends StatefulWidget {
+  const _AdminPage();
+  @override
+  State<_AdminPage> createState() => _AdminPageState();
+}
+
+class _AdminPageState extends State<_AdminPage> {
+  final _svc = PlatformService();
+  List<PlatformVideo> _videos = [];
+  Map<String, dynamic> _stats = {};
+  bool _loading = true;
+  bool _healthy = false;
+  bool _busy = false; // 正在执行某个管理动作
+  String _query = ''; // 功能2：搜索过滤
+  String _sort = 'time'; // 功能3：排序 time/size/name
+  bool _selectMode = false; // 批次3：批量选择
+  final Set<String> _selected = {};
+  Map<String, dynamic> _flags = {}; // upload_enabled / auto_backup
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    if (!mounted) return; // 异步动作后可能已退出本页
+    setState(() => _loading = true);
+    final v = await PlatformService.adminList(); // 含隐藏 + 管理字段
+    final h = await _svc.publicHealthy();
+    final s = await PlatformService.adminGet('stats'); // 功能1：统计
+    final f = await PlatformService.adminGet('flags'); // 批次3：开关状态
+    if (!mounted) return;
+    setState(() {
+      _videos = v;
+      _healthy = h;
+      _stats = s ?? {};
+      _flags = f ?? {};
+      _loading = false;
+    });
+  }
+
+  // 过滤+排序后的列表（功能2/3）。
+  List<PlatformVideo> get _shown {
+    var l = _videos
+        .where((v) => _query.isEmpty || v.title.toLowerCase().contains(_query))
+        .toList();
+    if (_sort == 'size') {
+      l.sort((a, b) => b.size.compareTo(a.size));
+    } else if (_sort == 'name') {
+      l.sort((a, b) => a.title.compareTo(b.title));
+    } else if (_sort == 'views') {
+      l.sort((a, b) => b.views.compareTo(a.views));
+    } else {
+      l.sort((a, b) => b.ts.compareTo(a.ts));
+    }
+    // 置顶的排最前
+    l.sort((a, b) => (b.pinned ? 1 : 0).compareTo(a.pinned ? 1 : 0));
+    return l;
+  }
+
+  static String _fmtBytes(num b) {
+    if (b >= 1073741824) return '${(b / 1073741824).toStringAsFixed(2)} GB';
+    if (b >= 1048576) return '${(b / 1048576).toStringAsFixed(1)} MB';
+    if (b >= 1024) return '${(b / 1024).toStringAsFixed(0)} KB';
+    return '$b B';
+  }
+
+  void _toast(String m) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
+    }
+  }
+
+  Future<void> _run(String label, Future<bool> Function() action) async {
+    setState(() => _busy = true);
+    final ok = await action();
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _toast(ok ? '$label 完成' : '$label 失败');
+  }
+
+  Future<void> _refreshUrl() async {
+    await PlatformService.loadRemoteUrl(); // 功能(刷新地址)
+    await PlatformService.loadLocal();
+    await _load();
+    _toast('已刷新公网地址');
+  }
+
+  Future<void> _republish() => _run('重发公网地址到 GitHub', () async {
+        final d = await PlatformService.adminGet('republish');
+        return d?['ok'] == true;
+      }); // 功能8
+
+  Future<void> _rebackup() => _run('补全 GitHub 备份', () async {
+        final d = await PlatformService.adminGet('rebackup');
+        if (d?['ok'] == true) {
+          _toast('已排队备份 ${d?['queued'] ?? 0} 个，稍后刷新');
+          return true;
+        }
+        return false;
+      }); // 功能9
+
+  Future<void> _restartTunnel() async {
+    final ok = await _confirm('重启隧道', '会断开当前公网地址、约1分钟后换新地址（自动发布）。继续？');
+    if (ok != true) return;
+    await _run('重启隧道', () async {
+      final d = await PlatformService.adminGet('tunnel', params: {'action': 'restart'});
+      return d?['ok'] == true;
+    }); // 功能7
+  }
+
+  Future<void> _clearAll() async {
+    final ok = await _confirm('清空全部视频', '将删除平台上全部 ${_videos.length} 个视频（本地文件）。不可恢复！继续？');
+    if (ok != true) return;
+    await _run('清空全部', () async {
+      final d = await PlatformService.adminGet('clear');
+      if (d?['ok'] == true) {
+        await _load();
+        return true;
+      }
+      return false;
+    }); // 功能(清空全部)
+  }
+
+  Future<void> _showLog() async {
+    // 功能10：查看服务器/隧道日志。future 只在切换来源时重算，不随每次 rebuild 重拉。
+    var which = 'server';
+    Future<Map<String, dynamic>?>? fut;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) {
+          fut ??= PlatformService.adminGet('log',
+              params: {'which': which, 'n': '200'});
+          return DraggableScrollableSheet(
+            expand: false,
+            initialChildSize: 0.7,
+            builder: (_, scroll) => Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: Row(children: [
+                    const SizedBox(width: 8),
+                    const Text('日志',
+                        style: TextStyle(fontWeight: FontWeight.bold)),
+                    const Spacer(),
+                    for (final w in const ['server', 'tunnel', 'keepalive'])
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 2),
+                        child: ChoiceChip(
+                          label: Text(w, style: const TextStyle(fontSize: 12)),
+                          selected: which == w,
+                          onSelected: (_) => setSheet(() {
+                            which = w;
+                            fut = PlatformService.adminGet('log',
+                                params: {'which': w, 'n': '200'});
+                          }),
+                        ),
+                      ),
+                  ]),
+                ),
+                Expanded(
+                  child: FutureBuilder<Map<String, dynamic>?>(
+                    future: fut,
+                    builder: (_, snap) {
+                      final log = (snap.data?['log'] ??
+                              (snap.connectionState == ConnectionState.waiting
+                                  ? '加载中…'
+                                  : '(无)'))
+                          .toString();
+                      return SingleChildScrollView(
+                        controller: scroll,
+                        padding: const EdgeInsets.all(12),
+                        child: SelectableText(log,
+                            style: const TextStyle(
+                                fontSize: 11, fontFamily: 'monospace')),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Future<bool?> _confirm(String title, String msg) => showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text(title),
+          content: Text(msg),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(ctx, true),
+                child: const Text('确定')),
+          ],
+        ),
+      );
+
+  Future<void> _rename(PlatformVideo v) async {
+    // 功能6：重命名
+    final ctrl = TextEditingController(text: v.title);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重命名'),
+        content: TextField(controller: ctrl, autofocus: true),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final t = ctrl.text.trim();
+    if (t.isEmpty) return;
+    final d =
+        await PlatformService.adminGet('rename', params: {'id': v.id, 'title': t});
+    _toast(d?['ok'] == true ? '已重命名' : '重命名失败');
+    if (d?['ok'] == true) _load();
+  }
+
+  void _copy(String text, String what) {
+    Clipboard.setData(ClipboardData(text: text));
+    _toast('已复制$what');
+  }
+
+  Future<void> _delete(PlatformVideo v) async {
+    final ok = await _confirm('删除视频', '删除「${v.title}」？平台和 GitHub 备份都会一并删除。');
+    if (ok != true) return;
+    final done = await PlatformService.deleteVideo(v.id);
+    _toast(done ? '已删除' : '删除失败');
+    if (done) _load();
+  }
+
+  // 功能11/12：在线改「更新说明」/「公告栏」（持久化到服务器 config）。
+  Future<void> _editCfg(String key, String title, String cur) async {
+    final ctrl = TextEditingController(text: cur);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: TextField(
+            controller: ctrl, autofocus: true, maxLines: 4, minLines: 1),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final d = await PlatformService.adminGet('set-$key',
+        params: {'v': ctrl.text.trim()});
+    _toast(d?['ok'] == true ? '$title 已保存' : '保存失败');
+    if (d?['ok'] == true) _load();
+  }
+
+  // 后台直接改某视频的投币数（给自己刷币 / 纠错）。
+  Future<void> _setCoins(PlatformVideo v) async {
+    final ctrl = TextEditingController(text: '${v.coins}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('改投币数 · ${v.title}'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          decoration: const InputDecoration(
+              labelText: '投币数', helperText: '直接设为该数值（0 起）'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final n = int.tryParse(ctrl.text.trim());
+    if (n == null || n < 0) {
+      _toast('请输入 ≥0 的整数');
+      return;
+    }
+    final d = await PlatformService.adminGet('set-coins',
+        params: {'id': v.id, 'n': '$n'});
+    _toast(d?['ok'] == true ? '投币数已改为 ${d?['coins'] ?? n}' : '改失败');
+    if (d?['ok'] == true) _load();
+  }
+
+  // 功能价格：表单面板（改名/投币花费 + 新用户起始余额），不再手填 JSON。
+  Future<void> _editPrices() async {
+    // 当前价格：prices 可能是 JSON 字符串或空。
+    var prices = <String, dynamic>{};
+    final raw = (_stats['prices'] ?? '').toString();
+    if (raw.trim().isNotEmpty) {
+      try {
+        final p = jsonDecode(raw);
+        if (p is Map) prices = Map<String, dynamic>.from(p);
+      } catch (_) {}
+    }
+    int cur(String k, int dft) {
+      final x = prices[k];
+      if (x is num) return x.toInt();
+      return int.tryParse('${x ?? ''}') ?? dft;
+    }
+
+    final rename = TextEditingController(text: '${cur('rename', 5)}');
+    final coin = TextEditingController(text: '${cur('coin', 1)}');
+    final start = TextEditingController(
+        text: '${int.tryParse('${_stats['start_balance'] ?? 100}') ?? 100}');
+    Widget field(String label, String hint, TextEditingController c) => Padding(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          child: TextField(
+            controller: c,
+            keyboardType: TextInputType.number,
+            decoration: InputDecoration(
+                labelText: label,
+                helperText: hint,
+                border: const OutlineInputBorder()),
+          ),
+        );
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('功能价格（小李兑换币）'),
+        content: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            field('改创作者名 花费', '默认 5', rename),
+            field('投一次币 花费', '默认 1', coin),
+            field('新用户起始余额', '默认 100', start),
+          ]),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    int nn(TextEditingController c, int dft) {
+      final x = int.tryParse(c.text.trim());
+      return (x == null || x < 0) ? dft : x;
+    }
+
+    final pj = jsonEncode({'rename': nn(rename, 5), 'coin': nn(coin, 1)});
+    final d1 = await PlatformService.adminGet('set-prices', params: {'v': pj});
+    final d2 = await PlatformService.adminGet('set-start-balance',
+        params: {'v': '${nn(start, 100)}'});
+    _toast((d1?['ok'] == true && d2?['ok'] == true) ? '价格已保存' : '保存失败');
+    if (d1?['ok'] == true) _load();
+  }
+
+  // 功能13：孤儿文件清理。
+  Future<void> _cleanOrphans() => _run('清理孤儿文件', () async {
+        final d = await PlatformService.adminGet('clean-orphans');
+        if (d?['ok'] == true) {
+          _toast('清理 ${d?['removed'] ?? 0} 个，释放 ${_fmtBytes((d?['freed'] ?? 0) as num)}');
+          return true;
+        }
+        return false;
+      });
+
+  // 功能14：导出 index.json 备份（复制到剪贴板）。
+  Future<void> _exportIndex() async {
+    final d = await PlatformService.adminGet('export');
+    if (d?['index'] == null) {
+      _toast('导出失败');
+      return;
+    }
+    _copy(jsonEncode({'index': d!['index'], 'config': d['config']}),
+        'index 备份(JSON)');
+  }
+
+  // 功能15：重启服务器。
+  Future<void> _restartServer() async {
+    final ok = await _confirm('重启服务器', '会短暂中断，keepalive 会自动拉起。继续？');
+    if (ok != true) return;
+    await PlatformService.adminGet('restart-server');
+    _toast('服务器重启中…几秒后刷新');
+  }
+
+  // 功能16：服务器信息。
+  Future<void> _sysinfo() async {
+    final d = await PlatformService.adminGet('sysinfo');
+    if (d == null || !mounted) {
+      _toast('取信息失败');
+      return;
+    }
+    final up = (d['uptime_sec'] ?? 0) as num;
+    final h = (up ~/ 3600), m = ((up % 3600) ~/ 60);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('服务器信息'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('版本', '${d['version']}'),
+            _kv('运行', '${h}h ${m}m'),
+            _kv('Python', '${d['python']}'),
+            _kv('系统', '${d['platform']}'),
+            _kv('目录', '${d['root']}'),
+            _kv('视频数', '${d['video_count']}'),
+            _kv('公网', '${d['public_url']}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 功能17/18：隐藏/显示、置顶/取消。
+  Future<void> _toggleFlag(PlatformVideo v, String flag, bool on) async {
+    final d = await PlatformService.adminGet(flag,
+        params: {'id': v.id, 'on': on ? '1' : '0'});
+    if (d?['ok'] == true) _load();
+  }
+
+  // 功能19：视频详情。
+  Future<void> _detail(PlatformVideo v) async {
+    final when = v.ts > 0
+        ? DateTime.fromMillisecondsSinceEpoch(v.ts * 1000).toString().substring(0, 19)
+        : '未知';
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(v.title, maxLines: 2, overflow: TextOverflow.ellipsis),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('上传者', v.uploader.isEmpty ? '匿名' : v.uploader),
+            _kv('分类', v.cat),
+            _kv('大小', _fmtBytes(v.size)),
+            _kv('播放量', '${v.views}'),
+            _kv('上传时间', when),
+            _kv('GitHub备份', v.ghUrl != null ? '已备份 ✓' : '未备份'),
+            _kv('状态',
+                '${v.hidden ? '已隐藏 ' : ''}${v.pinned ? '已置顶' : ''}'.trim().isEmpty ? '正常' : '${v.hidden ? '已隐藏 ' : ''}${v.pinned ? '已置顶' : ''}'),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () {
+                _copy(PlatformService.videoUrl(v.id), '直链');
+                Navigator.pop(ctx);
+              },
+              child: const Text('复制直链')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 功能21：改上传者(+标题)
+  Future<void> _editUploader(PlatformVideo v) async {
+    final tc = TextEditingController(text: v.title);
+    final uc = TextEditingController(text: v.uploader);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('编辑'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+              controller: tc,
+              decoration: const InputDecoration(labelText: '标题')),
+          TextField(
+              controller: uc,
+              decoration: const InputDecoration(labelText: '上传者')),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final d = await PlatformService.adminGet('edit', params: {
+      'id': v.id,
+      'title': tc.text.trim(),
+      'uploader': uc.text.trim(),
+    });
+    _toast(d?['ok'] == true ? '已保存' : '保存失败');
+    if (d?['ok'] == true) _load();
+  }
+
+  // 功能22：下载平台视频到本地
+  Future<void> _downloadVideo(PlatformVideo v) async {
+    final safe = v.title.replaceAll(RegExp(r'[^\w一-龥 .-]'), '_');
+    final dest = await FilePicker.platform
+        .saveFile(dialogTitle: '保存到…', fileName: '$safe.mp4');
+    if (dest == null || !mounted) return;
+    _toast('开始下载…');
+    final err = await PlatformService().downloadVideo(v.id, dest);
+    _toast(err == null ? '已保存到 $dest' : '下载失败：$err');
+  }
+
+  // 功能23：导入/恢复 index
+  Future<void> _import() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('导入/恢复 index'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('粘贴之前「导出index」复制的 JSON（会替换当前全部记录）',
+              style: TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 8),
+          TextField(
+              controller: ctrl,
+              maxLines: 5,
+              decoration: const InputDecoration(border: OutlineInputBorder())),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('导入')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final txt = ctrl.text.trim();
+    if (txt.isEmpty) return;
+    final n = await PlatformService.adminImport(txt);
+    _toast(n != null ? '已导入 $n 条' : '导入失败(JSON 格式?)');
+    if (n != null) _load();
+  }
+
+  // 功能24/25：公网上传开关 / 云端自动备份开关
+  Future<void> _setFlag(String key, bool on) async {
+    setState(() => _flags[key] = on); // 乐观更新
+    final d = await PlatformService.adminGet('set-flag',
+        params: {'key': key, 'on': on ? '1' : '0'});
+    if (d?['ok'] != true) {
+      _toast('切换失败');
+      _load();
+    }
+  }
+
+  // 功能26：一键体检
+  Future<void> _healthCheck() async {
+    setState(() => _busy = true);
+    final d = await PlatformService.adminGet('health-check');
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (d == null) {
+      _toast('体检失败');
+      return;
+    }
+    Widget row(String k, bool? ok) => _kv(k, ok == true ? '正常 ✓' : '异常 ✗',
+        color: ok == true ? Colors.green : Colors.red);
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('一键体检'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          row('服务器', d['server'] == true),
+          row('公网隧道', d['tunnel'] == true),
+          row('GitHub', d['github'] == true),
+          _kv('磁盘剩余', '${d['disk_free_gb'] ?? 0} GB'),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 功能27：最近播放记录
+  Future<void> _showRecent() async {
+    final d = await PlatformService.adminGet('recent');
+    if (!mounted) return;
+    final list = (d?['recent'] as List?) ?? [];
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (_) => ListView(
+        children: [
+          const Padding(
+            padding: EdgeInsets.all(14),
+            child: Text('最近播放',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+          ),
+          if (list.isEmpty)
+            const Padding(
+                padding: EdgeInsets.all(24),
+                child: Center(
+                    child: Text('还没有播放记录',
+                        style: TextStyle(color: Colors.black38))))
+          else
+            for (final e in list)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.play_arrow, size: 18),
+                title: Text('${(e as Map)['title'] ?? ''}',
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                subtitle: Text(DateTime.fromMillisecondsSinceEpoch(
+                        ((e['ts'] ?? 0) as num).toInt() * 1000)
+                    .toString()
+                    .substring(0, 19)),
+              ),
+        ],
+      ),
+    );
+  }
+
+  // 功能28/29：一键打开网页 / 快捷复制链接
+  Future<void> _openWeb(String url) async {
+    final uri = Uri.tryParse(url);
+    if (uri != null) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  // 设置下一版应用文件：选平台 + 选文件上传覆盖官网下载。
+  Future<void> _uploadApp() async {
+    final which = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('上传哪个平台的应用文件？'),
+        children: [
+          for (final w in const [
+            ['mac', 'macOS (.app 压缩包 zip)'],
+            ['apk', 'Android (.apk)'],
+            ['win', 'Windows (.zip)']
+          ])
+            SimpleDialogOption(
+                onPressed: () => Navigator.pop(ctx, w[0]),
+                child: Text(w[1])),
+        ],
+      ),
+    );
+    if (which == null) return;
+    final r = await FilePicker.platform.pickFiles();
+    final path = r?.files.single.path;
+    if (path == null) return;
+    setState(() => _busy = true);
+    final ok = await PlatformService.uploadAppFile(which, path);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _toast(ok ? '已设为下一版 $which 应用文件' : '上传失败');
+  }
+
+  // 批次4：回收站
+  Future<void> _showTrash() async {
+    final d = await PlatformService.adminGet('trash');
+    if (!mounted) return;
+    final trash = (d?['trash'] as List?) ?? [];
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => DraggableScrollableSheet(
+          expand: false,
+          initialChildSize: 0.6,
+          builder: (_, scroll) => Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(10),
+                child: Row(children: [
+                  const Text('回收站',
+                      style:
+                          TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  const Spacer(),
+                  if (trash.isNotEmpty)
+                    TextButton(
+                        onPressed: () async {
+                          final ok = await _confirm('清空回收站',
+                              '永久删除回收站里 ${trash.length} 个（含 GitHub 备份），不可恢复！');
+                          if (ok != true) return;
+                          await PlatformService.adminGet('empty-trash');
+                          if (ctx.mounted) Navigator.pop(ctx);
+                          _toast('回收站已清空');
+                        },
+                        child: const Text('清空',
+                            style: TextStyle(color: Colors.red))),
+                ]),
+              ),
+              Expanded(
+                child: trash.isEmpty
+                    ? const Center(
+                        child: Text('回收站是空的',
+                            style: TextStyle(color: Colors.black38)))
+                    : ListView(
+                        controller: scroll,
+                        children: [
+                          for (final v in trash)
+                            ListTile(
+                              dense: true,
+                              leading: const Icon(Icons.delete_outline),
+                              title: Text('${(v as Map)['title'] ?? ''}',
+                                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                              trailing: TextButton(
+                                child: const Text('恢复'),
+                                onPressed: () async {
+                                  await PlatformService.adminGet('restore',
+                                      params: {'id': '${v['id']}'});
+                                  if (!ctx.mounted) return;
+                                  setSheet(() => trash.remove(v));
+                                  _toast('已恢复');
+                                  _load();
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  // 批次4：索引一致性检查
+  Future<void> _verify() async {
+    final d = await PlatformService.adminGet('verify');
+    if (d == null || !mounted) {
+      _toast('检查失败');
+      return;
+    }
+    final miss = (d['missing_files'] as List?) ?? [];
+    final orph = (d['orphan_files'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('索引一致性检查'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('条目', '${d['entries']}'),
+            _kv('文件', '${d['files']}'),
+            _kv('缺文件', '${miss.length}',
+                color: miss.isEmpty ? Colors.green : Colors.orange),
+            _kv('孤儿文件', '${orph.length}',
+                color: orph.isEmpty ? Colors.green : Colors.orange),
+            if (miss.isEmpty && orph.isEmpty)
+              const Padding(
+                padding: EdgeInsets.only(top: 8),
+                child:
+                    Text('一切正常 ✓', style: TextStyle(color: Colors.green)),
+              ),
+          ],
+        ),
+        actions: [
+          if (orph.isNotEmpty)
+            TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _cleanOrphans();
+                },
+                child: const Text('清理孤儿')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次4：导出统计 CSV
+  void _exportCsv() {
+    final b = StringBuffer('标题,上传者,大小(MB),播放量,已备份,隐藏,置顶\n');
+    for (final v in _videos) {
+      final t = v.title.replaceAll(',', '，');
+      b.writeln('$t,${v.uploader},${(v.size / 1048576).toStringAsFixed(1)},'
+          '${v.views},${v.ghUrl != null ? 1 : 0},${v.hidden ? 1 : 0},${v.pinned ? 1 : 0}');
+    }
+    Clipboard.setData(ClipboardData(text: b.toString()));
+    _toast('统计 CSV 已复制');
+  }
+
+  // 批次4：原始配置查看
+  Future<void> _showConfig() async {
+    final d = await PlatformService.adminGet('get-config');
+    if (!mounted) return;
+    final cfg = d?['config'] ?? {};
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('服务器配置 config.json'),
+        content: SingleChildScrollView(
+            child: SelectableText(
+                const JsonEncoder.withIndent('  ').convert(cfg),
+                style:
+                    const TextStyle(fontSize: 12, fontFamily: 'monospace'))),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次4：单条立即备份 / 重置播放量
+  Future<void> _backupOne(PlatformVideo v) async {
+    final d = await PlatformService.adminGet('backup-one', params: {'id': v.id});
+    _toast(d?['ok'] == true ? '已开始备份到 GitHub' : '备份失败');
+  }
+
+  Future<void> _resetViews(PlatformVideo v) async {
+    await PlatformService.adminGet('reset-views', params: {'id': v.id});
+    _toast('播放量已重置');
+    _load();
+  }
+
+  // 批次4：批量备份选中
+  Future<void> _batchBackup() async {
+    if (_selected.isEmpty) return;
+    setState(() => _busy = true);
+    for (final id in _selected.toList()) {
+      await PlatformService.adminGet('backup-one', params: {'id': id});
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _selectMode = false;
+      _selected.clear();
+    });
+    _toast('已排队备份');
+  }
+
+  // 批次5：数据看板
+  Future<void> _dashboard() async {
+    final d = await PlatformService.adminGet('dashboard');
+    if (d == null || !mounted) {
+      _toast('加载失败');
+      return;
+    }
+    final top = (d['top'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('数据看板'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('作品数', '${d['videos']}'),
+            _kv('总播放', '${d['total_views']}'),
+            _kv('今日播放', '${d['plays_today']}'),
+            _kv('占用', _fmtBytes((d['storage'] ?? 0) as num)),
+            const Divider(),
+            const Text('热门 Top', style: TextStyle(fontWeight: FontWeight.bold)),
+            for (final t in top)
+              Text('· ${(t as Map)['title']} (▶${t['views']})',
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次5：访问IP统计
+  Future<void> _showIps() async {
+    final d = await PlatformService.adminGet('ips');
+    if (!mounted) return;
+    final ips = (d?['ips'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('访问来源（${d?['unique'] ?? 0} 个 IP）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          child: ips.isEmpty
+              ? const Text('暂无')
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final e in ips.take(15))
+                      _kv('${(e as Map)['ip']}', '${e['hits']} 次'),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次5：GitHub 备份失效检测
+  Future<void> _verifyBackups() async {
+    setState(() => _busy = true);
+    final d = await PlatformService.adminGet('verify-backups');
+    if (!mounted) return;
+    setState(() => _busy = false);
+    final missing = (d?['missing'] as List?) ?? [];
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('GitHub 备份检测'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _kv('标记已备份', '${d?['backed'] ?? 0}'),
+            _kv('资产丢失', '${missing.length}',
+                color: missing.isEmpty ? Colors.green : Colors.red),
+            for (final m in missing.take(8)) Text('· $m'),
+          ],
+        ),
+        actions: [
+          if (missing.isNotEmpty)
+            TextButton(
+                onPressed: () {
+                  Navigator.pop(ctx);
+                  _rebackup();
+                },
+                child: const Text('补全备份')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('好')),
+        ],
+      ),
+    );
+  }
+
+  // 批次5：批量URL导入（云端缓存）
+  Future<void> _batchImport() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('批量导入（云端缓存）'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Text('每行一个视频直链，服务器会逐个下载并备份',
+              style: TextStyle(fontSize: 12, color: Colors.black54)),
+          const SizedBox(height: 8),
+          TextField(
+              controller: ctrl,
+              maxLines: 5,
+              decoration: const InputDecoration(
+                  hintText: 'https://...\nhttps://...',
+                  border: OutlineInputBorder())),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('开始')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final urls = ctrl.text
+        .split('\n')
+        .map((s) => s.trim())
+        .where((s) => s.startsWith('http'))
+        .toList();
+    if (urls.isEmpty || !mounted) return;
+    setState(() => _busy = true);
+    var done = 0;
+    for (final url in urls) {
+      final name = url.split('/').last.split('?').first;
+      final err =
+          await PlatformService.cloudFetch(name.isEmpty ? '导入' : name, '导入', url, const {}, 'mp4');
+      if (err == null) done++;
+    }
+    if (!mounted) return;
+    setState(() => _busy = false);
+    _toast('导入完成 $done/${urls.length}');
+    _load();
+  }
+
+  // 批次5：清空日志
+  Future<void> _clearLogs() async {
+    final ok = await _confirm('清空日志', '清空 server/tunnel/keepalive 日志？');
+    if (ok != true) return;
+    for (final w in ['server', 'tunnel', 'keepalive']) {
+      await PlatformService.adminGet('clear-logs', params: {'which': w});
+    }
+    _toast('日志已清空');
+  }
+
+  // 批次5：置顶上移/下移
+  Future<void> _move(PlatformVideo v, String dir) async {
+    await PlatformService.adminGet('move', params: {'id': v.id, 'dir': dir});
+    _load();
+  }
+
+  // 批次5：批量改上传者（选中）
+  Future<void> _batchUploader() async {
+    if (_selected.isEmpty) return;
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('批量改上传者（${_selected.length} 个）'),
+        content: TextField(controller: ctrl, autofocus: true),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    setState(() => _busy = true);
+    for (final id in _selected.toList()) {
+      await PlatformService.adminGet('edit',
+          params: {'id': id, 'uploader': ctrl.text.trim()});
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _selectMode = false;
+      _selected.clear();
+    });
+    _toast('完成');
+    _load();
+  }
+
+  // 功能20(批次3)：批量删除/隐藏选中
+  Future<void> _batchAct(bool delete) async {
+    if (_selected.isEmpty) return;
+    final ids = _selected.toList();
+    final ok = await _confirm(delete ? '批量删除' : '批量隐藏',
+        '对选中的 ${ids.length} 个执行${delete ? '删除(含GitHub备份)' : '隐藏'}？');
+    if (ok != true) return;
+    setState(() => _busy = true);
+    for (final id in ids) {
+      if (delete) {
+        await PlatformService.deleteVideo(id);
+      } else {
+        await PlatformService.adminGet('hide', params: {'id': id, 'on': '1'});
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _selected.clear();
+      _selectMode = false;
+    });
+    _toast('完成');
+    _load();
+  }
+
+  Widget _kv(String k, String v, {Color? color}) => Padding(
+        padding: const EdgeInsets.symmetric(vertical: 3),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+                width: 76,
+                child: Text(k,
+                    style: const TextStyle(color: Colors.black54, fontSize: 13))),
+            Expanded(
+                child: SelectableText(v,
+                    style: TextStyle(
+                        fontSize: 13,
+                        color: color,
+                        fontWeight: FontWeight.w500))),
+          ],
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final shown = _shown;
+    final backed = (_stats['backed_up'] ?? 0);
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(_selectMode ? '已选 ${_selected.length}' : '后台管理'),
+        actions: [
+          if (_busy)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+            ),
+          if (_selectMode) ...[
+            IconButton(
+                tooltip: '备份选中到 GitHub',
+                onPressed: _busy ? null : _batchBackup,
+                icon: const Icon(Icons.backup_outlined)),
+            IconButton(
+                tooltip: '批量改上传者',
+                onPressed: _busy ? null : _batchUploader,
+                icon: const Icon(Icons.badge_outlined)),
+            IconButton(
+                tooltip: '隐藏选中',
+                onPressed: _busy ? null : () => _batchAct(false),
+                icon: const Icon(Icons.visibility_off)),
+            IconButton(
+                tooltip: '删除选中(进回收站)',
+                onPressed: _busy ? null : () => _batchAct(true),
+                icon: const Icon(Icons.delete, color: Colors.red)),
+            IconButton(
+                tooltip: '退出多选',
+                onPressed: () => setState(() {
+                      _selectMode = false;
+                      _selected.clear();
+                    }),
+                icon: const Icon(Icons.close)),
+          ] else ...[
+            IconButton(
+                tooltip: '多选',
+                onPressed: () => setState(() => _selectMode = true),
+                icon: const Icon(Icons.checklist)),
+            IconButton(
+                onPressed: _busy ? null : _load,
+                icon: const Icon(Icons.refresh)),
+          ],
+        ],
+      ),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : ListView(
+              children: [
+                // 功能1：平台状态 + 存储统计
+                Card(
+                  margin: const EdgeInsets.all(12),
+                  child: Padding(
+                    padding: const EdgeInsets.all(14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('平台状态 / 存储',
+                            style: TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 15)),
+                        const SizedBox(height: 8),
+                        _kv('公网地址', PlatformService.current),
+                        _kv('局域网', PlatformService.detectedIp ?? '未探测到'),
+                        _kv('公网健康', _healthy ? '正常 ✓' : '异常 ✗',
+                            color: _healthy ? Colors.green : Colors.red),
+                        _kv('视频数', '${_videos.length} 条'),
+                        _kv('已备份', '$backed / ${_videos.length} 到 GitHub'),
+                        _kv('占用空间', _fmtBytes((_stats['videos_bytes'] ?? 0) as num)),
+                        _kv('磁盘剩余',
+                            '${_fmtBytes((_stats['disk_free'] ?? 0) as num)} / ${_fmtBytes((_stats['disk_total'] ?? 0) as num)}'),
+                        const Divider(height: 18),
+                        // 功能 7/8/9/10 + 刷新/清空
+                        Wrap(spacing: 8, runSpacing: 4, children: [
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _refreshUrl,
+                              icon: const Icon(Icons.cloud_sync, size: 16),
+                              label: const Text('刷新地址')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _republish,
+                              icon: const Icon(Icons.publish, size: 16),
+                              label: const Text('重发地址')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _restartTunnel,
+                              icon: const Icon(Icons.restart_alt, size: 16),
+                              label: const Text('重启隧道')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _rebackup,
+                              icon: const Icon(Icons.backup, size: 16),
+                              label: const Text('补全备份')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _showLog,
+                              icon: const Icon(Icons.article_outlined, size: 16),
+                              label: const Text('看日志')),
+                          // 批次2 新增
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('notes', '改更新说明',
+                                      (_stats['notes'] ?? '').toString()),
+                              icon: const Icon(Icons.edit_note, size: 16),
+                              label: const Text('改更新说明')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('notice', '改公告栏',
+                                      (_stats['notice'] ?? '').toString()),
+                              icon: const Icon(Icons.campaign_outlined, size: 16),
+                              label: const Text('公告栏')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('disclaimer', '改免责声明',
+                                      (_stats['disclaimer'] ?? '').toString()),
+                              icon: const Icon(Icons.gavel_outlined, size: 16),
+                              label: const Text('改免责声明')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('app-version', '改应用版本号(留空=用内置)',
+                                      (_stats['app_version'] ?? '').toString()),
+                              icon: const Icon(Icons.numbers, size: 16),
+                              label: const Text('改版本号')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _uploadApp,
+                              icon: const Icon(Icons.system_update_alt, size: 16),
+                              label: const Text('上传应用文件')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _cleanOrphans,
+                              icon: const Icon(Icons.cleaning_services_outlined,
+                                  size: 16),
+                              label: const Text('清理孤儿')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _exportIndex,
+                              icon: const Icon(Icons.download_outlined, size: 16),
+                              label: const Text('导出index')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _import,
+                              icon: const Icon(Icons.upload_outlined, size: 16),
+                              label: const Text('导入恢复')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _sysinfo,
+                              icon: const Icon(Icons.info_outline, size: 16),
+                              label: const Text('服务器信息')),
+                          // 批次3 新增
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _healthCheck,
+                              icon: const Icon(Icons.health_and_safety_outlined,
+                                  size: 16),
+                              label: const Text('一键体检')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _showRecent,
+                              icon: const Icon(Icons.history, size: 16),
+                              label: const Text('最近播放')),
+                          OutlinedButton.icon(
+                              onPressed: () => _openWeb(PlatformService.downloadUrl),
+                              icon: const Icon(Icons.open_in_browser, size: 16),
+                              label: const Text('打开下载页')),
+                          OutlinedButton.icon(
+                              onPressed: () =>
+                                  _copy(PlatformService.current, '公网地址'),
+                              icon: const Icon(Icons.copy, size: 16),
+                              label: const Text('复制公网地址')),
+                          // 批次4
+                          OutlinedButton.icon(
+                              onPressed: _showTrash,
+                              icon: const Icon(Icons.delete_outline, size: 16),
+                              label: const Text('回收站')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _verify,
+                              icon: const Icon(Icons.fact_check_outlined, size: 16),
+                              label: const Text('一致性检查')),
+                          OutlinedButton.icon(
+                              onPressed: _exportCsv,
+                              icon: const Icon(Icons.table_chart_outlined, size: 16),
+                              label: const Text('导出CSV')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _showConfig,
+                              icon: const Icon(Icons.data_object, size: 16),
+                              label: const Text('查看配置')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('app-name', '改应用名字(App内显示)',
+                                      (_stats['app_name'] ?? '').toString()),
+                              icon: const Icon(Icons.drive_file_rename_outline,
+                                  size: 16),
+                              label: const Text('改应用名字')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('banned', '关键词黑名单(逗号分隔，命中拒绝上传)',
+                                      (_stats['banned'] ?? '').toString()),
+                              icon: const Icon(Icons.block, size: 16),
+                              label: const Text('黑名单')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('dl-title', '改下载页标题',
+                                      (_stats['dl_title'] ?? '').toString()),
+                              icon: const Icon(Icons.title, size: 16),
+                              label: const Text('下载页标题')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('dl-subtitle', '改下载页副标题',
+                                      (_stats['dl_subtitle'] ?? '').toString()),
+                              icon: const Icon(Icons.subtitles_outlined, size: 16),
+                              label: const Text('下载页副标题')),
+                          // 批次5
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _dashboard,
+                              icon: const Icon(Icons.dashboard_outlined, size: 16),
+                              label: const Text('数据看板')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _showIps,
+                              icon: const Icon(Icons.travel_explore, size: 16),
+                              label: const Text('访问统计')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _verifyBackups,
+                              icon: const Icon(Icons.verified_outlined, size: 16),
+                              label: const Text('备份检测')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _batchImport,
+                              icon: const Icon(Icons.playlist_add, size: 16),
+                              label: const Text('批量导入')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _clearLogs,
+                              icon: const Icon(Icons.delete_forever_outlined,
+                                  size: 16),
+                              label: const Text('清空日志')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('max-gb', '存储上限GB(0=无限)',
+                                      (_stats['max_gb'] ?? '').toString()),
+                              icon: const Icon(Icons.sd_storage, size: 16),
+                              label: const Text('存储上限')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('trash-days', '回收站自动清理(天,0=不清)',
+                                      (_stats['trash_days'] ?? '').toString()),
+                              icon: const Icon(Icons.auto_delete_outlined, size: 16),
+                              label: const Text('回收站清理')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () => _editCfg('brand-color', '品牌色 hex(如 #ff5e8a)',
+                                      (_stats['brand_color'] ?? '').toString()),
+                              icon: const Icon(Icons.palette_outlined, size: 16),
+                              label: const Text('品牌色')),
+                          OutlinedButton.icon(
+                              onPressed: _busy
+                                  ? null
+                                  : () async {
+                                      final cur =
+                                          (_stats['download_source'] ?? 'github')
+                                              .toString();
+                                      final next = cur == 'github'
+                                          ? 'platform'
+                                          : 'github';
+                                      final d = await PlatformService.adminGet(
+                                          'set-download-source',
+                                          params: {'v': next});
+                                      _toast(d?['ok'] == true
+                                          ? '下载源切到 ${next == "github" ? "GitHub" : "平台页"}'
+                                          : '切换失败');
+                                      if (d?['ok'] == true) _load();
+                                    },
+                              icon: const Icon(Icons.swap_horiz, size: 16),
+                              label: Text(
+                                  '下载源:${(_stats['download_source'] ?? 'github') == "github" ? "GitHub" : "平台"}')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _editPrices,
+                              icon: const Icon(Icons.price_change_outlined,
+                                  size: 16),
+                              label: const Text('功能价格')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _restartServer,
+                              style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.orange),
+                              icon: const Icon(Icons.power_settings_new, size: 16),
+                              label: const Text('重启服务器')),
+                          OutlinedButton.icon(
+                              onPressed: _busy ? null : _clearAll,
+                              style: OutlinedButton.styleFrom(
+                                  foregroundColor: Colors.red),
+                              icon: const Icon(Icons.delete_sweep, size: 16),
+                              label: const Text('清空全部')),
+                        ]),
+                        // 批次3：公网上传开关 / 云端自动备份开关
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('允许公网上传',
+                              style: TextStyle(fontSize: 13)),
+                          subtitle: const Text('关掉防陌生人乱传',
+                              style: TextStyle(fontSize: 11)),
+                          value: _flags['upload_enabled'] != false,
+                          onChanged: (v) => _setFlag('upload_enabled', v),
+                        ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          dense: true,
+                          title: const Text('云端缓存自动备份到 GitHub',
+                              style: TextStyle(fontSize: 13)),
+                          value: _flags['auto_backup'] != false,
+                          onChanged: (v) => _setFlag('auto_backup', v),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                // 功能2/3：搜索 + 排序
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 4),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          decoration: const InputDecoration(
+                            isDense: true,
+                            prefixIcon: Icon(Icons.search, size: 20),
+                            hintText: '搜索视频标题',
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (s) =>
+                              setState(() => _query = s.trim().toLowerCase()),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      DropdownButton<String>(
+                        value: _sort,
+                        items: const [
+                          DropdownMenuItem(value: 'time', child: Text('最新')),
+                          DropdownMenuItem(value: 'size', child: Text('大小')),
+                          DropdownMenuItem(value: 'views', child: Text('播放量')),
+                          DropdownMenuItem(value: 'name', child: Text('名称')),
+                        ],
+                        onChanged: (v) => setState(() => _sort = v ?? 'time'),
+                      ),
+                    ],
+                  ),
+                ),
+                if (shown.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(30),
+                    child: Center(
+                        child: Text('无匹配视频',
+                            style: TextStyle(color: Colors.black38))),
+                  ),
+                // 视频列表：备份状态图标 + 每条操作菜单（功能4/5/6 + 删除）
+                for (final v in shown)
+                  ListTile(
+                    dense: true,
+                    leading: _selectMode
+                        ? Checkbox(
+                            value: _selected.contains(v.id),
+                            onChanged: (c) => setState(() {
+                                  if (c == true) {
+                                    _selected.add(v.id);
+                                  } else {
+                                    _selected.remove(v.id);
+                                  }
+                                }))
+                        : Icon(
+                            v.ghUrl != null
+                                ? Icons.cloud_done
+                                : Icons.cloud_off,
+                            color:
+                                v.ghUrl != null ? Colors.green : Colors.black26,
+                          ),
+                    title: Row(children: [
+                      if (v.pinned)
+                        const Icon(Icons.push_pin, size: 13, color: Colors.orange),
+                      if (v.hidden)
+                        const Icon(Icons.visibility_off,
+                            size: 13, color: Colors.black38),
+                      Flexible(
+                        child: Text(v.title,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                color: v.hidden ? Colors.black45 : null)),
+                      ),
+                    ]),
+                    subtitle: Text(
+                        '${v.uploader.isEmpty ? '匿名' : v.uploader} · ${_fmtBytes(v.size)} · ▶ ${v.views}'),
+                    onTap: _selectMode
+                        ? () => setState(() {
+                              if (_selected.contains(v.id)) {
+                                _selected.remove(v.id);
+                              } else {
+                                _selected.add(v.id);
+                              }
+                            })
+                        : () => _detail(v), // 功能19：详情
+                    trailing: _selectMode
+                        ? null
+                        : PopupMenuButton<String>(
+                            onSelected: (a) {
+                              if (a == 'direct') {
+                                _copy(PlatformService.videoUrl(v.id), '直链');
+                              } else if (a == 'backup') {
+                                _copy(v.ghUrl ?? '', 'GitHub 备份链接');
+                              } else if (a == 'rename') {
+                                _rename(v);
+                              } else if (a == 'edit') {
+                                _editUploader(v);
+                              } else if (a == 'download') {
+                                _downloadVideo(v);
+                              } else if (a == 'hide') {
+                                _toggleFlag(v, 'hide', !v.hidden);
+                              } else if (a == 'pin') {
+                                _toggleFlag(v, 'pin', !v.pinned);
+                              } else if (a == 'detail') {
+                                _detail(v);
+                              } else if (a == 'backup1') {
+                                _backupOne(v);
+                              } else if (a == 'resetviews') {
+                                _resetViews(v);
+                              } else if (a == 'setcoins') {
+                                _setCoins(v);
+                              } else if (a == 'moveup') {
+                                _move(v, 'up');
+                              } else if (a == 'movedown') {
+                                _move(v, 'down');
+                              } else if (a == 'delete') {
+                                _delete(v);
+                              }
+                            },
+                            itemBuilder: (_) => [
+                              const PopupMenuItem(
+                                  value: 'detail', child: Text('详情')),
+                              const PopupMenuItem(
+                                  value: 'download', child: Text('下载到本地')),
+                              const PopupMenuItem(
+                                  value: 'direct', child: Text('复制直链')),
+                              if (v.ghUrl == null)
+                                const PopupMenuItem(
+                                    value: 'backup1',
+                                    child: Text('立即备份到 GitHub')),
+                              if (v.ghUrl != null)
+                                const PopupMenuItem(
+                                    value: 'backup',
+                                    child: Text('复制 GitHub 备份链接')),
+                              const PopupMenuItem(
+                                  value: 'edit', child: Text('改标题/上传者')),
+                              const PopupMenuItem(
+                                  value: 'resetviews', child: Text('重置播放量')),
+                              const PopupMenuItem(
+                                  value: 'setcoins', child: Text('改投币数')),
+                              PopupMenuItem(
+                                  value: 'hide',
+                                  child: Text(v.hidden ? '取消隐藏' : '隐藏(不公开)')),
+                              PopupMenuItem(
+                                  value: 'pin',
+                                  child:
+                                      Text(v.pinned ? '取消置顶' : '置顶/精选')),
+                              if (v.pinned) ...[
+                                const PopupMenuItem(
+                                    value: 'moveup', child: Text('置顶内上移')),
+                                const PopupMenuItem(
+                                    value: 'movedown', child: Text('置顶内下移')),
+                              ],
+                              const PopupMenuItem(
+                                  value: 'delete', child: Text('删除(进回收站)')),
+                            ],
+                          ),
+                  ),
+                const SizedBox(height: 20),
+              ],
+            ),
+    );
+  }
+}
+
 class _BiliListPage extends StatefulWidget {
   final String title;
   final Future<List<BiliTrack>> Function() fetch;
   final void Function(String bvid, String title) onPlay;
+  final void Function(List<BiliTrack>)? onCacheAll; // 全部缓存(离线)
   const _BiliListPage(
-      {required this.title, required this.fetch, required this.onPlay});
+      {required this.title,
+      required this.fetch,
+      required this.onPlay,
+      this.onCacheAll});
   @override
   State<_BiliListPage> createState() => _BiliListPageState();
 }
@@ -4555,7 +11539,14 @@ class _BiliListPageState extends State<_BiliListPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text(widget.title)),
+      appBar: AppBar(title: Text(widget.title), actions: [
+        if (widget.onCacheAll != null && _list.isNotEmpty)
+          IconButton(
+            icon: const Icon(Icons.offline_pin_outlined),
+            tooltip: '全部缓存(离线可看)',
+            onPressed: () => widget.onCacheAll!(_list),
+          ),
+      ]),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _list.isEmpty
@@ -4587,13 +11578,33 @@ class _PlaylistsPage extends StatefulWidget {
   final Map<String, List<Track>> playlists;
   final void Function(Track) onPlay;
   final Future<void> Function() onSave;
+  final void Function(Track) onCacheTrack; // 批量缓存单曲（离线）
   const _PlaylistsPage(
-      {required this.playlists, required this.onPlay, required this.onSave});
+      {required this.playlists,
+      required this.onPlay,
+      required this.onSave,
+      required this.onCacheTrack});
   @override
   State<_PlaylistsPage> createState() => _PlaylistsPageState();
 }
 
 class _PlaylistsPageState extends State<_PlaylistsPage> {
+  // 把整个歌单里的在线曲目排队缓存（本地文件跳过），后台陆续下载。
+  void _cacheAll(String name) {
+    final tracks = widget.playlists[name] ?? [];
+    final online = tracks.where((t) => !t.isLocal).toList();
+    if (online.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('该歌单没有可缓存的在线视频')));
+      return;
+    }
+    for (final t in online) {
+      widget.onCacheTrack(t);
+    }
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已加入缓存队列：${online.length} 个，后台下载中')));
+  }
+
   Future<void> _sharePlaylist(String name) async {
     final body = jsonEncode({
       'title': name,
@@ -4963,6 +11974,11 @@ class _PlaylistsPageState extends State<_PlaylistsPage> {
                               size: 20),
                           tooltip: '导出下载脚本(aria2/wget)',
                           onPressed: () => _exportScript(n),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.offline_pin_outlined, size: 20),
+                          tooltip: '全部缓存(离线可看)',
+                          onPressed: () => _cacheAll(n),
                         ),
                         IconButton(
                           icon: const Icon(Icons.delete_outline),

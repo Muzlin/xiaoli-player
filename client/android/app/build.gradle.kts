@@ -43,3 +43,8 @@ kotlin {
 flutter {
     source = "../.."
 }
+
+dependencies {
+    // 自动更新用 FileProvider 调起安装器（虽随 Flutter embedding 传递引入，显式声明更稳）
+    implementation("androidx.core:core-ktx:1.13.1")
+}

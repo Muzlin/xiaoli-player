@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <!-- 自动更新下载的 apk 放在 app 专属外部目录（getExternalStorageDirectory） -->
+    <external-files-path name="apk" path="."/>
+    <cache-path name="cache" path="."/>
+</paths>

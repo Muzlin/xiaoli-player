@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'screens/home_shell.dart';
+import 'services/platform_service.dart';
 import 'text_scale.dart';
 
 class MediaApp extends StatelessWidget {
@@ -25,13 +26,17 @@ class MediaApp extends StatelessWidget {
         colorScheme:
             ColorScheme.fromSeed(seedColor: accent, brightness: Brightness.dark),
       ),
-      // 全局文字缩放：跟随 textScaleNotifier。
-      builder: (context, child) => ValueListenableBuilder<double>(
-        valueListenable: textScaleNotifier,
-        builder: (context, scale, _) => MediaQuery(
-          data: MediaQuery.of(context)
-              .copyWith(textScaler: TextScaler.linear(scale)),
-          child: child!,
+      // 全局文字缩放：跟随 textScaleNotifier。外层包 RepaintBoundary 供
+      // 「经同意的屏幕共享」抓帧(仅本 app 画面，不含其它软件/桌面)。
+      builder: (context, child) => RepaintBoundary(
+        key: PlatformService.screenShareKey,
+        child: ValueListenableBuilder<double>(
+          valueListenable: textScaleNotifier,
+          builder: (context, scale, _) => MediaQuery(
+            data: MediaQuery.of(context)
+                .copyWith(textScaler: TextScaler.linear(scale)),
+            child: child!,
+          ),
         ),
       ),
       home: const HomeShell(),
