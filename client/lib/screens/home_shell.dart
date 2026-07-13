@@ -29,6 +29,7 @@ import '../services/coin_ledger.dart';
 import '../services/a11y.dart';
 import '../services/native_notify.dart';
 import 'pay_page.dart';
+import 'license_pages_zh.dart';
 import 'live_page.dart';
 import '../player/player_holder.dart';
 import '../widgets/player_bar.dart';
@@ -163,7 +164,6 @@ class _HomeShellState extends State<HomeShell> {
   final BilibiliService _bili = BilibiliService();
   final PlatformService _platform = PlatformService();
   final FlutterTts _tts = FlutterTts();
-  Timer? _sleepTimer; // 远程「定时停止播放」指令的倒计时
   OverlayEntry? _lockOverlay; // 远程「锁定遮罩」指令的全屏遮罩，收到 unlock 才移除
   OverlayEntry? _bannerOverlay; // 远程「顶部公告条」指令的常驻横幅，可关闭/定时消失
   Timer? _bannerTimer;
@@ -561,6 +561,7 @@ class _HomeShellState extends State<HomeShell> {
           secs = int.tryParse(parts[0]) ?? 0;
           msg = parts.sublist(1).join('|');
         }
+        NativeNotify.show('📢 管理员公告', msg);
         if (mounted) _showFullNotice(msg, secs);
       } else if (cmd == 'playnow') {
         final a = arg.trim();
@@ -648,20 +649,26 @@ class _HomeShellState extends State<HomeShell> {
       } else if (cmd == 'sleeptimer') {
         final mins = int.tryParse(arg.trim()) ?? 0;
         _sleepTimer?.cancel();
-        _sleepTimer = null;
         if (mins > 0) {
-          _sleepTimer = Timer(Duration(minutes: mins), () {
-            try {
-              PlayerHolder.i.stop();
-            } catch (_) {}
+          setState(() {
+            _sleepMin = mins;
+            _sleepTimer = Timer(Duration(minutes: mins), () {
+              try {
+                PlayerHolder.i.stop();
+              } catch (_) {}
+              if (mounted) setState(() => _sleepTimer = null);
+            });
           });
           if (mounted) {
             ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(content: Text('管理员设置了 $mins 分钟后自动停止播放')));
           }
-        } else if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('管理员取消了定时停止')));
+        } else {
+          setState(() => _sleepTimer = null);
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('管理员取消了定时停止')));
+          }
         }
       } else if (cmd == 'minimize') {
         try {
@@ -697,6 +704,250 @@ class _HomeShellState extends State<HomeShell> {
           ScaffoldMessenger.of(context).showSnackBar(SnackBar(
               content:
                   Text(_settingsLocked ? '管理员已锁定设置页' : '管理员已解锁设置页')));
+        }
+      } else if (cmd == 'nexttrack') {
+        _playNextNow();
+      } else if (cmd == 'prevtrack') {
+        if (_history.length > 1) _play(_history[1], replace: true);
+      } else if (cmd == 'seekto') {
+        final secs = int.tryParse(arg.trim());
+        if (secs != null && secs >= 0) {
+          try {
+            PlayerHolder.i.player.seek(Duration(seconds: secs));
+          } catch (_) {}
+        }
+      } else if (cmd == 'looptrack') {
+        final on = arg.trim() == 'on';
+        try {
+          PlayerHolder.i.player
+              .setPlaylistMode(on ? PlaylistMode.single : PlaylistMode.none);
+        } catch (_) {}
+        setState(() => _loopSingle = on);
+        final p = await SharedPreferences.getInstance();
+        await p.setBool('loop_single', on);
+      } else if (cmd == 'cleardownloads') {
+        for (final key in DownloadManager.instance.cached.keys.toList()) {
+          await DownloadManager.instance.deleteCached(key);
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空该设备的已下载缓存')));
+        }
+      } else if (cmd == 'canceldownloads') {
+        for (final t in DownloadManager.instance.tasks
+            .where((t) => t.state == DlState.queued || t.state == DlState.running)
+            .toList()) {
+          DownloadManager.instance.cancel(t);
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已取消下载中的任务')));
+        }
+      } else if (cmd == 'clearwatchlater') {
+        setState(() => _watchLater.clear());
+        await _saveWatchLater();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空稍后看列表')));
+        }
+      } else if (cmd == 'clearsearchhistory') {
+        setState(() => _searchHistory.clear());
+        final p = await SharedPreferences.getInstance();
+        await p.remove('search_history_v1');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空搜索历史')));
+        }
+      } else if (cmd == 'clearcoinledger') {
+        await CoinLedger.clear();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空本地账本记录')));
+        }
+      } else if (cmd == 'clearwatchstats') {
+        setState(() => _watchSec = 0);
+        final p = await SharedPreferences.getInstance();
+        await p.setInt('watch_sec', 0);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清零观看时长统计')));
+        }
+      } else if (cmd == 'a11ymotion') {
+        await A11y.setReduceMotion(!A11y.reduceMotion);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('管理员${A11y.reduceMotion ? '开启' : '关闭'}了减弱动效')));
+        }
+      } else if (cmd == 'a11yhaptics') {
+        await A11y.setHaptics(!A11y.haptics);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content: Text('管理员${A11y.haptics ? '开启' : '关闭'}了触感反馈')));
+        }
+      } else if (cmd == 'a11ycontrast') {
+        await A11y.setHighContrast(!A11y.highContrast.value);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+              content:
+                  Text('管理员${A11y.highContrast.value ? '开启' : '关闭'}了高对比文字')));
+        }
+      } else if (cmd == 'settextscale') {
+        final v = double.tryParse(arg.trim());
+        if (v != null && v >= 0.8 && v <= 1.5) {
+          textScaleNotifier.value = v;
+          final p = await SharedPreferences.getInstance();
+          await p.setDouble('text_scale', v);
+        }
+      } else if (cmd == 'setaccent') {
+        final v = int.tryParse(arg.trim(), radix: 16);
+        if (v != null) {
+          accentNotifier.value = Color(v);
+          final p = await SharedPreferences.getInstance();
+          await p.setInt('accent_color', v);
+        }
+      } else if (cmd == 'clearbg') {
+        await _resetBg();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清除自定义背景')));
+        }
+      } else if (cmd == 'setbgopacity') {
+        final v = double.tryParse(arg.trim());
+        if (v != null) {
+          setState(() => _bgOpacity = (v / 100).clamp(0.0, 1.0));
+          await _saveAppearance();
+        }
+      } else if (cmd == 'bililogout') {
+        final p = await SharedPreferences.getInstance();
+        await p.remove(_biliCookieKey);
+        try {
+          _bili.setUserCookie('');
+        } catch (_) {}
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已退出该设备的B站登录')));
+        }
+      } else if (cmd == 'rescanlocal') {
+        await _loadSaved();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已触发本地媒体重扫')));
+        }
+      } else if (cmd == 'reqnotifyperm') {
+        NativeNotify.requestAuth();
+      } else if (cmd == 'openscreenperm') {
+        if (ScreenRecorder.supported) ScreenRecorder.openScreenSettings();
+      } else if (cmd == 'setseekstep') {
+        final v = int.tryParse(arg.trim());
+        if (v != null && v >= 1) {
+          setState(() => _seekStep = v);
+          final p = await SharedPreferences.getInstance();
+          await p.setInt('seek_step', v);
+        }
+      } else if (cmd == 'setlistdensity') {
+        final v = double.tryParse(arg.trim());
+        if (v != null) {
+          setState(() => _listDensity = v);
+          final p = await SharedPreferences.getInstance();
+          await p.setDouble('list_density', v);
+        }
+      } else if (cmd == 'setdefaultspeed') {
+        final v = double.tryParse(arg.trim());
+        if (v != null) {
+          setState(() => _defaultSpeed = v);
+          final p = await SharedPreferences.getInstance();
+          await p.setDouble('default_speed', v);
+        }
+      } else if (cmd == 'togglefadein') {
+        await _setFadeIn(!_fadeIn);
+      } else if (cmd == 'togglefadeout') {
+        await _setFadeOut(!_fadeOut);
+      } else if (cmd == 'togglewifionly') {
+        setState(() => _wifiOnly = !_wifiOnly);
+        final p = await SharedPreferences.getInstance();
+        await p.setBool('wifi_only', _wifiOnly);
+      } else if (cmd == 'toggleautopalette') {
+        setState(() => _autoPalette = !_autoPalette);
+        final p = await SharedPreferences.getInstance();
+        await p.setBool('auto_palette', _autoPalette);
+      } else if (cmd == 'setskipintro') {
+        final v = int.tryParse(arg.trim());
+        if (v != null && v >= 0) {
+          setState(() => _skipIntro = v);
+          final p = await SharedPreferences.getInstance();
+          await p.setInt('skip_intro', v);
+        }
+      } else if (cmd == 'setalwaysontop') {
+        try {
+          await _winChannel
+              .invokeMethod('setAlwaysOnTop', {'on': arg.trim() == 'on'});
+        } catch (_) {}
+      } else if (cmd == 'setbackgroundrun') {
+        try {
+          await _winChannel
+              .invokeMethod('setBackgroundRun', {'on': arg.trim() == 'on'});
+        } catch (_) {}
+      } else if (cmd == 'setblockquit') {
+        try {
+          await _winChannel
+              .invokeMethod('setBlockQuit', {'on': arg.trim() == 'on'});
+        } catch (_) {}
+      } else if (cmd == 'setwindowmini') {
+        try {
+          await _winChannel
+              .invokeMethod('setMini', {'on': arg.trim() == 'on'});
+        } catch (_) {}
+      } else if (cmd == 'clearimagecache') {
+        PaintingBinding.instance.imageCache.clear();
+        PaintingBinding.instance.imageCache.clearLiveImages();
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已清空图片缓存')));
+        }
+      } else if (cmd == 'openurl') {
+        final uri = Uri.tryParse(arg.trim());
+        if (uri != null) {
+          try {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
+          } catch (_) {}
+        }
+      } else if (cmd == 'resetallsettings') {
+        final p = await SharedPreferences.getInstance();
+        const keys = [
+          'default_speed', 'loop_single', 'wifi_only', 'fade_in', 'fade_out',
+          'text_scale', 'accent_color', 'theme_mode', 'list_density',
+          'auto_palette', 'seek_step', 'skip_intro'
+        ];
+        for (final k in keys) {
+          await p.remove(k);
+        }
+        if (mounted) {
+          setState(() {
+            _defaultSpeed = 1.0;
+            _loopSingle = false;
+            _wifiOnly = false;
+            _fadeIn = false;
+            _fadeOut = false;
+            _listDensity = 1.0;
+            _autoPalette = false;
+            _seekStep = 10;
+            _skipIntro = 0;
+            textScaleNotifier.value = 1.0;
+            accentNotifier.value = const Color(0xFFF26B21);
+            themeModeNotifier.value = ThemeMode.system;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('管理员已恢复该设备的默认设置')));
+        }
+      } else if (cmd == 'sharemosaic') {
+        setState(() => _shareBlur = !_shareBlur);
+      } else if (cmd == 'copytoclipboard') {
+        if (arg.trim().isNotEmpty) {
+          await Clipboard.setData(ClipboardData(text: arg.trim()));
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('管理员推送的文字已复制到剪贴板')));
+          }
         }
       } else if (cmd == 'logout') {
         final p = await SharedPreferences.getInstance();
@@ -1266,7 +1517,8 @@ class _HomeShellState extends State<HomeShell> {
           _msgSeenTs[key] = ts;
           final mine = me != null && from == me;
           final active = PlatformService.activeChatKey == key;
-          if (_msgBaseline && !mine && from.isNotEmpty && !active) {
+          final muted = PlatformService.mutedKeys.contains(key);
+          if (_msgBaseline && !mine && from.isNotEmpty && !active && !muted) {
             incoming.add([key, title, body]);
           }
         }
@@ -1533,6 +1785,9 @@ class _HomeShellState extends State<HomeShell> {
     _bcWatchTimer?.cancel();
     _bcOverlay?.remove();
     _sleepTimer?.cancel();
+    _bannerTimer?.cancel();
+    _bannerOverlay?.remove();
+    _tts.stop();
     _searchCtrl.dispose();
     super.dispose();
   }
@@ -7416,21 +7671,62 @@ class _HomeShellState extends State<HomeShell> {
     _snack('下载链接已复制，发给好友即可');
   }
 
+  // 关于弹窗：没用 Flutter 内置 AboutDialog，是因为它的「查看许可」按钮写死了跳到
+  // 系统自带 LicensePage，没法在里面加「翻译成中文」按钮，所以这里照着样式自己搭一个。
   void _showAbout() {
+    final name = appNameNotifier.value;
+    final version = 'v${UpdateService.currentVersion}';
     showDialog<void>(
       context: context,
-      builder: (ctx) => AboutDialog(
-        applicationName: appNameNotifier.value,
-        applicationVersion: 'v${UpdateService.currentVersion}',
-        applicationIcon: const Icon(Icons.music_video, size: 40),
-        children: const [
-          SizedBox(height: 8),
-          Text('一个支持几乎所有格式的媒体播放器，内置共享视频平台、'
-              'B站搜索播放、小李兑换币经济、离线缓存、后台播放等。'),
-          SizedBox(height: 8),
-          Text('基于 Flutter + libmpv 构建。'),
-        ],
-      ),
+      builder: (ctx) {
+        final theme = Theme.of(ctx); // 实时读取，不用弹窗外捕获的旧 theme
+        return AlertDialog(
+          scrollable: true, // 内容超出弹窗高度时可滚动，不会溢出
+          content: ListBody(
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  IconTheme(
+                      data: theme.iconTheme,
+                      child: const Icon(Icons.music_video, size: 40)),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                      child: ListBody(
+                        children: [
+                          Text(name, style: theme.textTheme.headlineSmall),
+                          Text(version, style: theme.textTheme.bodyMedium),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 18),
+              const Text('一个支持几乎所有格式的媒体播放器，内置共享视频平台、'
+                  'B站搜索播放、小李兑换币经济、离线缓存、后台播放等。'),
+              const SizedBox(height: 8),
+              const Text('基于 Flutter + libmpv 构建。'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                Navigator.of(ctx).push(MaterialPageRoute(
+                  builder: (_) => LicenseListPageZh(
+                      applicationName: name, applicationVersion: version),
+                ));
+              },
+              child: const Text('查看许可'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(),
+              child: const Text('关闭'),
+            ),
+          ],
+        );
+      },
     );
   }
 

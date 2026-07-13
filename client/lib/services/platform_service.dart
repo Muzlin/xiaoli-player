@@ -221,6 +221,16 @@ class PlatformService {
   /// 当前打开的聊天标识（'dm:<peer>' / 'grp:<gid>'）；消息轮询据此不给正在看的会话弹通知。
   static String? activeChatKey;
 
+  /// 会话置顶/免打扰的本地缓存，服务端为准：每次 dmList()/groupList() 都会用响应里的
+  /// pinned_keys/muted_keys 整体刷新这两个集合。key 格式同 activeChatKey（'dm:对方uid'/'grp:群id'）。
+  /// 消息轮询(home_shell._checkMessages)直接读 mutedKeys 判断要不要弹系统通知。
+  static Set<String> pinnedKeys = {};
+  static Set<String> mutedKeys = {};
+
+  /// 我拉黑的用户 uid 集合（服务端为准，通过 blacklistList()/blacklistSet() 刷新）。
+  /// _ChatInput 据此判断"对方已被我拉黑"从而隐藏发送框；_convMenu 据此切换"拉黑"/"取消拉黑"文案。
+  static Set<String> blacklistedUids = {};
+
   // ===== 小李兑换币钱包 =====
   static String? _uid;
 
@@ -655,8 +665,10 @@ class PlatformService {
   }
 
   /// 我的私信会话 [{peer,peer_nick,last,ts}]。
+  /// 顺带用响应里的 pinned_keys/muted_keys 刷新 [pinnedKeys]/[mutedKeys]（服务端为准）。
   static Future<List<Map<String, dynamic>>> dmList() async {
     final d = await _g('/dm-list', withUid: true);
+    _applyPrefsKeys(d);
     if (d is Map && d['convs'] is List) {
       return (d['convs'] as List)
           .map((e) => Map<String, dynamic>.from(e as Map))
@@ -665,9 +677,29 @@ class PlatformService {
     return [];
   }
 
-  /// 与某人的私信消息 {msgs,peer_nick}。
-  static Future<Map<String, dynamic>?> dmMsgs(String peer) async {
-    final d = await _g('/dm-msgs?peer=$peer', withUid: true);
+  static void _applyPrefsKeys(dynamic d) {
+    if (d is! Map) return;
+    if (d['pinned_keys'] is List) {
+      pinnedKeys = (d['pinned_keys'] as List).map((e) => '$e').toSet();
+    }
+    if (d['muted_keys'] is List) {
+      mutedKeys = (d['muted_keys'] as List).map((e) => '$e').toSet();
+    }
+  }
+
+  /// 会话置顶/免打扰云同步：kind='pin'|'mute'，on=目标状态。key 格式见 [activeChatKey]。
+  static Future<bool> prefsSet(
+      {required String key, required String kind, required bool on}) async {
+    final d = await _g(
+        '/prefs-set?key=${Uri.encodeComponent(key)}&kind=$kind&on=${on ? 1 : 0}',
+        withUid: true);
+    return d is Map && d['ok'] == true;
+  }
+
+  /// 与某人的私信消息 {msgs,peer_nick}。q 非空时只返回文本含 q 的消息(会话内搜索)。
+  static Future<Map<String, dynamic>?> dmMsgs(String peer, {String q = ''}) async {
+    final qp = q.trim().isEmpty ? '' : '&q=${Uri.encodeComponent(q.trim())}';
+    final d = await _g('/dm-msgs?peer=$peer$qp', withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
@@ -679,8 +711,10 @@ class PlatformService {
   }
 
   /// 我加入的群 [{gid,name,role,count,no_leave}]。
+  /// 顺带用响应里的 pinned_keys/muted_keys 刷新 [pinnedKeys]/[mutedKeys]（服务端为准）。
   static Future<List<Map<String, dynamic>>> groupList() async {
     final d = await _g('/group-list', withUid: true);
+    _applyPrefsKeys(d);
     if (d is Map && d['groups'] is List) {
       return (d['groups'] as List)
           .map((e) => Map<String, dynamic>.from(e as Map))
@@ -690,8 +724,10 @@ class PlatformService {
   }
 
   /// 群消息 + 群信息 {msgs,name,owner,admins,members,no_leave}。
-  static Future<Map<String, dynamic>?> groupMsgs(String gid) async {
-    final d = await _g('/group-msgs?gid=$gid', withUid: true);
+  /// q 非空时只返回文本含 q 的消息(会话内搜索)。
+  static Future<Map<String, dynamic>?> groupMsgs(String gid, {String q = ''}) async {
+    final qp = q.trim().isEmpty ? '' : '&q=${Uri.encodeComponent(q.trim())}';
+    final d = await _g('/group-msgs?gid=$gid$qp', withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
 
@@ -715,12 +751,15 @@ class PlatformService {
     return d is Map && d['ok'] == true;
   }
 
-  /// 群治理：op=kick/admin/leave/disband/noleave/rename。返回服务器结果。
+  /// 群治理：op=kick/admin/leave/disband/noleave/rename/announcement/transfer_owner。返回服务器结果。
+  /// text 用于 announcement（传空字符串=清空公告，与 null=不传 区分）。
+  /// transfer_owner 用 target=新群主uid（仅群主可调，原群主自动降级为管理员）。
   static Future<Map<String, dynamic>?> groupOp(String gid, String op,
-      {String target = '', bool on = true, String name = ''}) async {
+      {String target = '', bool on = true, String name = '', String? text}) async {
     final t = target.isNotEmpty ? '&target=$target' : '';
     final n = name.isNotEmpty ? '&name=${Uri.encodeComponent(name)}' : '';
-    final d = await _g('/group-op?gid=$gid&op=$op$t&on=${on ? 1 : 0}$n',
+    final x = text != null ? '&text=${Uri.encodeComponent(text)}' : '';
+    final d = await _g('/group-op?gid=$gid&op=$op$t&on=${on ? 1 : 0}$n$x',
         withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
   }
@@ -944,6 +983,129 @@ class PlatformService {
         '/msg-react?scope=$scope&target=$target&mid=$mid&emoji=${Uri.encodeComponent(emoji)}',
         withUid: true);
     return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 撤回消息：仅发送后2分钟内、且是自己发的消息才能撤回。scope=dm|group，target=对方uid/群gid。
+  static Future<Map<String, dynamic>?> msgRecall(
+      {required String scope, required String target, required String mid}) async {
+    final d = await _g('/msg-recall?scope=$scope&target=$target&mid=$mid',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 编辑消息：仅发送后2分钟内、自己发的纯文本消息(kind=='text')才能编辑。
+  static Future<Map<String, dynamic>?> msgEdit(
+      {required String scope,
+      required String target,
+      required String mid,
+      required String text}) async {
+    final d = await _g(
+        '/msg-edit?scope=$scope&target=$target&mid=$mid&text=${Uri.encodeComponent(text)}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 批量撤回(多选删除)：复用单条撤回规则(自己的消息+2分钟内)，超时/非本人的会被跳过。
+  /// 返回 {ok, revoked:[mid,...], skipped:[{mid,reason},...]}。
+  static Future<Map<String, dynamic>?> msgRecallBatch(
+      {required String scope,
+      required String target,
+      required List<String> mids}) async {
+    final d = await _g(
+        '/msg-recall-batch?scope=$scope&target=$target&mids=${Uri.encodeComponent(mids.join(','))}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 表情面板数据：{ok, my:[{id,url}](我的收藏), premium:[{id,name,cost,url}](精品表情)}。
+  static Future<Map<String, dynamic>?> stickerList() async {
+    final d = await _g('/sticker-list', withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 从"我的收藏"移除一个表情。返回 {ok, my:[{id,url}]}。
+  static Future<Map<String, dynamic>?> stickerRemove(String id) async {
+    final d = await _g('/sticker-remove?id=${Uri.encodeComponent(id)}',
+        withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 上传自定义表情图片/GIF，落盘模式与 upload() 一致；成功后服务端自动加入"我的收藏"。
+  /// 返回 {ok, id, url} 或 null(失败)。
+  static Future<Map<String, dynamic>?> stickerUpload(
+      Uint8List bytes, String ext) async {
+    final uid = await walletUid();
+    final query = '?uid=$uid&ext=$ext';
+    for (final base in _uploadBases) {
+      try {
+        final r = await http
+            .post(Uri.parse('$base/sticker-upload$query'),
+                headers: {'Content-Type': 'application/octet-stream'},
+                body: bytes)
+            .timeout(const Duration(seconds: 30));
+        final d = jsonDecode(r.body);
+        if (d is Map && d['ok'] == true) return Map<String, dynamic>.from(d);
+      } catch (_) {}
+    }
+    return null;
+  }
+
+  /// 发送表情包(sticker_id)：scope=dm(target=对方uid)|group(target=gid)。
+  /// 精品表情按 cost 从余额扣除，余额不足/表情不属于自己返回 {ok:false,error}。
+  static Future<Map<String, dynamic>?> sendSticker(
+      {required String scope,
+      required String target,
+      required String stickerId}) async {
+    final path = scope == 'group'
+        ? '/group-send?gid=$target&sticker_id=${Uri.encodeComponent(stickerId)}'
+        : '/dm-send?to=$target&sticker_id=${Uri.encodeComponent(stickerId)}';
+    final d = await _g(path, withUid: true);
+    return d is Map ? Map<String, dynamic>.from(d) : null;
+  }
+
+  /// 我拉黑的用户列表 [{uid,nick}]，顺带用响应刷新 [blacklistedUids]（服务端为准）。
+  static Future<List<Map<String, dynamic>>> blacklistList() async {
+    final d = await _g('/blacklist-list', withUid: true);
+    if (d is Map && d['users'] is List) {
+      final list = (d['users'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      blacklistedUids = list.map((e) => '${e['uid']}').toSet();
+      return list;
+    }
+    return [];
+  }
+
+  /// 拉黑/取消拉黑某用户：on=true拉黑，false取消。成功后同步刷新 [blacklistedUids]。
+  /// 被拉黑者将无法再对我发起私信(服务端 /dm-send 校验)。
+  static Future<bool> blacklistSet({required String target, required bool on}) async {
+    final d = await _g('/blacklist-set?target=$target&on=${on ? 1 : 0}',
+        withUid: true);
+    if (d is Map && d['ok'] == true) {
+      if (d['blacklist'] is List) {
+        blacklistedUids = (d['blacklist'] as List).map((e) => '$e').toSet();
+      } else if (on) {
+        blacklistedUids.add(target);
+      } else {
+        blacklistedUids.remove(target);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  /// 聚合搜索：在我参与的所有私信+群聊里找含 q 的消息，每会话最多5条，返回
+  /// [{scope,target,name,mid,text,from,ts}]。scope='dm'时target=对方uid，'group'时target=gid。
+  static Future<List<Map<String, dynamic>>> chatSearchAll(String q) async {
+    if (q.trim().isEmpty) return [];
+    final d = await _g('/chat-search-all?q=${Uri.encodeComponent(q.trim())}',
+        withUid: true);
+    if (d is Map && d['results'] is List) {
+      return (d['results'] as List)
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    }
+    return [];
   }
 
   /// 拍一拍：在会话里发一条"X 拍了拍 Y"。私聊 to 留空(默认拍对方)，群聊 to=被拍成员。

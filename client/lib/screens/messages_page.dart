@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../services/platform_service.dart';
+import 'live_page.dart';
 
 /// 把文本里的网址变成可点链接(在 app 内/外部浏览器打开)。
 final _urlRe = RegExp(r'(https?://[^\s]+)');
@@ -35,30 +39,88 @@ Widget _linkifyText(String text, Color color) {
   return Text.rich(TextSpan(style: TextStyle(color: color), children: spans));
 }
 
-/// 会话置顶 / 消息免打扰（纯本地 prefs）。key=对方uid或群gid。
+/// 聊天记录搜索：把 text 里匹配 query(大小写不敏感)的片段用黄底高亮，用于搜索结果展示。
+/// 会话内搜索(_ChatPage/_GroupChatPage)和聚合搜索(_ChatSearchAllPage)共用。
+Widget _highlightMatch(String text, String query,
+    {TextStyle? style, int maxLines = 2}) {
+  if (query.isEmpty) {
+    return Text(text,
+        style: style, maxLines: maxLines, overflow: TextOverflow.ellipsis);
+  }
+  final lowerText = text.toLowerCase();
+  final lowerQ = query.toLowerCase();
+  final spans = <InlineSpan>[];
+  var start = 0;
+  while (true) {
+    final idx = lowerText.indexOf(lowerQ, start);
+    if (idx < 0) {
+      spans.add(TextSpan(text: text.substring(start)));
+      break;
+    }
+    if (idx > start) spans.add(TextSpan(text: text.substring(start, idx)));
+    spans.add(TextSpan(
+      text: text.substring(idx, idx + query.length),
+      style: const TextStyle(
+          backgroundColor: Color(0xFFFFE082), fontWeight: FontWeight.w700),
+    ));
+    start = idx + query.length;
+  }
+  return Text.rich(TextSpan(style: style, children: spans),
+      maxLines: maxLines, overflow: TextOverflow.ellipsis);
+}
+
+/// 聊天记录搜索结果里的相对时间(如"3分钟前"/"2天前")。
+String _fmtAgo(int ts) {
+  if (ts <= 0) return '';
+  final d =
+      DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ts * 1000));
+  if (d.inMinutes < 1) return '刚刚';
+  if (d.inHours < 1) return '${d.inMinutes}分钟前';
+  if (d.inDays < 1) return '${d.inHours}小时前';
+  return '${d.inDays}天前';
+}
+
+/// 会话置顶 / 消息免打扰：本地缓存 + 服务端为准。key='dm:对方uid' / 'grp:群id'，
+/// 与 activeChatKey/草稿箱同一套命名。
+/// 实际数据挂在 PlatformService.pinnedKeys/mutedKeys 上（公共类，home_shell.dart 弹系统通知前
+/// 也要读它判断免打扰——这个 _ChatPrefs 类本身是本文件私有的，跨文件访问不到）。
+/// dmList()/groupList() 每次请求都会用服务端返回的 pinned_keys/muted_keys 整体覆盖刷新，
+/// 这里只是加一层本地持久化(冷启动/离线兜底显示)，togglePin/toggleMute 时顺带调 /prefs-set 云同步。
 class _ChatPrefs {
-  static Set<String> pinned = {};
-  static Set<String> muted = {};
+  static Set<String> get pinned => PlatformService.pinnedKeys;
+  static Set<String> get muted => PlatformService.mutedKeys;
   static bool _loaded = false;
 
   static Future<void> ensure() async {
     if (_loaded) return;
     final p = await SharedPreferences.getInstance();
-    pinned = (p.getStringList('chat_pinned') ?? []).toSet();
-    muted = (p.getStringList('chat_muted') ?? []).toSet();
+    PlatformService.pinnedKeys = (p.getStringList('chat_pinned') ?? []).toSet();
+    PlatformService.mutedKeys = (p.getStringList('chat_muted') ?? []).toSet();
     _loaded = true;
   }
 
-  static Future<void> togglePin(String k) async {
+  static Future<void> _persist() async {
     final p = await SharedPreferences.getInstance();
-    pinned.contains(k) ? pinned.remove(k) : pinned.add(k);
-    await p.setStringList('chat_pinned', pinned.toList());
+    await p.setStringList('chat_pinned', PlatformService.pinnedKeys.toList());
+    await p.setStringList('chat_muted', PlatformService.mutedKeys.toList());
+  }
+
+  /// dm-list/group-list 每次都会把服务端最新的 pinned_keys/muted_keys 覆盖进
+  /// PlatformService.pinnedKeys/mutedKeys；这里把那份结果落盘，供下次冷启动/离线时兜底。
+  static Future<void> persistFromServer() => _persist();
+
+  static Future<void> togglePin(String k) async {
+    final on = !pinned.contains(k);
+    on ? pinned.add(k) : pinned.remove(k);
+    await _persist();
+    await PlatformService.prefsSet(key: k, kind: 'pin', on: on);
   }
 
   static Future<void> toggleMute(String k) async {
-    final p = await SharedPreferences.getInstance();
-    muted.contains(k) ? muted.remove(k) : muted.add(k);
-    await p.setStringList('chat_muted', muted.toList());
+    final on = !muted.contains(k);
+    on ? muted.add(k) : muted.remove(k);
+    await _persist();
+    await PlatformService.prefsSet(key: k, kind: 'mute', on: on);
   }
 
   /// 置顶的排前面（保持各自原顺序）。
@@ -67,6 +129,60 @@ class _ChatPrefs {
     final pin = list.where((c) => pinned.contains(key(c))).toList();
     final rest = list.where((c) => !pinned.contains(key(c))).toList();
     return [...pin, ...rest];
+  }
+}
+
+/// 聊天草稿箱（纯本地）。key='dm:对方uid' / 'grp:群id'，与 activeChatKey 同一套命名。
+/// 未发送的文字防抖写入，下次进入对应会话自动填回；发送成功后清空。
+class _ChatDraft {
+  static const _prefix = 'chat_draft_';
+
+  static Future<String> load(String key) async {
+    final p = await SharedPreferences.getInstance();
+    return p.getString('$_prefix$key') ?? '';
+  }
+
+  static Future<void> save(String key, String text) async {
+    final p = await SharedPreferences.getInstance();
+    if (text.isEmpty) {
+      await p.remove('$_prefix$key');
+    } else {
+      await p.setString('$_prefix$key', text);
+    }
+  }
+
+  static Future<void> clear(String key) async {
+    final p = await SharedPreferences.getInstance();
+    await p.remove('$_prefix$key');
+  }
+}
+
+/// 群公告已读进度（纯本地）。key='ann_seen_群id' -> 已读到的 announcement_ts。
+/// 用于群列表/群聊入口判断"有没有新公告"。
+class _AnnouncementPrefs {
+  static const _prefix = 'ann_seen_';
+  static Map<String, int> _seen = {};
+  static bool _loaded = false;
+
+  static Future<void> ensure() async {
+    if (_loaded) return;
+    final p = await SharedPreferences.getInstance();
+    _seen = {
+      for (final k in p.getKeys())
+        if (k.startsWith(_prefix)) k.substring(_prefix.length): (p.getInt(k) ?? 0)
+    };
+    _loaded = true;
+  }
+
+  /// 公告非空 且 更新时间晚于本地已读记录 -> 算"新公告"。
+  static bool isNew(String gid, int announcementTs) =>
+      announcementTs > 0 && announcementTs > (_seen[gid] ?? 0);
+
+  static Future<void> markSeen(String gid, int announcementTs) async {
+    if (announcementTs <= (_seen[gid] ?? 0)) return;
+    _seen[gid] = announcementTs;
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('$_prefix$gid', announcementTs);
   }
 }
 
@@ -88,6 +204,13 @@ class _MessagesPageState extends State<MessagesPage> {
           title: const Text('消息'),
           actions: [
             IconButton(
+              icon: const Icon(Icons.search),
+              tooltip: '搜索全部聊天',
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                  builder: (_) =>
+                      _ChatSearchAllPage(onPlayVideo: widget.onPlayVideo))),
+            ),
+            IconButton(
               icon: const Icon(Icons.camera_outlined),
               tooltip: '朋友圈',
               onPressed: () => Navigator.of(context).push(
@@ -104,6 +227,10 @@ class _MessagesPageState extends State<MessagesPage> {
             PopupMenuButton<String>(
               tooltip: '更多',
               onSelected: (v) async {
+                if (v == 'blacklist') {
+                  Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => const _BlacklistPage()));
+                }
                 if (v == 'test') {
                   final nowTest = await PlatformService.onTestAccount();
                   await PlatformService.switchTestAccount();
@@ -117,6 +244,8 @@ class _MessagesPageState extends State<MessagesPage> {
                 }
               },
               itemBuilder: (_) => [
+                const PopupMenuItem(
+                    value: 'blacklist', child: Text('黑名单管理')),
                 const PopupMenuItem(
                     value: 'test', child: Text('切换测试账号')),
               ],
@@ -132,6 +261,182 @@ class _MessagesPageState extends State<MessagesPage> {
           _GroupTab(onPlayVideo: widget.onPlayVideo),
         ]),
       ),
+    );
+  }
+}
+
+// ============ 聚合搜索：搜索全部聊天(私信+群聊) ============
+class _ChatSearchAllPage extends StatefulWidget {
+  final void Function(String id, String title) onPlayVideo;
+  const _ChatSearchAllPage({required this.onPlayVideo});
+  @override
+  State<_ChatSearchAllPage> createState() => _ChatSearchAllPageState();
+}
+
+class _ChatSearchAllPageState extends State<_ChatSearchAllPage> {
+  final _ctrl = TextEditingController();
+  Timer? _debounce;
+  bool _searching = false;
+  List<Map<String, dynamic>> _results = [];
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onChanged(String v) {
+    _debounce?.cancel();
+    _debounce = Timer(const Duration(milliseconds: 350), () => _run(v));
+  }
+
+  Future<void> _run(String q) async {
+    final query = q.trim();
+    if (query.isEmpty) {
+      if (mounted) setState(() => _results = []);
+      return;
+    }
+    if (mounted) setState(() => _searching = true);
+    final r = await PlatformService.chatSearchAll(query);
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _results = r;
+    });
+  }
+
+  void _openResult(Map<String, dynamic> r) {
+    final scope = '${r['scope'] ?? 'dm'}';
+    final target = '${r['target'] ?? ''}';
+    if (target.isEmpty) return;
+    if (scope == 'group') {
+      Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) =>
+              _GroupChatPage(gid: target, onPlayVideo: widget.onPlayVideo)));
+    } else {
+      Navigator.of(context).push(MaterialPageRoute<void>(
+          builder: (_) => _ChatPage(
+              peer: target,
+              peerNick: '${r['name'] ?? target}',
+              onPlayVideo: widget.onPlayVideo)));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final q = _ctrl.text.trim();
+    return Scaffold(
+      appBar: AppBar(
+        title: TextField(
+          controller: _ctrl,
+          autofocus: true,
+          decoration: const InputDecoration(
+              hintText: '搜索全部私信和群聊', border: InputBorder.none),
+          onChanged: _onChanged,
+        ),
+      ),
+      body: _searching
+          ? const Center(child: CircularProgressIndicator())
+          : q.isEmpty
+              ? const Center(
+                  child: Text('输入关键词搜索所有会话的聊天记录',
+                      style: TextStyle(color: Colors.black38)))
+              : _results.isEmpty
+                  ? const Center(
+                      child: Text('没有找到相关消息',
+                          style: TextStyle(color: Colors.black38)))
+                  : ListView.separated(
+                      itemCount: _results.length,
+                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      itemBuilder: (_, i) {
+                        final r = _results[i];
+                        final scope = '${r['scope'] ?? 'dm'}';
+                        final name = '${r['name'] ?? ''}';
+                        return ListTile(
+                          leading: Icon(scope == 'group'
+                              ? Icons.groups_outlined
+                              : Icons.person_outline),
+                          title: Text('来自「$name」的会话',
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.black54)),
+                          subtitle: _highlightMatch('${r['text'] ?? ''}', q,
+                              maxLines: 1),
+                          trailing: Text(
+                              _fmtAgo((r['ts'] as num?)?.toInt() ?? 0),
+                              style: const TextStyle(
+                                  fontSize: 11, color: Colors.black38)),
+                          onTap: () => _openResult(r),
+                        );
+                      },
+                    ),
+    );
+  }
+}
+
+// ============ 黑名单管理 ============
+class _BlacklistPage extends StatefulWidget {
+  const _BlacklistPage();
+  @override
+  State<_BlacklistPage> createState() => _BlacklistPageState();
+}
+
+class _BlacklistPageState extends State<_BlacklistPage> {
+  bool _loading = true;
+  List<Map<String, dynamic>> _users = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final u = await PlatformService.blacklistList();
+    if (mounted) setState(() {
+      _users = u;
+      _loading = false;
+    });
+  }
+
+  Future<void> _remove(Map<String, dynamic> u) async {
+    final target = '${u['uid'] ?? ''}';
+    if (target.isEmpty) return;
+    final ok = await PlatformService.blacklistSet(target: target, on: false);
+    if (!mounted) return;
+    if (ok) {
+      _snack(context, '已取消拉黑「${u['nick'] ?? target}」');
+      _load();
+    } else {
+      _snack(context, '操作失败');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('黑名单管理')),
+      body: _loading
+          ? const Center(child: CircularProgressIndicator())
+          : _users.isEmpty
+              ? const Center(
+                  child: Text('还没有拉黑任何人',
+                      style: TextStyle(color: Colors.black38)))
+              : ListView.separated(
+                  itemCount: _users.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (_, i) {
+                    final u = _users[i];
+                    return ListTile(
+                      leading: const CircleAvatar(child: Icon(Icons.person)),
+                      title: Text('${u['nick'] ?? u['uid'] ?? ''}'),
+                      trailing: OutlinedButton(
+                        onPressed: () => _remove(u),
+                        child: const Text('移除'),
+                      ),
+                    );
+                  },
+                ),
     );
   }
 }
@@ -156,9 +461,11 @@ class _DmTabState extends State<_DmTab> {
 
   Future<void> _load() async {
     await _ChatPrefs.ensure();
-    final c = await PlatformService.dmList();
+    final c = await PlatformService.dmList(); // 顺带把 pinned_keys/muted_keys 刷进本地缓存
+    await _ChatPrefs.persistFromServer();
+    await PlatformService.blacklistList(); // 顺带把 blacklistedUids 刷进本地缓存
     if (mounted) setState(() {
-      _convs = _ChatPrefs.sort(c, (x) => '${x['peer']}');
+      _convs = _ChatPrefs.sort(c, (x) => 'dm:${x['peer']}');
       _loading = false;
     });
   }
@@ -166,6 +473,8 @@ class _DmTabState extends State<_DmTab> {
   Future<void> _convMenu(String key) async {
     final pinned = _ChatPrefs.pinned.contains(key);
     final muted = _ChatPrefs.muted.contains(key);
+    final peer = key.startsWith('dm:') ? key.substring(3) : '';
+    final blocked = PlatformService.blacklistedUids.contains(peer);
     final v = await showModalBottomSheet<String>(
       context: context,
       builder: (_) => SafeArea(
@@ -179,11 +488,18 @@ class _DmTabState extends State<_DmTab> {
                   muted ? Icons.notifications_off : Icons.notifications_off_outlined),
               title: Text(muted ? '取消免打扰' : '消息免打扰'),
               onTap: () => Navigator.pop(context, 'mute')),
+          ListTile(
+              leading: Icon(blocked ? Icons.block : Icons.block_outlined),
+              title: Text(blocked ? '取消拉黑' : '拉黑'),
+              onTap: () => Navigator.pop(context, 'block')),
         ]),
       ),
     );
     if (v == 'pin') await _ChatPrefs.togglePin(key);
     if (v == 'mute') await _ChatPrefs.toggleMute(key);
+    if (v == 'block' && peer.isNotEmpty) {
+      await PlatformService.blacklistSet(target: peer, on: !blocked);
+    }
     _load();
   }
 
@@ -221,7 +537,7 @@ class _DmTabState extends State<_DmTab> {
                     separatorBuilder: (_, __) => const Divider(height: 1),
                     itemBuilder: (_, i) {
                       final c = _convs[i];
-                      final key = '${c['peer']}';
+                      final key = 'dm:${c['peer']}';
                       final pinned = _ChatPrefs.pinned.contains(key);
                       final muted = _ChatPrefs.muted.contains(key);
                       return ListTile(
@@ -283,9 +599,11 @@ class _GroupTabState extends State<_GroupTab> {
 
   Future<void> _load() async {
     await _ChatPrefs.ensure();
-    final g = await PlatformService.groupList();
+    await _AnnouncementPrefs.ensure();
+    final g = await PlatformService.groupList(); // 顺带把 pinned_keys/muted_keys 刷进本地缓存
+    await _ChatPrefs.persistFromServer();
     if (mounted) setState(() {
-      _groups = _ChatPrefs.sort(g, (x) => '${x['gid']}');
+      _groups = _ChatPrefs.sort(g, (x) => 'grp:${x['gid']}');
       _loading = false;
     });
   }
@@ -366,9 +684,14 @@ class _GroupTabState extends State<_GroupTab> {
                     itemBuilder: (_, i) {
                       final g = _groups[i];
                       final role = '${g['role']}';
-                      final key = '${g['gid']}';
-                      final pinned = _ChatPrefs.pinned.contains(key);
-                      final muted = _ChatPrefs.muted.contains(key);
+                      final key = '${g['gid']}'; // 原始 gid：给 _AnnouncementPrefs/群聊页跳转用
+                      final convKey = 'grp:$key'; // 前缀过的 conv_key：给 _ChatPrefs 置顶/免打扰用
+                      final pinned = _ChatPrefs.pinned.contains(convKey);
+                      final muted = _ChatPrefs.muted.contains(convKey);
+                      final annText = '${g['announcement'] ?? ''}';
+                      final annTs = (g['announcement_ts'] as num?)?.toInt() ?? 0;
+                      final hasNewAnn =
+                          annText.isNotEmpty && _AnnouncementPrefs.isNew(key, annTs);
                       return ListTile(
                         tileColor:
                             pinned ? const Color(0x0A000000) : null,
@@ -376,6 +699,18 @@ class _GroupTabState extends State<_GroupTab> {
                             child: Icon(Icons.groups)),
                         title: Row(children: [
                           Flexible(child: Text('${g['name'] ?? ''}')),
+                          if (hasNewAnn)
+                            Container(
+                              margin: const EdgeInsets.only(left: 6),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 1),
+                              decoration: BoxDecoration(
+                                  color: const Color(0xFFE3A93B),
+                                  borderRadius: BorderRadius.circular(8)),
+                              child: const Text('新公告',
+                                  style: TextStyle(
+                                      fontSize: 10, color: Colors.white)),
+                            ),
                           if (muted)
                             const Padding(
                               padding: EdgeInsets.only(left: 6),
@@ -389,7 +724,7 @@ class _GroupTabState extends State<_GroupTab> {
                             ? const Icon(Icons.push_pin,
                                 size: 14, color: Colors.black38)
                             : null,
-                        onLongPress: () => _groupMenu(key),
+                        onLongPress: () => _groupMenu(convKey),
                         onTap: () async {
                           await Navigator.of(context).push(
                               MaterialPageRoute<void>(
@@ -422,6 +757,22 @@ class _ChatPageState extends State<_ChatPage> {
   final _ctrl = TextEditingController();
   List<Map<String, dynamic>> _msgs = [];
   String? _myUid;
+  Timer? _draftTimer;
+  String get _draftKey => 'dm:${widget.peer}';
+
+  // 本会话搜索：搜索框防抖调用带 q 的 dmMsgs，命中结果点击后跳转/定位到该消息附近。
+  bool _searchMode = false;
+  final _searchCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
+  final Map<String, GlobalKey> _msgKeys = {};
+  Timer? _searchDebounce;
+  bool _searching = false;
+  List<Map<String, dynamic>> _searchResults = [];
+  String? _highlightMid;
+
+  // 消息多选：长按菜单点"多选"进入，勾选后底部栏可批量转发/批量删除(=批量撤回自己的消息)。
+  bool _selectMode = false;
+  final Set<String> _selectedMids = {};
 
   @override
   void initState() {
@@ -429,7 +780,23 @@ class _ChatPageState extends State<_ChatPage> {
     PlatformService.activeChatKey = 'dm:${widget.peer}'; // 正在看，别给这会话弹通知
     PlatformService.walletUid()
         .then((u) => mounted ? setState(() => _myUid = u) : null);
+    // 刷新"我是否已拉黑对方"，据此决定 _ChatInput 是否隐藏发送框。
+    PlatformService.blacklistList().then((_) => mounted ? setState(() {}) : null);
     _load();
+    _ctrl.addListener(_onDraftChanged);
+    _ChatDraft.load(_draftKey).then((t) {
+      if (mounted && t.isNotEmpty) {
+        _ctrl.text = t;
+        _ctrl.selection =
+            TextSelection.fromPosition(TextPosition(offset: _ctrl.text.length));
+      }
+    });
+  }
+
+  void _onDraftChanged() {
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 500),
+        () => _ChatDraft.save(_draftKey, _ctrl.text));
   }
 
   @override
@@ -437,7 +804,106 @@ class _ChatPageState extends State<_ChatPage> {
     if (PlatformService.activeChatKey == 'dm:${widget.peer}') {
       PlatformService.activeChatKey = null;
     }
+    _draftTimer?.cancel();
+    _ChatDraft.save(_draftKey, _ctrl.text); // 兜底落盘
+    _ctrl.removeListener(_onDraftChanged);
+    _searchDebounce?.cancel();
+    _searchCtrl.dispose();
+    _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _searchMode = !_searchMode;
+      if (!_searchMode) {
+        _searchDebounce?.cancel();
+        _searchCtrl.clear();
+        _searchResults = [];
+        _searching = false;
+      }
+    });
+  }
+
+  void _onSearchChanged(String v) {
+    _searchDebounce?.cancel();
+    _searchDebounce =
+        Timer(const Duration(milliseconds: 350), () => _runSearch(v));
+  }
+
+  Future<void> _runSearch(String q) async {
+    final query = q.trim();
+    if (query.isEmpty) {
+      if (mounted) setState(() => _searchResults = []);
+      return;
+    }
+    if (mounted) setState(() => _searching = true);
+    final d = await PlatformService.dmMsgs(widget.peer, q: query);
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _searchResults = ((d?['msgs'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    });
+  }
+
+  // 跳转/定位到该消息附近：先按索引比例粗定位，再等这一帧建好后用 ensureVisible 精定位，
+  // 并临时高亮几秒方便肉眼找到（消息数量有限，全量已加载，不做分页翻页）。
+  Future<void> _jumpToMsg(String mid) async {
+    if (mid.isEmpty) return;
+    setState(() {
+      _searchMode = false;
+      _highlightMid = mid;
+    });
+    final idx = _msgs.indexWhere((m) => m['mid'] == mid);
+    if (idx < 0) return;
+    await Future.delayed(const Duration(milliseconds: 60));
+    if (!mounted) return;
+    if (_scrollCtrl.hasClients && _msgs.length > 1) {
+      final frac = idx / (_msgs.length - 1);
+      final target = (_scrollCtrl.position.maxScrollExtent * frac)
+          .clamp(0.0, _scrollCtrl.position.maxScrollExtent);
+      _scrollCtrl.jumpTo(target);
+    }
+    await Future.delayed(const Duration(milliseconds: 120));
+    final ctx = _msgKeys[mid]?.currentContext;
+    if (ctx != null && mounted) {
+      await Scrollable.ensureVisible(ctx,
+          duration: const Duration(milliseconds: 250), alignment: 0.5);
+    }
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted && _highlightMid == mid) setState(() => _highlightMid = null);
+    });
+  }
+
+  Widget _buildSearchResults() {
+    if (_searching) return const Center(child: CircularProgressIndicator());
+    final q = _searchCtrl.text.trim();
+    if (q.isEmpty) {
+      return const Center(
+          child: Text('输入关键词搜索本会话消息', style: TextStyle(color: Colors.black38)));
+    }
+    if (_searchResults.isEmpty) {
+      return const Center(
+          child: Text('没有找到相关消息', style: TextStyle(color: Colors.black38)));
+    }
+    return ListView.separated(
+      itemCount: _searchResults.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (_, i) {
+        final m = _searchResults[i];
+        final mine = m['from'] == _myUid;
+        return ListTile(
+          leading: Icon(mine ? Icons.arrow_upward : Icons.arrow_downward,
+              size: 18, color: Colors.black45),
+          title: _highlightMatch('${m['text'] ?? ''}', q),
+          subtitle: Text(_fmtAgo((m['ts'] as num?)?.toInt() ?? 0),
+              style: const TextStyle(fontSize: 11, color: Colors.black38)),
+          onTap: () => _jumpToMsg('${m['mid'] ?? ''}'),
+        );
+      },
+    );
   }
 
   Future<void> _load() async {
@@ -453,6 +919,8 @@ class _ChatPageState extends State<_ChatPage> {
     final t = _ctrl.text.trim();
     if (t.isEmpty) return;
     _ctrl.clear();
+    _draftTimer?.cancel();
+    await _ChatDraft.clear(_draftKey);
     final ok = await PlatformService.dmSend(widget.peer, text: t);
     if (ok) _load();
   }
@@ -564,49 +1032,243 @@ class _ChatPageState extends State<_ChatPage> {
     return d;
   }
 
+  // 本地乐观更新：用服务端返回的最新 msg 原地替换列表里对应 mid 的那条，不等下次轮询。
+  void _applyMsgPatch(String mid, Map<String, dynamic>? newMsg) {
+    if (newMsg == null || !mounted) return;
+    setState(() {
+      final i = _msgs.indexWhere((x) => x['mid'] == mid);
+      if (i != -1) _msgs[i] = Map<String, dynamic>.from(newMsg);
+    });
+  }
+
+  Future<void> _recallMsg(Map<String, dynamic> m) async {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty) return;
+    final d =
+        await PlatformService.msgRecall(scope: 'dm', target: widget.peer, mid: mid);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _applyMsgPatch(mid, d['msg'] as Map<String, dynamic>?);
+    } else {
+      _snack(context, '${d?['error'] ?? '撤回失败'}');
+    }
+  }
+
+  Future<void> _editMsg(Map<String, dynamic> m, String text) async {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty) return;
+    final d = await PlatformService.msgEdit(
+        scope: 'dm', target: widget.peer, mid: mid, text: text);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _applyMsgPatch(mid, d['msg'] as Map<String, dynamic>?);
+    } else {
+      _snack(context, '${d?['error'] ?? '编辑失败'}');
+    }
+  }
+
+  // 表情包面板：选中"我的收藏"直接发；精品表情要消耗积分，发前二次确认。
+  Future<void> _openStickerPicker() async {
+    final picked = await _pickSticker(context);
+    if (picked == null || !mounted) return;
+    final cost = (picked['cost'] as num?)?.toInt() ?? 0;
+    if (cost > 0) {
+      final ok = await _confirm(context, '发送精品表情', '将消耗 $cost 兑换币，确定发送吗？');
+      if (!ok || !mounted) return;
+    }
+    final d = await PlatformService.sendSticker(
+        scope: 'dm', target: widget.peer, stickerId: '${picked['id']}');
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _load();
+    } else {
+      _snack(context, '${d?['error'] ?? '发送失败'}');
+    }
+  }
+
+  // 点"XX 正在直播"提醒卡片：进直播间(若已下播，LiveRoomPage 会自己提示"直播已结束")。
+  void _openLiveAlert(Map<String, dynamic> m) {
+    final lid = '${m['lid'] ?? ''}';
+    if (lid.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => LiveRoomPage(
+            lid: lid,
+            isHost: false,
+            title: '${m['live_nick'] ?? ''}的直播',
+            onPlayVideo: widget.onPlayVideo)));
+  }
+
+  void _enterSelectMode(Map<String, dynamic> m) {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty) return;
+    setState(() {
+      _selectMode = true;
+      _selectedMids
+        ..clear()
+        ..add(mid);
+    });
+  }
+
+  void _toggleSelect(String mid) {
+    setState(() {
+      if (!_selectedMids.remove(mid)) _selectedMids.add(mid);
+    });
+  }
+
+  void _exitSelectMode() {
+    setState(() {
+      _selectMode = false;
+      _selectedMids.clear();
+    });
+  }
+
+  Future<void> _batchForwardSelected() async {
+    final msgs =
+        _msgs.where((m) => _selectedMids.contains('${m['mid'] ?? ''}')).toList();
+    await _forwardMessages(context, msgs);
+    if (mounted) _exitSelectMode();
+  }
+
+  // 批量删除=批量撤回自己的消息，超时/非本人的会被服务端跳过，跳过原因合并成一句提示。
+  Future<void> _batchDelete() async {
+    if (_selectedMids.isEmpty) return;
+    final d = await PlatformService.msgRecallBatch(
+        scope: 'dm', target: widget.peer, mids: _selectedMids.toList());
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      final revoked = ((d['revoked'] as List?) ?? const []).length;
+      final skipped = (d['skipped'] as List?) ?? const [];
+      final timeoutN =
+          skipped.where((s) => s is Map && s['reason'] == '超时').length;
+      final otherN = skipped.length - timeoutN;
+      var msg = '已撤回 $revoked 条';
+      if (timeoutN > 0) msg += '，$timeoutN条已超时未撤回';
+      if (otherN > 0) msg += '，$otherN条无法撤回';
+      _snack(context, msg);
+      _load();
+      _exitSelectMode();
+    } else {
+      _snack(context, '${d?['error'] ?? '批量撤回失败'}');
+    }
+  }
+
+  // 多选模式下的底部操作栏：转发(N) / 删除(N)。
+  Widget _buildSelectBar() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Color(0xFFE0E0E0))),
+        ),
+        child: Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _selectedMids.isEmpty ? null : _batchForwardSelected,
+              icon: const Icon(Icons.forward, size: 18),
+              label: Text('转发(${_selectedMids.length})'),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
+              onPressed: _selectedMids.isEmpty ? null : _batchDelete,
+              icon: const Icon(Icons.delete_outline, size: 18),
+              label: Text('删除(${_selectedMids.length})'),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
-          title: GestureDetector(
-              onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
-                  builder: (_) => ProfilePage(
-                      uid: widget.peer, onPlayVideo: widget.onPlayVideo))),
-              child: Text(widget.peerNick)),
+          leading: _selectMode
+              ? IconButton(
+                  icon: const Icon(Icons.close), onPressed: _exitSelectMode)
+              : null,
+          title: _selectMode
+              ? Text('已选择 ${_selectedMids.length} 条')
+              : _searchMode
+              ? TextField(
+                  controller: _searchCtrl,
+                  autofocus: true,
+                  style: const TextStyle(color: Colors.black87),
+                  decoration: const InputDecoration(
+                      hintText: '搜索聊天记录',
+                      hintStyle: TextStyle(color: Colors.black38),
+                      border: InputBorder.none),
+                  onChanged: _onSearchChanged)
+              : GestureDetector(
+                  onTap: () => Navigator.of(context).push(MaterialPageRoute<void>(
+                      builder: (_) => ProfilePage(
+                          uid: widget.peer, onPlayVideo: widget.onPlayVideo))),
+                  child: Text(widget.peerNick)),
           backgroundColor: const Color(0xFFEDEDED),
           foregroundColor: Colors.black87,
-          elevation: 0),
-      body: Column(children: [
-        Expanded(
-            child: _MsgList(
-                msgs: _msgs,
-                myUid: _myUid,
-                onPlayVideo: widget.onPlayVideo,
-                onCard: _openCard,
-                onGrabPacket: _grabPacket,
-                onProfile: (uid) => Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                        builder: (_) => ProfilePage(
-                            uid: uid, onPlayVideo: widget.onPlayVideo))),
-                onReact: (mid, emoji) async {
-                  await PlatformService.msgReact(
-                      scope: 'dm', target: widget.peer, mid: mid, emoji: emoji);
-                  _load();
-                },
-                onPat: (m) async {
-                  await PlatformService.patUser(
-                      scope: 'dm', target: widget.peer);
-                  _load();
-                })),
-        _ChatInput(
-            controller: _ctrl,
-            onSend: _send,
-            onRecommend: _recommend,
-            onTransfer: _transfer,
-            onRedpacket: _redpacket,
-            onCard: _sendCard),
-      ]),
+          elevation: 0,
+          actions: _selectMode
+              ? []
+              : [
+                  IconButton(
+                    icon: Icon(_searchMode ? Icons.close : Icons.search),
+                    tooltip: _searchMode ? '取消搜索' : '搜索聊天记录',
+                    onPressed: _toggleSearch,
+                  ),
+                ]),
+      body: _searchMode
+          ? _buildSearchResults()
+          : Column(children: [
+              Expanded(
+                  child: _MsgList(
+                      msgs: _msgs,
+                      myUid: _myUid,
+                      onPlayVideo: widget.onPlayVideo,
+                      onCard: _openCard,
+                      onGrabPacket: _grabPacket,
+                      scrollController: _scrollCtrl,
+                      msgKeys: _msgKeys,
+                      highlightMid: _highlightMid,
+                      selectionMode: _selectMode,
+                      selectedMids: _selectedMids,
+                      onToggleSelect: _toggleSelect,
+                      onEnterSelect: _enterSelectMode,
+                      onProfile: (uid) => Navigator.of(context).push(
+                          MaterialPageRoute<void>(
+                              builder: (_) => ProfilePage(
+                                  uid: uid, onPlayVideo: widget.onPlayVideo))),
+                      onReact: (mid, emoji) async {
+                        await PlatformService.msgReact(
+                            scope: 'dm', target: widget.peer, mid: mid, emoji: emoji);
+                        _load();
+                      },
+                      onPat: (m) async {
+                        await PlatformService.patUser(
+                            scope: 'dm', target: widget.peer);
+                        _load();
+                      },
+                      onRecall: _recallMsg,
+                      onEdit: _editMsg,
+                      onOpenLive: _openLiveAlert)),
+              if (_selectMode)
+                _buildSelectBar()
+              else
+                _ChatInput(
+                    controller: _ctrl,
+                    onSend: _send,
+                    onRecommend: _recommend,
+                    onTransfer: _transfer,
+                    onRedpacket: _redpacket,
+                    onCard: _sendCard,
+                    onSticker: _openStickerPicker,
+                    blocked: PlatformService.blacklistedUids.contains(widget.peer)),
+            ]),
     );
   }
 }
@@ -657,6 +1319,25 @@ class _GroupChatPageState extends State<_GroupChatPage> {
   Map<String, dynamic> _info = {};
   List<Map<String, dynamic>> _msgs = [];
   String? _myUid;
+  Timer? _draftTimer;
+  bool _annExpanded = false;
+  String get _draftKey => 'grp:${widget.gid}';
+  String get _announcement => '${_info['announcement'] ?? ''}';
+  int get _announcementTs => (_info['announcement_ts'] as num?)?.toInt() ?? 0;
+
+  // 本会话搜索：搜索框防抖调用带 q 的 groupMsgs，命中结果点击后跳转/定位到该消息附近。
+  bool _searchMode = false;
+  final _searchCtrl = TextEditingController();
+  final _scrollCtrl = ScrollController();
+  final Map<String, GlobalKey> _msgKeys = {};
+  Timer? _searchDebounce;
+  bool _searching = false;
+  List<Map<String, dynamic>> _searchResults = [];
+  String? _highlightMid;
+
+  // 消息多选：长按菜单点"多选"进入，勾选后底部栏可批量转发/批量删除(=批量撤回自己的消息)。
+  bool _selectMode = false;
+  final Set<String> _selectedMids = {};
 
   @override
   void initState() {
@@ -665,6 +1346,20 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     PlatformService.walletUid()
         .then((u) => mounted ? setState(() => _myUid = u) : null);
     _load();
+    _ctrl.addListener(_onDraftChanged);
+    _ChatDraft.load(_draftKey).then((t) {
+      if (mounted && t.isNotEmpty) {
+        _ctrl.text = t;
+        _ctrl.selection =
+            TextSelection.fromPosition(TextPosition(offset: _ctrl.text.length));
+      }
+    });
+  }
+
+  void _onDraftChanged() {
+    _draftTimer?.cancel();
+    _draftTimer = Timer(const Duration(milliseconds: 500),
+        () => _ChatDraft.save(_draftKey, _ctrl.text));
   }
 
   @override
@@ -672,7 +1367,108 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     if (PlatformService.activeChatKey == 'grp:${widget.gid}') {
       PlatformService.activeChatKey = null;
     }
+    _draftTimer?.cancel();
+    _ChatDraft.save(_draftKey, _ctrl.text); // 兜底落盘
+    _ctrl.removeListener(_onDraftChanged);
+    _searchDebounce?.cancel();
+    _searchCtrl.dispose();
+    _scrollCtrl.dispose();
     super.dispose();
+  }
+
+  void _toggleSearch() {
+    setState(() {
+      _searchMode = !_searchMode;
+      if (!_searchMode) {
+        _searchDebounce?.cancel();
+        _searchCtrl.clear();
+        _searchResults = [];
+        _searching = false;
+      }
+    });
+  }
+
+  void _onSearchChanged(String v) {
+    _searchDebounce?.cancel();
+    _searchDebounce =
+        Timer(const Duration(milliseconds: 350), () => _runSearch(v));
+  }
+
+  Future<void> _runSearch(String q) async {
+    final query = q.trim();
+    if (query.isEmpty) {
+      if (mounted) setState(() => _searchResults = []);
+      return;
+    }
+    if (mounted) setState(() => _searching = true);
+    final d = await PlatformService.groupMsgs(widget.gid, q: query);
+    if (!mounted) return;
+    setState(() {
+      _searching = false;
+      _searchResults = ((d?['msgs'] as List?) ?? [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+    });
+  }
+
+  // 跳转/定位到该消息附近：先按索引比例粗定位，再等这一帧建好后用 ensureVisible 精定位，
+  // 并临时高亮几秒方便肉眼找到（消息数量有限，全量已加载，不做分页翻页）。
+  Future<void> _jumpToMsg(String mid) async {
+    if (mid.isEmpty) return;
+    setState(() {
+      _searchMode = false;
+      _highlightMid = mid;
+    });
+    final idx = _msgs.indexWhere((m) => m['mid'] == mid);
+    if (idx < 0) return;
+    await Future.delayed(const Duration(milliseconds: 60));
+    if (!mounted) return;
+    if (_scrollCtrl.hasClients && _msgs.length > 1) {
+      final frac = idx / (_msgs.length - 1);
+      final target = (_scrollCtrl.position.maxScrollExtent * frac)
+          .clamp(0.0, _scrollCtrl.position.maxScrollExtent);
+      _scrollCtrl.jumpTo(target);
+    }
+    await Future.delayed(const Duration(milliseconds: 120));
+    final ctx = _msgKeys[mid]?.currentContext;
+    if (ctx != null && mounted) {
+      await Scrollable.ensureVisible(ctx,
+          duration: const Duration(milliseconds: 250), alignment: 0.5);
+    }
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted && _highlightMid == mid) setState(() => _highlightMid = null);
+    });
+  }
+
+  Widget _buildSearchResults() {
+    if (_searching) return const Center(child: CircularProgressIndicator());
+    final q = _searchCtrl.text.trim();
+    if (q.isEmpty) {
+      return const Center(
+          child: Text('输入关键词搜索本群消息', style: TextStyle(color: Colors.black38)));
+    }
+    if (_searchResults.isEmpty) {
+      return const Center(
+          child: Text('没有找到相关消息', style: TextStyle(color: Colors.black38)));
+    }
+    return ListView.separated(
+      itemCount: _searchResults.length,
+      separatorBuilder: (_, __) => const Divider(height: 1),
+      itemBuilder: (_, i) {
+        final m = _searchResults[i];
+        final fromNick = '${m['from_nick'] ?? ''}';
+        final mine = m['from'] == _myUid;
+        return ListTile(
+          leading: Icon(mine ? Icons.arrow_upward : Icons.arrow_downward,
+              size: 18, color: Colors.black45),
+          title: _highlightMatch('${m['text'] ?? ''}', q),
+          subtitle: Text(
+              '${mine ? '我' : fromNick}  ${_fmtAgo((m['ts'] as num?)?.toInt() ?? 0)}',
+              style: const TextStyle(fontSize: 11, color: Colors.black38)),
+          onTap: () => _jumpToMsg('${m['mid'] ?? ''}'),
+        );
+      },
+    );
   }
 
   Future<void> _load() async {
@@ -684,6 +1480,10 @@ class _GroupChatPageState extends State<_GroupChatPage> {
             .map((e) => Map<String, dynamic>.from(e as Map))
             .toList();
       });
+      // 进群聊即视为已读公告，清掉群列表的"新公告"标签
+      if (_announcement.isNotEmpty) {
+        _AnnouncementPrefs.markSeen(widget.gid, _announcementTs);
+      }
     } else if (d != null && d['ok'] != true && mounted) {
       // 被踢/解散
       Navigator.of(context).pop();
@@ -694,6 +1494,8 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     final t = _ctrl.text.trim();
     if (t.isEmpty) return;
     _ctrl.clear();
+    _draftTimer?.cancel();
+    await _ChatDraft.clear(_draftKey);
     if (await PlatformService.groupSend(widget.gid, text: t)) _load();
   }
 
@@ -835,10 +1637,193 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     return d;
   }
 
+  // 本地乐观更新：用服务端返回的最新 msg 原地替换列表里对应 mid 的那条，不等下次轮询。
+  void _applyMsgPatch(String mid, Map<String, dynamic>? newMsg) {
+    if (newMsg == null || !mounted) return;
+    setState(() {
+      final i = _msgs.indexWhere((x) => x['mid'] == mid);
+      if (i != -1) _msgs[i] = Map<String, dynamic>.from(newMsg);
+    });
+  }
+
+  Future<void> _recallMsg(Map<String, dynamic> m) async {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty) return;
+    final d = await PlatformService.msgRecall(
+        scope: 'group', target: widget.gid, mid: mid);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _applyMsgPatch(mid, d['msg'] as Map<String, dynamic>?);
+    } else {
+      _snack(context, '${d?['error'] ?? '撤回失败'}');
+    }
+  }
+
+  Future<void> _editMsg(Map<String, dynamic> m, String text) async {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty) return;
+    final d = await PlatformService.msgEdit(
+        scope: 'group', target: widget.gid, mid: mid, text: text);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _applyMsgPatch(mid, d['msg'] as Map<String, dynamic>?);
+    } else {
+      _snack(context, '${d?['error'] ?? '编辑失败'}');
+    }
+  }
+
+  // 表情包面板：选中"我的收藏"直接发；精品表情要消耗积分，发前二次确认。
+  Future<void> _openStickerPicker() async {
+    final picked = await _pickSticker(context);
+    if (picked == null || !mounted) return;
+    final cost = (picked['cost'] as num?)?.toInt() ?? 0;
+    if (cost > 0) {
+      final ok = await _confirm(context, '发送精品表情', '将消耗 $cost 兑换币，确定发送吗？');
+      if (!ok || !mounted) return;
+    }
+    final d = await PlatformService.sendSticker(
+        scope: 'group', target: widget.gid, stickerId: '${picked['id']}');
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      _load();
+    } else {
+      _snack(context, '${d?['error'] ?? '发送失败'}');
+    }
+  }
+
+  // 点"XX 正在直播"提醒卡片：进直播间(若已下播，LiveRoomPage 会自己提示"直播已结束")。
+  void _openLiveAlert(Map<String, dynamic> m) {
+    final lid = '${m['lid'] ?? ''}';
+    if (lid.isEmpty) return;
+    Navigator.of(context).push(MaterialPageRoute<void>(
+        builder: (_) => LiveRoomPage(
+            lid: lid,
+            isHost: false,
+            title: '${m['live_nick'] ?? ''}的直播',
+            onPlayVideo: widget.onPlayVideo)));
+  }
+
+  void _enterSelectMode(Map<String, dynamic> m) {
+    final mid = '${m['mid'] ?? ''}';
+    if (mid.isEmpty) return;
+    setState(() {
+      _selectMode = true;
+      _selectedMids
+        ..clear()
+        ..add(mid);
+    });
+  }
+
+  void _toggleSelect(String mid) {
+    setState(() {
+      if (!_selectedMids.remove(mid)) _selectedMids.add(mid);
+    });
+  }
+
+  void _exitSelectMode() {
+    setState(() {
+      _selectMode = false;
+      _selectedMids.clear();
+    });
+  }
+
+  Future<void> _batchForwardSelected() async {
+    final msgs =
+        _msgs.where((m) => _selectedMids.contains('${m['mid'] ?? ''}')).toList();
+    await _forwardMessages(context, msgs);
+    if (mounted) _exitSelectMode();
+  }
+
+  // 批量删除=批量撤回自己的消息，超时/非本人的会被服务端跳过，跳过原因合并成一句提示。
+  Future<void> _batchDelete() async {
+    if (_selectedMids.isEmpty) return;
+    final d = await PlatformService.msgRecallBatch(
+        scope: 'group', target: widget.gid, mids: _selectedMids.toList());
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      final revoked = ((d['revoked'] as List?) ?? const []).length;
+      final skipped = (d['skipped'] as List?) ?? const [];
+      final timeoutN =
+          skipped.where((s) => s is Map && s['reason'] == '超时').length;
+      final otherN = skipped.length - timeoutN;
+      var msg = '已撤回 $revoked 条';
+      if (timeoutN > 0) msg += '，$timeoutN条已超时未撤回';
+      if (otherN > 0) msg += '，$otherN条无法撤回';
+      _snack(context, msg);
+      _load();
+      _exitSelectMode();
+    } else {
+      _snack(context, '${d?['error'] ?? '批量撤回失败'}');
+    }
+  }
+
+  // 多选模式下的底部操作栏：转发(N) / 删除(N)。
+  Widget _buildSelectBar() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          border: Border(top: BorderSide(color: Color(0xFFE0E0E0))),
+        ),
+        child: Row(children: [
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _selectedMids.isEmpty ? null : _batchForwardSelected,
+              icon: const Icon(Icons.forward, size: 18),
+              label: Text('转发(${_selectedMids.length})'),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(foregroundColor: Colors.redAccent),
+              onPressed: _selectedMids.isEmpty ? null : _batchDelete,
+              icon: const Icon(Icons.delete_outline, size: 18),
+              label: Text('删除(${_selectedMids.length})'),
+            ),
+          ),
+        ]),
+      ),
+    );
+  }
+
   String get _myRole {
     if (_info['owner'] == _myUid) return 'owner';
     if (((_info['admins'] as List?) ?? []).contains(_myUid)) return 'admin';
     return 'member';
+  }
+
+  // 群公告横幅：AppBar 下方，可点击展开/收起，仅公告非空时显示。
+  Widget _buildAnnouncementBanner() {
+    return Material(
+      color: const Color(0xFFFFF3D6),
+      child: InkWell(
+        onTap: () => setState(() => _annExpanded = !_annExpanded),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Padding(
+              padding: EdgeInsets.only(top: 2),
+              child: Icon(Icons.campaign, size: 16, color: Color(0xFFB8860B)),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(_announcement,
+                  maxLines: _annExpanded ? null : 1,
+                  overflow: _annExpanded
+                      ? TextOverflow.visible
+                      : TextOverflow.ellipsis,
+                  style: const TextStyle(fontSize: 13, color: Color(0xFF7A5B1E))),
+            ),
+            const SizedBox(width: 4),
+            Icon(_annExpanded ? Icons.expand_less : Icons.expand_more,
+                size: 18, color: const Color(0xFF7A5B1E)),
+          ]),
+        ),
+      ),
+    );
   }
 
   @override
@@ -846,56 +1831,97 @@ class _GroupChatPageState extends State<_GroupChatPage> {
     return Scaffold(
       backgroundColor: const Color(0xFFEDEDED),
       appBar: AppBar(
-        title: Text('${_info['name'] ?? '群聊'}'),
+        leading: _selectMode
+            ? IconButton(
+                icon: const Icon(Icons.close), onPressed: _exitSelectMode)
+            : null,
+        title: _selectMode
+            ? Text('已选择 ${_selectedMids.length} 条')
+            : _searchMode
+            ? TextField(
+                controller: _searchCtrl,
+                autofocus: true,
+                style: const TextStyle(color: Colors.black87),
+                decoration: const InputDecoration(
+                    hintText: '搜索聊天记录',
+                    hintStyle: TextStyle(color: Colors.black38),
+                    border: InputBorder.none),
+                onChanged: _onSearchChanged)
+            : Text('${_info['name'] ?? '群聊'}'),
         backgroundColor: const Color(0xFFEDEDED),
         foregroundColor: Colors.black87,
         elevation: 0,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.manage_accounts),
-            tooltip: '群管理',
-            onPressed: () => _openManage(),
-          ),
-        ],
+        actions: _selectMode
+            ? []
+            : [
+                IconButton(
+                  icon: Icon(_searchMode ? Icons.close : Icons.search),
+                  tooltip: _searchMode ? '取消搜索' : '搜索聊天记录',
+                  onPressed: _toggleSearch,
+                ),
+                if (!_searchMode)
+                  IconButton(
+                    icon: const Icon(Icons.manage_accounts),
+                    tooltip: '群管理',
+                    onPressed: () => _openManage(),
+                  ),
+              ],
       ),
-      body: Column(children: [
-        Expanded(
-            child: _MsgList(
-                msgs: _msgs,
-                myUid: _myUid,
-                group: true,
-                onPlayVideo: widget.onPlayVideo,
-                onCard: _openCard,
-                onGrabPacket: _grabPacket,
-                onReact: (mid, emoji) async {
-                  await PlatformService.msgReact(
-                      scope: 'group',
-                      target: widget.gid,
-                      mid: mid,
-                      emoji: emoji);
-                  _load();
-                },
-                onPat: (m) async {
-                  await PlatformService.patUser(
-                      scope: 'group',
-                      target: widget.gid,
-                      to: '${m['from'] ?? ''}');
-                  _load();
-                },
-                gid: widget.gid,
-                onRefresh: _load,
-                onProfile: _openProfile)),
-        _ChatInput(
-            controller: _ctrl,
-            onSend: _send,
-            onRecommend: _recommend,
-            onRedpacket: _redpacket,
-            onCard: _sendCard,
-            myUid: _myUid,
-            onMore: _showGroupTools,
-            atMembers: Map<String, String>.from(
-                (_info['member_nicks'] as Map?) ?? const {})),
-      ]),
+      body: _searchMode
+          ? _buildSearchResults()
+          : Column(children: [
+              if (_announcement.isNotEmpty) _buildAnnouncementBanner(),
+              Expanded(
+                  child: _MsgList(
+                      msgs: _msgs,
+                      myUid: _myUid,
+                      group: true,
+                      onPlayVideo: widget.onPlayVideo,
+                      onCard: _openCard,
+                      onGrabPacket: _grabPacket,
+                      scrollController: _scrollCtrl,
+                      msgKeys: _msgKeys,
+                      highlightMid: _highlightMid,
+                      selectionMode: _selectMode,
+                      selectedMids: _selectedMids,
+                      onToggleSelect: _toggleSelect,
+                      onEnterSelect: _enterSelectMode,
+                      onReact: (mid, emoji) async {
+                        await PlatformService.msgReact(
+                            scope: 'group',
+                            target: widget.gid,
+                            mid: mid,
+                            emoji: emoji);
+                        _load();
+                      },
+                      onPat: (m) async {
+                        await PlatformService.patUser(
+                            scope: 'group',
+                            target: widget.gid,
+                            to: '${m['from'] ?? ''}');
+                        _load();
+                      },
+                      onRecall: _recallMsg,
+                      onEdit: _editMsg,
+                      onOpenLive: _openLiveAlert,
+                      gid: widget.gid,
+                      onRefresh: _load,
+                      onProfile: _openProfile)),
+              if (_selectMode)
+                _buildSelectBar()
+              else
+                _ChatInput(
+                    controller: _ctrl,
+                    onSend: _send,
+                    onRecommend: _recommend,
+                    onRedpacket: _redpacket,
+                    onCard: _sendCard,
+                    onSticker: _openStickerPicker,
+                    myUid: _myUid,
+                    onMore: _showGroupTools,
+                    atMembers: Map<String, String>.from(
+                        (_info['member_nicks'] as Map?) ?? const {})),
+            ]),
     );
   }
 
@@ -1160,6 +2186,97 @@ class _GroupManageSheetState extends State<_GroupManageSheet> {
     }
   }
 
+  Future<void> _editAnnouncement() async {
+    final ctrl =
+        TextEditingController(text: '${widget.info['announcement'] ?? ''}');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('群公告'),
+        content: TextField(
+            controller: ctrl,
+            autofocus: true,
+            maxLines: 5,
+            maxLength: 500,
+            decoration: const InputDecoration(hintText: '输入公告内容，留空可清空公告')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    setState(() => _busy = true);
+    final d = await PlatformService.groupOp(widget.gid, 'announcement',
+        text: ctrl.text.trim());
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (d != null && d['ok'] == true) {
+      widget.onChanged();
+    } else {
+      _toast('${d?['error'] ?? '公告更新失败'}');
+    }
+  }
+
+  Future<void> _transferOwner() async {
+    final owner = '${widget.info['owner']}';
+    final candidates = ((widget.info['members'] as List?) ?? [])
+        .map((e) => '$e')
+        .where((m) => m != owner)
+        .toList();
+    if (candidates.isEmpty) {
+      _toast('群里还没有其他成员');
+      return;
+    }
+    final nicks =
+        Map<String, dynamic>.from((widget.info['member_nicks'] as Map?) ?? const {});
+    String showName(String m) =>
+        '${nicks[m] ?? (m.length > 6 ? m.substring(m.length - 6) : m)}';
+    final target = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.5,
+        maxChildSize: 0.9,
+        builder: (_, sc) => ListView(
+          controller: sc,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('选择新群主',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+            ),
+            for (final m in candidates)
+              ListTile(
+                leading: const CircleAvatar(child: Icon(Icons.person)),
+                title: Text(showName(m)),
+                onTap: () => Navigator.pop(context, m),
+              ),
+          ],
+        ),
+      ),
+    );
+    if (target == null || !mounted) return;
+    final ok = await _confirm(context, '转让群主',
+        '转让后 ${showName(target)} 将成为新群主，你将变为管理员，确定吗？');
+    if (!ok || !mounted) return;
+    setState(() => _busy = true);
+    final d = await PlatformService.groupOp(widget.gid, 'transfer_owner',
+        target: target);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (d != null && d['ok'] == true) {
+      widget.onChanged();
+    } else {
+      _toast('${d?['error'] ?? '转让失败'}');
+    }
+  }
+
   Future<void> _invite() async {
     if (_busy) return;
     final picked = await _pickUser(context);
@@ -1205,12 +2322,29 @@ class _GroupManageSheetState extends State<_GroupManageSheet> {
               subtitle: Text('${widget.info['name'] ?? ''}'),
               onTap: _busy ? null : _rename,
             ),
+          if (isAdmin)
+            ListTile(
+              leading: const Icon(Icons.campaign_outlined),
+              title: const Text('编辑公告'),
+              subtitle: Text(
+                  '${widget.info['announcement'] ?? ''}'.isEmpty ? '暂无公告' : '${widget.info['announcement']}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis),
+              onTap: _busy ? null : _editAnnouncement,
+            ),
           if (isOwner)
             SwitchListTile(
               title: const Text('禁止成员退群'),
               subtitle: const Text('开启后普通成员无法主动退群'),
               value: noLeave,
               onChanged: _busy ? null : (v) => _op('noleave', on: v),
+            ),
+          if (isOwner)
+            ListTile(
+              leading: const Icon(Icons.swap_horiz),
+              title: const Text('转让群主'),
+              subtitle: const Text('转让后你将变为管理员'),
+              onTap: _busy ? null : _transferOwner,
             ),
           ListTile(
             leading: const Icon(Icons.person_add),
@@ -1318,6 +2452,127 @@ class _MemberRow extends StatelessWidget {
   }
 }
 
+// 转发目标选择器(联系人/群多选)：单条转发、批量转发共用同一套弹层。取消或未选返回 null。
+Future<Set<String>?> _pickForwardTargets(BuildContext context) async {
+  final users = await PlatformService.users();
+  final groups = await PlatformService.groupList();
+  if (!context.mounted) return null;
+  final sel = <String>{}; // 'dm:uid' / 'grp:gid'
+  final ok = await showModalBottomSheet<bool>(
+    context: context,
+    isScrollControlled: true,
+    builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
+      return DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        builder: (ctx, scroll) => Column(children: [
+          Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(children: [
+                const Text('转发给',
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                const Spacer(),
+                FilledButton(
+                    onPressed:
+                        sel.isEmpty ? null : () => Navigator.pop(ctx, true),
+                    child: Text('发送(${sel.length})')),
+              ])),
+          Expanded(
+            child: ListView(controller: scroll, children: [
+              if (groups.isNotEmpty)
+                const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 4, 0, 4),
+                    child: Text('群聊',
+                        style: TextStyle(fontSize: 12, color: Colors.black45))),
+              for (final g in groups)
+                CheckboxListTile(
+                  dense: true,
+                  value: sel.contains('grp:${g['gid']}'),
+                  title: Text('👥 ${g['name']}'),
+                  onChanged: (v) => setS(() => v == true
+                      ? sel.add('grp:${g['gid']}')
+                      : sel.remove('grp:${g['gid']}')),
+                ),
+              if (users.isNotEmpty)
+                const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 8, 0, 4),
+                    child: Text('联系人',
+                        style: TextStyle(fontSize: 12, color: Colors.black45))),
+              for (final u in users)
+                CheckboxListTile(
+                  dense: true,
+                  value: sel.contains('dm:${u['uid']}'),
+                  title: Text('👤 ${u['nick']}'),
+                  onChanged: (v) => setS(() => v == true
+                      ? sel.add('dm:${u['uid']}')
+                      : sel.remove('dm:${u['uid']}')),
+                ),
+            ]),
+          ),
+        ]),
+      );
+    }),
+  );
+  if (ok != true || sel.isEmpty) return null;
+  return sel;
+}
+
+// 把一条消息(文字/视频)发给选中的多个会话，返回成功份数。
+Future<int> _sendToTargets(Set<String> targets, Map<String, dynamic> m) async {
+  final isVid = m['kind'] == 'video';
+  final text = '${m['text'] ?? ''}';
+  var n = 0;
+  for (final key in targets) {
+    final i = key.indexOf(':');
+    final type = key.substring(0, i);
+    final id = key.substring(i + 1);
+    bool sent;
+    if (type == 'grp') {
+      sent = await PlatformService.groupSend(id,
+          text: isVid ? '' : text,
+          vid: isVid ? '${m['vid']}' : '',
+          title: isVid ? '${m['title'] ?? ''}' : '');
+    } else {
+      sent = await PlatformService.dmSend(id,
+          text: isVid ? '' : text,
+          vid: isVid ? '${m['vid']}' : '',
+          title: isVid ? '${m['title'] ?? ''}' : '');
+    }
+    if (sent) n++;
+  }
+  return n;
+}
+
+// 批量转发(多选)：勾选的多条消息(仅文字/视频支持)一次性转发给选中的联系人/群。
+Future<void> _forwardMessages(
+    BuildContext context, List<Map<String, dynamic>> msgs) async {
+  final forwardable = msgs
+      .where(
+          (m) => m['kind'] == 'video' || '${m['text'] ?? ''}'.trim().isNotEmpty)
+      .toList();
+  if (forwardable.isEmpty) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('选中的消息暂不支持转发')));
+    return;
+  }
+  final sel = await _pickForwardTargets(context);
+  if (sel == null) return;
+  var n = 0;
+  for (final m in forwardable) {
+    n += await _sendToTargets(sel, m);
+  }
+  if (context.mounted) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('已转发 $n 条消息')));
+  }
+}
+
+/// 表情包等媒体的相对路径(如 /sticker/xxx.png) 拼上当前生效的服务器地址；
+/// 已是绝对 http(s) 链接则原样返回(预留：以后精品表情换成外链素材也兼容)。
+String _fullMediaUrl(String path) =>
+    path.startsWith('http') ? path : '${PlatformService.current}$path';
+
 // ============ 共用：消息列表 / 输入栏 / 选人 / 选视频 ============
 class _MsgList extends StatelessWidget {
   final List<Map<String, dynamic>> msgs;
@@ -1328,9 +2583,19 @@ class _MsgList extends StatelessWidget {
   final Future<Map<String, dynamic>?> Function(String pid)? onGrabPacket;
   final void Function(String mid, String emoji)? onReact; // 表情回应
   final void Function(Map<String, dynamic> msg)? onPat; // 拍一拍(双击对方消息)
+  final void Function(Map<String, dynamic> msg)? onRecall; // 撤回(2分钟内自己的消息)
+  final void Function(Map<String, dynamic> msg, String text)? onEdit; // 编辑(2分钟内自己的文本消息)
+  final void Function(Map<String, dynamic> msg)? onOpenLive; // 点"XX正在直播"提醒卡片，进直播间
   final String? gid; // 群聊：投票/接龙/一起看用
   final VoidCallback? onRefresh; // 投票/接龙后刷新
   final void Function(String uid)? onProfile; // 点头像/名片看主页
+  final ScrollController? scrollController; // 搜索结果"跳转到该消息"用
+  final Map<String, GlobalKey>? msgKeys; // mid -> 消息行的 GlobalKey，跳转定位用
+  final String? highlightMid; // 搜索跳转后临时高亮这一行，几秒后自动消失
+  final bool selectionMode; // 多选模式：气泡前出现勾选框，点击整行即可勾选
+  final Set<String> selectedMids; // 已勾选的 mid 集合
+  final void Function(String mid)? onToggleSelect; // 勾选/取消勾选一条消息
+  final void Function(Map<String, dynamic> msg)? onEnterSelect; // 长按菜单里点"多选"进入多选模式
   const _MsgList(
       {required this.msgs,
       required this.myUid,
@@ -1339,9 +2604,19 @@ class _MsgList extends StatelessWidget {
       this.onGrabPacket,
       this.onReact,
       this.onPat,
+      this.onRecall,
+      this.onEdit,
+      this.onOpenLive,
       this.gid,
       this.onRefresh,
       this.onProfile,
+      this.scrollController,
+      this.msgKeys,
+      this.highlightMid,
+      this.selectionMode = false,
+      this.selectedMids = const {},
+      this.onToggleSelect,
+      this.onEnterSelect,
       this.group = false});
 
   // 群投票气泡：问题 + 选项条(票数/百分比)，点选项投票。
@@ -1542,8 +2817,14 @@ class _MsgList extends StatelessWidget {
     );
   }
 
-  // 长按消息：选「表情回应」或「转发」。
+  // 长按消息：选「表情回应」「转发」，自己发的2分钟内文本消息还有「编辑」「撤回」。
   void _msgActions(BuildContext context, Map<String, dynamic> m) {
+    final mine = myUid != null && myUid!.isNotEmpty && m['from'] == myUid;
+    final ts = (m['ts'] as num?)?.toInt() ?? 0;
+    final withinWindow =
+        (DateTime.now().millisecondsSinceEpoch ~/ 1000) - ts <= 120;
+    final canRecall = mine && m['kind'] != 'revoked' && withinWindow;
+    final canEdit = mine && m['kind'] == 'text' && withinWindow;
     showModalBottomSheet<void>(
       context: context,
       builder: (ctx) => SafeArea(
@@ -1562,12 +2843,67 @@ class _MsgList extends StatelessWidget {
                 Navigator.pop(ctx);
                 _forwardMessage(context, m);
               }),
+          if (canEdit)
+            ListTile(
+                leading: const Icon(Icons.edit, color: Color(0xFF576B95)),
+                title: const Text('编辑'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _editMessage(context, m);
+                }),
+          if (canRecall)
+            ListTile(
+                leading: const Icon(Icons.undo, color: Colors.redAccent),
+                title: const Text('撤回'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  onRecall?.call(m);
+                }),
+          ListTile(
+              leading: const Icon(Icons.checklist, color: Color(0xFF576B95)),
+              title: const Text('多选'),
+              onTap: () {
+                Navigator.pop(ctx);
+                onEnterSelect?.call(m);
+              }),
         ]),
       ),
     );
   }
 
-  // 多选转发：把这条消息(文字/视频)转发给多个联系人/群。
+  // 编辑弹窗：预填原文，保存后交给 onEdit 走乐观更新。
+  Future<void> _editMessage(BuildContext context, Map<String, dynamic> m) async {
+    final origin = '${m['text'] ?? ''}';
+    final ctrl = TextEditingController(text: origin);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('编辑消息'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 4,
+          maxLength: 1000,
+          decoration: const InputDecoration(hintText: '编辑内容…'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    final text = ctrl.text.trim();
+    ctrl.dispose();
+    if (ok == true && text.isNotEmpty && text != origin) {
+      onEdit?.call(m, text);
+    }
+  }
+
+  // 单条转发：把这条消息(文字/视频)转发给多个联系人/群。目标选择器与批量转发共用 _pickForwardTargets。
   Future<void> _forwardMessage(
       BuildContext context, Map<String, dynamic> m) async {
     final isVid = m['kind'] == 'video';
@@ -1577,89 +2913,9 @@ class _MsgList extends StatelessWidget {
           .showSnackBar(const SnackBar(content: Text('该消息暂不支持转发')));
       return;
     }
-    final users = await PlatformService.users();
-    final groups = await PlatformService.groupList();
-    if (!context.mounted) return;
-    final sel = <String>{}; // 'dm:uid' / 'grp:gid'
-    final ok = await showModalBottomSheet<bool>(
-      context: context,
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.6,
-          builder: (ctx, scroll) => Column(children: [
-            Padding(
-                padding: const EdgeInsets.all(12),
-                child: Row(children: [
-                  const Text('转发给',
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w600)),
-                  const Spacer(),
-                  FilledButton(
-                      onPressed: sel.isEmpty
-                          ? null
-                          : () => Navigator.pop(ctx, true),
-                      child: Text('发送(${sel.length})')),
-                ])),
-            Expanded(
-              child: ListView(controller: scroll, children: [
-                if (groups.isNotEmpty)
-                  const Padding(
-                      padding: EdgeInsets.fromLTRB(16, 4, 0, 4),
-                      child: Text('群聊',
-                          style: TextStyle(
-                              fontSize: 12, color: Colors.black45))),
-                for (final g in groups)
-                  CheckboxListTile(
-                    dense: true,
-                    value: sel.contains('grp:${g['gid']}'),
-                    title: Text('👥 ${g['name']}'),
-                    onChanged: (v) => setS(() => v == true
-                        ? sel.add('grp:${g['gid']}')
-                        : sel.remove('grp:${g['gid']}')),
-                  ),
-                if (users.isNotEmpty)
-                  const Padding(
-                      padding: EdgeInsets.fromLTRB(16, 8, 0, 4),
-                      child: Text('联系人',
-                          style: TextStyle(
-                              fontSize: 12, color: Colors.black45))),
-                for (final u in users)
-                  CheckboxListTile(
-                    dense: true,
-                    value: sel.contains('dm:${u['uid']}'),
-                    title: Text('👤 ${u['nick']}'),
-                    onChanged: (v) => setS(() => v == true
-                        ? sel.add('dm:${u['uid']}')
-                        : sel.remove('dm:${u['uid']}')),
-                  ),
-              ]),
-            ),
-          ]),
-        );
-      }),
-    );
-    if (ok != true || sel.isEmpty) return;
-    var n = 0;
-    for (final key in sel) {
-      final i = key.indexOf(':');
-      final type = key.substring(0, i);
-      final id = key.substring(i + 1);
-      bool sent;
-      if (type == 'grp') {
-        sent = await PlatformService.groupSend(id,
-            text: isVid ? '' : text,
-            vid: isVid ? '${m['vid']}' : '',
-            title: isVid ? '${m['title'] ?? ''}' : '');
-      } else {
-        sent = await PlatformService.dmSend(id,
-            text: isVid ? '' : text,
-            vid: isVid ? '${m['vid']}' : '',
-            title: isVid ? '${m['title'] ?? ''}' : '');
-      }
-      if (sent) n++;
-    }
+    final sel = await _pickForwardTargets(context);
+    if (sel == null) return;
+    final n = await _sendToTargets(sel, m);
     if (context.mounted) {
       ScaffoldMessenger.of(context)
           .showSnackBar(SnackBar(content: Text('已转发给 $n 个会话')));
@@ -2038,10 +3294,18 @@ class _MsgList extends StatelessWidget {
               style: TextStyle(color: Colors.black38)));
     }
     return ListView.builder(
+      controller: scrollController,
       padding: const EdgeInsets.all(10),
       itemCount: msgs.length,
       itemBuilder: (_, i) {
         final m = msgs[i];
+        final mid = '${m['mid'] ?? ''}';
+        // 搜索结果"跳转到该消息"用：mid -> 这一行的 GlobalKey，供 Scrollable.ensureVisible 定位。
+        final rowKey = (msgKeys != null && mid.isNotEmpty)
+            ? (msgKeys![mid] ??= GlobalKey())
+            : null;
+        final isHighlight = highlightMid != null && mid == highlightMid;
+        final rowBg = isHighlight ? const Color(0x55FFD54F) : null;
         // 拍一拍：居中灰色系统提示行。
         if (m['kind'] == 'pat') {
           final fn = '${m['from_nick'] ?? ''}';
@@ -2050,7 +3314,9 @@ class _MsgList extends StatelessWidget {
           final meTo = m['to'] == myUid;
           final who = meFrom ? '你' : fn;
           final whom = meTo ? '你' : tn;
-          return Padding(
+          return Container(
+            key: rowKey,
+            color: rowBg,
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: Center(
               child: Text('$who 拍了拍 $whom',
@@ -2058,10 +3324,28 @@ class _MsgList extends StatelessWidget {
             ),
           );
         }
+        // 撤回：居中灰色斜体提示行，不展示原内容。
+        if (m['kind'] == 'revoked') {
+          final mine = m['from'] == myUid;
+          return Container(
+            key: rowKey,
+            color: rowBg,
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: Center(
+              child: Text(mine ? '你撤回了一条消息' : '对方撤回了一条消息',
+                  style: const TextStyle(
+                      fontSize: 12,
+                      color: Colors.black45,
+                      fontStyle: FontStyle.italic)),
+            ),
+          );
+        }
         final mine = m['from'] == myUid;
         final isVideo = m['kind'] == 'video';
         final isCard = m['kind'] == 'card';
         final isPacket = m['kind'] == 'packet';
+        final isSticker = m['kind'] == 'sticker';
+        final isLiveAlert = m['kind'] == 'live_alert'; // 关注的主播开播提醒卡片
         final kind = m['kind'];
         final bubble = kind == 'poll'
             ? _pollBubble(context, m)
@@ -2103,6 +3387,52 @@ class _MsgList extends StatelessWidget {
                   ]),
                 ),
               )
+            : isLiveAlert
+            // 开播提醒：直播小红点图标 + "XX 正在直播"，点击直达直播间。
+            ? InkWell(
+                onTap: () => onOpenLive?.call(m),
+                child: Container(
+                  width: 210,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(6)),
+                  child: Row(children: [
+                    Stack(clipBehavior: Clip.none, children: [
+                      const Icon(Icons.podcasts,
+                          color: Color(0xFFE5424D), size: 28),
+                      Positioned(
+                        right: -1,
+                        top: -1,
+                        child: Container(
+                          width: 9,
+                          height: 9,
+                          decoration: BoxDecoration(
+                              color: const Color(0xFFFF3B30),
+                              shape: BoxShape.circle,
+                              border:
+                                  Border.all(color: Colors.white, width: 1.5)),
+                        ),
+                      ),
+                    ]),
+                    const SizedBox(width: 8),
+                    Expanded(
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                          const Text('直播提醒',
+                              style: TextStyle(
+                                  fontSize: 10, color: Colors.black45)),
+                          Text('${m['live_nick'] ?? ''} 正在直播',
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                  color: Colors.black87,
+                                  fontWeight: FontWeight.w600)),
+                        ])),
+                  ]),
+                ),
+              )
             : isVideo
             ? InkWell(
                 onTap: () => onPlayVideo(
@@ -2134,6 +3464,21 @@ class _MsgList extends StatelessWidget {
                   ]),
                 ),
               )
+            : isSticker
+            // 表情包：不带气泡背景的大图，加载失败(如网络切换/文件已被清理)时显示占位图标。
+            ? Image.network(
+                _fullMediaUrl('${m['url'] ?? ''}'),
+                width: 130,
+                height: 130,
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => Container(
+                    width: 90,
+                    height: 90,
+                    alignment: Alignment.center,
+                    color: Colors.black12,
+                    child: const Icon(Icons.image_not_supported_outlined,
+                        color: Colors.black38)),
+              )
             : Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
@@ -2157,6 +3502,7 @@ class _MsgList extends StatelessWidget {
           ),
         );
         final reactChips = _reactionChips(m);
+        final edited = m['edited'] == true;
         final bubbleCol = Column(
           crossAxisAlignment:
               mine ? CrossAxisAlignment.end : CrossAxisAlignment.start,
@@ -2175,12 +3521,14 @@ class _MsgList extends StatelessWidget {
               ),
             GestureDetector(
               onLongPress: () => _msgActions(context, m),
-              // 双击对方文字气泡=拍一拍发送者；卡片/红包/视频自带点击，不抢手势。
+              // 双击对方文字气泡=拍一拍发送者；卡片/红包/视频/表情包/开播提醒自带展示，不抢手势。
               onDoubleTap: (!mine &&
                       onPat != null &&
                       !isPacket &&
                       !isCard &&
-                      !isVideo)
+                      !isVideo &&
+                      !isSticker &&
+                      !isLiveAlert)
                   ? () => onPat!(m)
                   : null,
               child: ConstrainedBox(
@@ -2188,19 +3536,52 @@ class _MsgList extends StatelessWidget {
                       maxWidth: MediaQuery.of(context).size.width * 0.64),
                   child: bubble),
             ),
+            if (edited)
+              const Padding(
+                padding: EdgeInsets.only(top: 2),
+                child: Text('已编辑',
+                    style: TextStyle(
+                        fontSize: 10,
+                        color: Colors.black38,
+                        fontStyle: FontStyle.italic)),
+              ),
             if (reactChips != null) reactChips,
           ],
         );
-        return Padding(
+        final rowChildren = mine
+            ? [Flexible(child: bubbleCol), const SizedBox(width: 8), avatar]
+            : [avatar, const SizedBox(width: 8), Flexible(child: bubbleCol)];
+        // 多选模式：气泡前加勾选框，点击整行(不止勾选框)都能勾选，长按/双击/卡片跳转等手势暂时屏蔽。
+        final rowInner = Row(
+          mainAxisAlignment:
+              mine ? MainAxisAlignment.end : MainAxisAlignment.start,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: selectionMode
+              ? [
+                  Padding(
+                    padding: const EdgeInsets.only(right: 4, top: 14),
+                    child: Checkbox(
+                      value: selectedMids.contains(mid),
+                      onChanged: mid.isEmpty
+                          ? null
+                          : (_) => onToggleSelect?.call(mid),
+                    ),
+                  ),
+                  ...rowChildren,
+                ]
+              : rowChildren,
+        );
+        return Container(
+          key: rowKey,
+          color: rowBg,
           padding: const EdgeInsets.symmetric(vertical: 4),
-          child: Row(
-            mainAxisAlignment:
-                mine ? MainAxisAlignment.end : MainAxisAlignment.start,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: mine
-                ? [Flexible(child: bubbleCol), const SizedBox(width: 8), avatar]
-                : [avatar, const SizedBox(width: 8), Flexible(child: bubbleCol)],
-          ),
+          child: (selectionMode && mid.isNotEmpty)
+              ? GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () => onToggleSelect?.call(mid),
+                  child: AbsorbPointer(child: rowInner),
+                )
+              : rowInner,
         );
       },
     );
@@ -2373,6 +3754,8 @@ class _ChatInput extends StatelessWidget {
   final Map<String, String>? atMembers; // 群聊 @ 成员表(uid→昵称)
   final String? myUid;
   final VoidCallback? onMore; // 群聊「+」更多工具(投票/接龙/一起看)
+  final VoidCallback? onSticker; // 表情包面板(我的收藏/精品表情)
+  final bool blocked; // 私聊：我已拉黑对方 -> 隐藏输入框和发送按钮，只显示提示文字
   const _ChatInput(
       {required this.controller,
       required this.onSend,
@@ -2382,7 +3765,9 @@ class _ChatInput extends StatelessWidget {
       this.onCard,
       this.atMembers,
       this.myUid,
-      this.onMore});
+      this.onMore,
+      this.onSticker,
+      this.blocked = false});
 
   // 群聊输入 @ 时弹成员表；选中把「@昵称 」插进输入框。
   void _showAtPicker(BuildContext context) {
@@ -2435,6 +3820,21 @@ class _ChatInput extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (blocked) {
+      // 已拉黑对方：不给任何发送入口，仅提示。
+      return Container(
+        color: const Color(0xFFF7F7F7),
+        child: const SafeArea(
+          child: Padding(
+            padding: EdgeInsets.symmetric(vertical: 14),
+            child: Center(
+              child: Text('你已拉黑对方，无法发送消息',
+                  style: TextStyle(color: Colors.black45, fontSize: 13)),
+            ),
+          ),
+        ),
+      );
+    }
     return Container(
       color: const Color(0xFFF7F7F7), // 微信输入栏底色
       child: SafeArea(
@@ -2465,6 +3865,13 @@ class _ChatInput extends StatelessWidget {
                     color: Colors.black54),
                 tooltip: '发名片',
                 onPressed: onCard,
+              ),
+            if (onSticker != null)
+              IconButton(
+                icon: const Icon(Icons.emoji_emotions_outlined,
+                    color: Colors.black54),
+                tooltip: '表情包',
+                onPressed: onSticker,
               ),
             if (atMembers != null && atMembers!.isNotEmpty)
               IconButton(
@@ -2675,6 +4082,175 @@ class _VideoPickerState extends State<_VideoPicker> {
                 ),
         ),
       ]),
+    );
+  }
+}
+
+// 表情面板：分"我的收藏"/"精品表情"两个 tab。点一个表情即返回 {id,cost,name}(cost=0 表示免费)。
+// "我的收藏"网格首位是"+"上传入口：选图片/GIF -> 上传服务器 -> 自动进收藏并刷新列表。
+Future<Map<String, dynamic>?> _pickSticker(BuildContext context) {
+  return showModalBottomSheet<Map<String, dynamic>>(
+    context: context,
+    isScrollControlled: true,
+    builder: (_) => const _StickerPicker(),
+  );
+}
+
+class _StickerPicker extends StatefulWidget {
+  const _StickerPicker();
+  @override
+  State<_StickerPicker> createState() => _StickerPickerState();
+}
+
+class _StickerPickerState extends State<_StickerPicker> {
+  bool _loading = true;
+  bool _uploading = false;
+  int _tab = 0; // 0=我的收藏 1=精品表情
+  List<Map<String, dynamic>> _mine = [];
+  List<Map<String, dynamic>> _premium = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final d = await PlatformService.stickerList();
+    if (!mounted) return;
+    setState(() {
+      _mine = ((d?['my'] as List?) ?? const [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      _premium = ((d?['premium'] as List?) ?? const [])
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList();
+      _loading = false;
+    });
+  }
+
+  Future<void> _upload() async {
+    final r = await FilePicker.platform.pickFiles(type: FileType.image);
+    final path = r?.files.single.path;
+    if (path == null || !mounted) return;
+    setState(() => _uploading = true);
+    final ext = path.contains('.') ? path.split('.').last.toLowerCase() : 'gif';
+    final bytes = await File(path).readAsBytes();
+    final d = await PlatformService.stickerUpload(bytes, ext);
+    if (!mounted) return;
+    if (d != null && d['ok'] == true) {
+      await _load();
+    } else {
+      setState(() => _uploading = false);
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('上传失败，请检查网络后重试')));
+    }
+  }
+
+  Future<void> _remove(String id) async {
+    await PlatformService.stickerRemove(id);
+    if (mounted) await _load();
+  }
+
+  Widget _thumb(String url) => ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.network(
+          _fullMediaUrl(url),
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => Container(
+              color: Colors.black12,
+              alignment: Alignment.center,
+              child: const Icon(Icons.broken_image_outlined,
+                  color: Colors.black38)),
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.55,
+      minChildSize: 0.35,
+      maxChildSize: 0.85,
+      builder: (_, sc) => SafeArea(
+        child: Column(children: [
+          const SizedBox(height: 8),
+          Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+            ChoiceChip(
+                label: const Text('我的收藏'),
+                selected: _tab == 0,
+                onSelected: (_) => setState(() => _tab = 0)),
+            const SizedBox(width: 10),
+            ChoiceChip(
+                label: const Text('精品表情'),
+                selected: _tab == 1,
+                onSelected: (_) => setState(() => _tab = 1)),
+          ]),
+          const Padding(
+            padding: EdgeInsets.only(top: 4),
+            child: Text('长按"我的收藏"里的表情可移除；精品表情发送会消耗兑换币',
+                style: TextStyle(fontSize: 11, color: Colors.black45)),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : GridView.builder(
+                    controller: sc,
+                    padding: const EdgeInsets.all(12),
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: 4,
+                            mainAxisSpacing: 10,
+                            crossAxisSpacing: 10),
+                    itemCount:
+                        _tab == 0 ? _mine.length + 1 : _premium.length,
+                    itemBuilder: (_, i) {
+                      if (_tab == 0) {
+                        if (i == 0) {
+                          return InkWell(
+                            onTap: _uploading ? null : _upload,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                  color: const Color(0xFFF0F0F0),
+                                  borderRadius: BorderRadius.circular(8)),
+                              alignment: Alignment.center,
+                              child: _uploading
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2))
+                                  : const Icon(Icons.add,
+                                      color: Colors.black45),
+                            ),
+                          );
+                        }
+                        final s = _mine[i - 1];
+                        return GestureDetector(
+                          onTap: () => Navigator.pop(
+                              context, {'id': s['id'], 'cost': 0}),
+                          onLongPress: () => _remove('${s['id']}'),
+                          child: _thumb('${s['url'] ?? ''}'),
+                        );
+                      }
+                      final s = _premium[i];
+                      final cost = (s['cost'] as num?)?.toInt() ?? 0;
+                      return GestureDetector(
+                        onTap: () => Navigator.pop(context,
+                            {'id': s['id'], 'cost': cost, 'name': s['name']}),
+                        child: Column(children: [
+                          Expanded(child: _thumb('${s['url'] ?? ''}')),
+                          const SizedBox(height: 2),
+                          Text('🪙$cost',
+                              style: const TextStyle(
+                                  fontSize: 10, color: Colors.black54)),
+                        ]),
+                      );
+                    },
+                  ),
+          ),
+        ]),
+      ),
     );
   }
 }
