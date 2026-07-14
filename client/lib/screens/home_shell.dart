@@ -249,6 +249,8 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, List<Track>> _playlists = {}; // 本地歌单
   bool _fadeIn = false; // 起播音量淡入
   bool _fadeOut = false; // 结束淡出
+  int _msgPollSec = 15; // 消息(私信/群聊)后台刷新频率，0=关闭自动刷新
+  int _msgPollAccumSec = 0; // 距上次检查消息累计了多少秒(基础tick是5s一次)
   Timer? _urlTimer; // 定时重读本机平台地址
   Timer? _banTimer; // 每5秒查封号状态(封/解封即时生效)
   Timer? _shareFrameTimer; // 屏幕共享传帧
@@ -400,7 +402,11 @@ class _HomeShellState extends State<HomeShell> {
       if (_pollTick % 4 == 0) {
         _checkGift(); // 每20s
       }
-      if (_pollTick % 3 == 1) _checkMessages(); // 新消息系统通知每15s(错峰)
+      _msgPollAccumSec += 5;
+      if (_msgPollSec > 0 && _msgPollAccumSec >= _msgPollSec) {
+        _msgPollAccumSec = 0;
+        _checkMessages(); // 新消息系统通知，频率由「设置›消息刷新频率」决定，默认15s
+      }
       if (_pollTick % 12 == 0) _reportAccount(); // 账号身份每60s
       if (_pollTick % 2 == 0) _checkBroadcast(); // 全员投屏每10s
       _reportActivity(); // 内部已「变了才发」
@@ -4655,6 +4661,7 @@ class _HomeShellState extends State<HomeShell> {
     _watchSec = p.getInt('watch_sec') ?? 0;
     _fadeIn = p.getBool('fade_in') ?? false;
     _fadeOut = p.getBool('fade_out') ?? false;
+    _msgPollSec = p.getInt('msg_poll_sec') ?? 15;
     textScaleNotifier.value = p.getDouble('text_scale') ?? 1.0;
     final ac = p.getInt('accent_color');
     if (ac != null) accentNotifier.value = Color(ac);
@@ -4804,6 +4811,37 @@ class _HomeShellState extends State<HomeShell> {
     setState(() => _fadeIn = v);
     final p = await SharedPreferences.getInstance();
     await p.setBool('fade_in', v);
+  }
+
+  Future<void> _setMsgPollSec(int v) async {
+    setState(() => _msgPollSec = v);
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('msg_poll_sec', v);
+  }
+
+  Future<void> _pickMsgPollSec() async {
+    const opts = [10, 15, 30, 60, 0]; // 0=关闭自动刷新，只能手动下拉刷新
+    final v = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('消息刷新频率'),
+        children: [
+          for (final s in opts)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, s),
+              child: Row(children: [
+                if (_msgPollSec == s)
+                  const Icon(Icons.check, size: 18)
+                else
+                  const SizedBox(width: 18),
+                const SizedBox(width: 8),
+                Text(s == 0 ? '关闭自动刷新(手动下拉)' : '每 $s 秒'),
+              ]),
+            ),
+        ],
+      ),
+    );
+    if (v != null) await _setMsgPollSec(v);
   }
 
   Future<void> _addToPlaylist(Track t) async {
@@ -6888,6 +6926,15 @@ class _HomeShellState extends State<HomeShell> {
               style: TextStyle(fontSize: 12)),
           value: _fadeOut,
           onChanged: _setFadeOut,
+        ),
+        ListTile(
+          leading: const Icon(Icons.sync_outlined),
+          title: const Text('消息刷新频率'),
+          subtitle: Text(
+              _msgPollSec == 0 ? '已关闭自动刷新，需手动下拉' : '私信/群聊后台每 $_msgPollSec 秒检查一次新消息',
+              style: const TextStyle(fontSize: 12)),
+          trailing: const Icon(Icons.chevron_right),
+          onTap: _pickMsgPollSec,
         ),
         ListTile(
           leading: const Icon(Icons.history_toggle_off),
