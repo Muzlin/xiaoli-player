@@ -5,6 +5,12 @@
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES"/>
     <!-- 新消息系统通知(Android 13+ 需运行时申请) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <!-- 收付款「扫一扫」实时摄像头取景(运行时申请) -->
+    <uses-permission android:name="android.permission.CAMERA"/>
+    <uses-feature android:name="android.hardware.camera" android:required="false"/>
+    <!-- 直播屏幕采集(MediaProjection)：需前台服务承载录屏会话 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
     <application
         android:label="小李播放器"
         android:name="${applicationName}"
@@ -51,6 +57,17 @@
                 <data android:mimeType="audio/*"/>
             </intent-filter>
         </activity>
+        <!-- 收付款「扫一扫」：全屏摄像头取景页 -->
+        <activity
+            android:name=".QrScanActivity"
+            android:exported="false"
+            android:theme="@style/LaunchTheme"
+            android:screenOrientation="portrait"/>
+        <!-- 直播屏幕采集：承载 MediaProjection 的前台服务(Android 14+ 强制要求) -->
+        <service
+            android:name=".ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false"/>
         <!-- 自动更新：把下载好的 apk 交给系统安装器（Android 7+ 需 content:// URI） -->
         <provider
             android:name="androidx.core.content.FileProvider"

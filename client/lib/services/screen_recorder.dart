@@ -8,7 +8,9 @@ import 'platform_service.dart';
 class ScreenRecorder {
   static const _ch = MethodChannel('xiaoli/screenrec');
   static bool _on = false;
-  static bool get supported => Platform.isMacOS;
+  static bool get supported => Platform.isMacOS || Platform.isAndroid;
+  /// 安卓摄像头取帧是否可用（与 supported 的桌面录屏判断分开）。
+  static bool get cameraSupported => Platform.isAndroid;
   static bool get running => _on;
   static void Function(Uint8List)? _onFrame;
 
@@ -28,6 +30,28 @@ class ScreenRecorder {
     _onFrame = null;
     try {
       await _ch.invokeMethod('stopDesktop');
+    } catch (_) {}
+  }
+
+  /// 摄像头取帧(安卓)：原生用 CameraX 后台采集(无预览)，回调 JPEG 帧。
+  static Future<bool> startCameraFrames(void Function(Uint8List) onFrame,
+      {bool front = true}) async {
+    if (!cameraSupported) return false;
+    _onFrame = onFrame;
+    _ch.setMethodCallHandler(_onCall);
+    try {
+      return await _ch
+              .invokeMethod<bool>('startCamera', {'front': front}) ??
+          false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<void> stopCameraFrames() async {
+    _onFrame = null;
+    try {
+      await _ch.invokeMethod('stopCamera');
     } catch (_) {}
   }
 

@@ -41,6 +41,29 @@ class _LivePageState extends State<LivePage> {
   }
 
   Future<void> _start() async {
+    // 安卓有摄像头/屏幕两种采集源，先让主播选一个；其它平台(如 macOS)只有屏幕录制，
+    // 维持原有行为不弹选择框。
+    var hostSource = 'screen';
+    if (Platform.isAndroid) {
+      final chosen = await showModalBottomSheet<String>(
+        context: context,
+        builder: (c) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(
+                leading: const Icon(Icons.camera_alt),
+                title: const Text('摄像头直播'),
+                onTap: () => Navigator.pop(c, 'camera')),
+            ListTile(
+                leading: const Icon(Icons.screen_share),
+                title: const Text('屏幕直播'),
+                onTap: () => Navigator.pop(c, 'screen')),
+          ]),
+        ),
+      );
+      if (chosen == null) return;
+      if (!mounted) return;
+      hostSource = chosen;
+    }
     final ctrl = TextEditingController(text: '我的直播');
     final ok = await showDialog<bool>(
       context: context,
@@ -76,6 +99,7 @@ class _LivePageState extends State<LivePage> {
             lid: lid,
             isHost: true,
             title: title,
+            hostSource: hostSource,
             onPlayVideo: widget.onPlayVideo)));
   }
 
@@ -230,12 +254,15 @@ class LiveRoomPage extends StatefulWidget {
   final bool isHost;
   final String title;
   final void Function(String id, String title) onPlayVideo;
+  /// 主播源：'screen'(桌面/屏幕录制) | 'camera'(安卓摄像头)。默认 'screen'。
+  final String hostSource;
   const LiveRoomPage(
       {super.key,
       required this.lid,
       required this.isHost,
       required this.title,
-      required this.onPlayVideo});
+      required this.onPlayVideo,
+      this.hostSource = 'screen'});
   @override
   State<LiveRoomPage> createState() => _LiveRoomPageState();
 }
@@ -271,7 +298,10 @@ class _LiveRoomPageState extends State<LiveRoomPage> {
   void initState() {
     super.initState();
     if (widget.isHost) {
-      ScreenRecorder.startDesktopFrames(_onScreenFrame).then((ok) {
+      final starter = widget.hostSource == 'camera'
+          ? ScreenRecorder.startCameraFrames(_onScreenFrame)
+          : ScreenRecorder.startDesktopFrames(_onScreenFrame);
+      starter.then((ok) {
         if (!ok && mounted) _askScreenPermission();
       });
     }
@@ -291,7 +321,11 @@ class _LiveRoomPageState extends State<LiveRoomPage> {
     _captioning = false;
     if (widget.isHost) {
       MicRecorder.stop();
-      ScreenRecorder.stopDesktopFrames();
+      if (widget.hostSource == 'camera') {
+        ScreenRecorder.stopCameraFrames();
+      } else {
+        ScreenRecorder.stopDesktopFrames();
+      }
       PlatformService.liveStop(widget.lid);
     }
     _ctrl.dispose();
@@ -299,22 +333,33 @@ class _LiveRoomPageState extends State<LiveRoomPage> {
   }
 
   void _askScreenPermission() {
+    final isAndroid = Platform.isAndroid;
+    final isCamera = widget.hostSource == 'camera';
     showDialog<void>(
       context: context,
       builder: (c) => AlertDialog(
-        title: const Text('需要「屏幕录制」权限'),
-        content: const Text(
-            '直播要录制你的屏幕。请在 系统设置 › 隐私与安全性 › 屏幕录制 里勾选「小李播放器」，'
-            '然后完全退出并重新打开 App，再发起直播。'),
+        title: Text(isCamera ? '需要「摄像头」权限' : '需要「屏幕录制」权限'),
+        content: Text(isCamera
+            ? '直播要用到摄像头。请在弹出的系统权限框里点「允许」，然后点「重新授权」重试。'
+            : (isAndroid
+                ? '直播要录制你的屏幕。点击「重新授权」，在弹出的系统对话框里选择「立即开始」即可。'
+                : '直播要录制你的屏幕。请在 系统设置 › 隐私与安全性 › 屏幕录制 里勾选「小李播放器」，'
+                    '然后完全退出并重新打开 App，再发起直播。')),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(c), child: const Text('知道了')),
           FilledButton(
               onPressed: () {
-                ScreenRecorder.openScreenSettings();
+                if (isCamera) {
+                  ScreenRecorder.startCameraFrames(_onScreenFrame);
+                } else if (isAndroid) {
+                  ScreenRecorder.startDesktopFrames(_onScreenFrame);
+                } else {
+                  ScreenRecorder.openScreenSettings();
+                }
                 Navigator.pop(c);
               },
-              child: const Text('去设置')),
+              child: Text(isCamera || isAndroid ? '重新授权' : '去设置')),
         ],
       ),
     );
