@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 2.39.57+23957
+version: 2.40.0+24000
 
 environment:
   sdk: ^3.12.0
@@ -29,6 +29,9 @@ environment:
 # versions available, run `flutter pub outdated`.
 dependencies:
   flutter:
+    sdk: flutter
+  # Flutter 内置组件(AboutDialog 的「查看许可/关闭」等)的中文翻译
+  flutter_localizations:
     sdk: flutter
 
   # The following adds the Cupertino Icons font to your application.
@@ -90,10 +93,15 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
-  # assets:
-  #   - images/a_dot_burr.jpeg
-  #   - images/a_dot_ham.jpeg
+  # 内置的标准开源许可证中文翻译（离线兜底：在线翻译不可用时用这些）
+  assets:
+    - assets/licenses_zh/mit.txt
+    - assets/licenses_zh/bsd2.txt
+    - assets/licenses_zh/bsd3.txt
+    - assets/licenses_zh/apache2.txt
+    - assets/licenses_zh/mpl2.txt
+    - assets/licenses_zh/isc.txt
+    - assets/licenses_zh/zlib.txt
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

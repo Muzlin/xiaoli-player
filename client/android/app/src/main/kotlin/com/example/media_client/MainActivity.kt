@@ -126,8 +126,13 @@ class MainActivity : FlutterActivity() {
                 else -> result.notImplemented()
             }
         }
-        // 收付款二维码：生成 / 从图片识别 / 摄像头扫一扫。
-        qrChannel = MethodChannel(messenger, "xiaoli/qr")
+        // 收付款二维码：生成 / 从图片识别 / 摄像头扫一扫。生成/识别可能是大图，放后台
+        // TaskQueue 跑，避免大图片解码卡住 UI 线程导致 ANR；"scan" 要开 Activity，
+        // 单独切回主线程。
+        qrChannel = MethodChannel(
+            messenger, "xiaoli/qr",
+            io.flutter.plugin.common.StandardMethodCodec.INSTANCE,
+            messenger.makeBackgroundTaskQueue())
         qrChannel?.setMethodCallHandler { call, result ->
             when (call.method) {
                 "generate" -> {
@@ -137,7 +142,7 @@ class MainActivity : FlutterActivity() {
                     } else {
                         try {
                             result.success(generateQrPng(data))
-                        } catch (e: Exception) {
+                        } catch (e: Throwable) {
                             result.error("generate_failed", e.message, null)
                         }
                     }
@@ -147,13 +152,25 @@ class MainActivity : FlutterActivity() {
                     if (bytes == null) {
                         result.error("bad_args", "缺少 bytes", null)
                     } else {
-                        result.success(decodeQrFromBytes(bytes))
+                        try {
+                            result.success(decodeQrFromBytes(bytes))
+                        } catch (e: Throwable) {
+                            result.error("scan_failed", e.message, null)
+                        }
                     }
                 }
                 "scan" -> {
-                    pendingQrScanResult = result
-                    startActivityForResult(
-                        Intent(this, QrScanActivity::class.java), QR_SCAN_REQUEST_CODE)
+                    runOnUiThread {
+                        if (pendingQrScanResult != null) {
+                            // 已有一次扫码在进行中：拒绝新请求，不覆盖旧的 pending
+                            // Result（否则旧的那次调用永远等不到返回，Dart 端会卡死）。
+                            result.error("busy", "已有扫码窗口在进行中", null)
+                        } else {
+                            pendingQrScanResult = result
+                            startActivityForResult(
+                                Intent(this, QrScanActivity::class.java), QR_SCAN_REQUEST_CODE)
+                        }
+                    }
                 }
                 else -> result.notImplemented()
             }
@@ -203,17 +220,19 @@ class MainActivity : FlutterActivity() {
 
     private fun generateQrPng(data: String, size: Int = 480): ByteArray {
         val writer = com.google.zxing.qrcode.QRCodeWriter()
-        val hints = mapOf(com.google.zxing.EncodeHintType.MARGIN to 1)
-        val matrix = writer.encode(data, com.google.zxing.BarcodeFormat.QR_CODE, size, size, hints)
+        // MARGIN 用 ZXing 默认(4 模块)，符合 ISO/IEC 18004 静区最小要求，太窄扫描器可能锁不定位。
+        val matrix = writer.encode(data, com.google.zxing.BarcodeFormat.QR_CODE, size, size)
         val bmp = android.graphics.Bitmap.createBitmap(
             size, size, android.graphics.Bitmap.Config.ARGB_8888)
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bmp.setPixel(x, y,
+        val pixels = IntArray(size * size)
+        for (y in 0 until size) {
+            for (x in 0 until size) {
+                pixels[y * size + x] =
                     if (matrix.get(x, y)) android.graphics.Color.BLACK
-                    else android.graphics.Color.WHITE)
+                    else android.graphics.Color.WHITE
             }
         }
+        bmp.setPixels(pixels, 0, size, 0, 0, size, size)
         val stream = java.io.ByteArrayOutputStream()
         bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, stream)
         return stream.toByteArray()
@@ -230,8 +249,13 @@ class MainActivity : FlutterActivity() {
             val source = com.google.zxing.RGBLuminanceSource(w, h, pixels)
             val bitmap = com.google.zxing.BinaryBitmap(
                 com.google.zxing.common.HybridBinarizer(source))
-            com.google.zxing.MultiFormatReader().decode(bitmap).text
-        } catch (e: Exception) {
+            // 只认二维码：不加这个 hint 的话 ZXing 会顺带尝试条形码等格式，选中的照片如果
+            // 恰好还带其它条码图案，可能把不相关的条码内容当成收付款码识别结果返回。
+            val hints = mapOf(
+                com.google.zxing.DecodeHintType.POSSIBLE_FORMATS to
+                    listOf(com.google.zxing.BarcodeFormat.QR_CODE))
+            com.google.zxing.MultiFormatReader().decode(bitmap, hints).text
+        } catch (e: Throwable) {
             null
         }
     }

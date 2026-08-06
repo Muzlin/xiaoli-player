@@ -1,0 +1,40 @@
+小李播放器 Windows 11 版构建说明
+=================================
+
+一、准备工作（Windows 11 电脑上）
+1. 安装 Flutter SDK（3.44.0 或更高稳定版）
+   - 官网: https://docs.flutter.dev/get-started/install/windows
+   - 安装后把 flutter\bin 加入系统 PATH
+2. 安装 Visual Studio 2022
+   - 安装器里勾选「使用 C++ 的桌面开发」(Desktop development with C++)
+   - 这是 Flutter Windows 编译必需的 MSVC 工具链
+3. 安装 Git（如果 Flutter 需要）
+
+
+二、开始构建
+1. 把整个「client」文件夹复制到 Windows 电脑
+2. 双击运行 build_windows.bat
+3. 等待构建完成（首次 5-15 分钟）
+4. 构建产物在: build\windows\x64\runner\Release\
+   → 里面的「小李播放器.exe」就是成品
+
+
+三、分发给别人
+把 Release 文件夹里的所有文件一起拷走（exe 依赖旁边的 DLL）
+或者用 Inno Setup 打包成安装程序
+
+
+四、常见问题
+- 「未找到 Visual Studio」→ 确认安装了 C++ 桌面开发组件
+- 构建报错缺插件 → 重新运行 flutter pub get
+- 如果 Flutter 版本过新导致依赖冲突 → 在 client 目录运行:
+    flutter pub upgrade
+- 控制台/中文乱码 → 已是 UTF-8 模式，一般不会
+
+五、本包已包含
+- 完整 Dart 源码 (lib/)
+- Windows 运行器 (windows/runner) — 窗口标题/产品名已是「小李播放器」
+- 构建脚本 build_windows.bat
+- 全部依赖 (pubspec.yaml + pubspec.lock)
+
+注意：本包由 macOS 导出，未包含 macos/ 构建缓存，不影响 Windows 构建。

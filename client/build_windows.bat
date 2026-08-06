@@ -1,54 +1,47 @@
 @echo off
 chcp 65001 >nul
-cd /d "%~dp0"
-echo ============================================================
-echo  XiaoLi Player - Windows build  (小李播放器 Windows 构建)
-echo  Need: Flutter in PATH  +  Visual Studio 2022 (Desktop C++)
-echo ============================================================
+title 小李播放器 Windows 构建
+echo ==========================================
+echo   小李播放器 - Windows 11 一键构建
+echo ==========================================
 echo.
 
-where flutter >nul 2>&1
-if errorlevel 1 (
-  echo [X] 找不到 flutter 命令。请先装 Flutter 并把它加进 PATH。
-  echo     装好后命令行跑一下 flutter doctor 确认。
-  echo.
-  pause
-  exit /b 1
+REM 检查 Flutter
+where flutter >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [错误] 未找到 Flutter，请先安装并加入 PATH
+    echo 安装: https://docs.flutter.dev/get-started/install/windows
+    pause
+    exit /b 1
+)
+echo [1/3] Flutter: %flutter --version 2>nul | findstr "Flutter"%
+
+REM 检查 Visual Studio
+where msbuild >nul 2>nul
+if %errorlevel% neq 0 (
+    echo [提示] 请确认已安装 Visual Studio 2022 并勾选"C++ 桌面开发"
 )
 
-echo [1/3] flutter pub get ...
+echo [2/3] 拉取依赖...
 call flutter pub get
-if errorlevel 1 goto fail
+if %errorlevel% neq 0 (
+    echo [错误] 依赖拉取失败
+    pause
+    exit /b 1
+)
 
-echo [2/3] enable windows desktop ...
-call flutter config --enable-windows-desktop >nul 2>&1
-
-echo [3/3] flutter build windows --release ...
+echo [3/3] 构建 Release 版（首次约 5-15 分钟）...
 call flutter build windows --release
-if errorlevel 1 goto fail
+if %errorlevel% neq 0 (
+    echo [错误] 构建失败，请查看上方错误信息
+    pause
+    exit /b 1
+)
 
 echo.
-echo ============================================================
-echo  构建成功 OK!
-echo  产物文件夹（exe + dll + data 都在里面）:
-echo    build\windows\x64\runner\Release\
-echo  双击其中的 media_client.exe 即可运行。
-echo  分发请把整个 Release 文件夹一起拷。
-echo ============================================================
-echo.
+echo ==========================================
+echo   ✅ 构建成功！
+echo   应用位置: build\windows\x64\runner\Release\
+echo ==========================================
+explorer build\windows\x64\runner\Release
 pause
-exit /b 0
-
-:fail
-echo.
-echo ============================================================
-echo  构建失败 FAILED.
-echo  常见原因:
-echo   - 没装 Visual Studio 2022 的「使用 C++ 的桌面开发」工作负载
-echo   - Flutter 没装好 / 没联网拉依赖
-echo  先跑一下:  flutter doctor
-echo  把上面的红色报错发我，我来修。
-echo ============================================================
-echo.
-pause
-exit /b 1

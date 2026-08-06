@@ -194,7 +194,7 @@ class _PayPageState extends State<PayPage> {
                         height: 220,
                         alignment: Alignment.center,
                         color: const Color(0xFFF0F0F0),
-                        child: const Text('二维码暂仅 Mac 端支持\n安卓端用下方「转账」选联系人',
+                        child: const Text('二维码生成失败\n可用下方「转账」选联系人',
                             textAlign: TextAlign.center,
                             style: TextStyle(color: Colors.black45)),
                       ),
@@ -231,7 +231,7 @@ class _PayPageState extends State<PayPage> {
               if (!NativeQr.supported)
                 const Padding(
                   padding: EdgeInsets.only(top: 12),
-                  child: Text('扫一扫 / 收付款码目前仅 Mac 端支持；安卓端用「转账」选联系人。',
+                  child: Text('扫一扫 / 收付款码目前仅 Mac、安卓端支持；本端请用「转账」选联系人。',
                       style: TextStyle(fontSize: 12, color: Colors.black45)),
                 ),
             ]),

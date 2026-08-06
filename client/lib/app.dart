@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'screens/home_shell.dart';
 import 'services/platform_service.dart';
 import 'text_scale.dart';
@@ -15,6 +16,16 @@ class MediaApp extends StatelessWidget {
         builder: (context, mode, __) => MaterialApp(
       title: '小李播放器',
       debugShowCheckedModeBanner: false,
+      locale: const Locale('zh', 'CN'),
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('zh', 'CN'),
+        Locale('en', 'US'),
+      ],
       themeMode: mode,
       theme: ThemeData(
         useMaterial3: true,

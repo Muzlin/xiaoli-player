@@ -96,15 +96,15 @@ class QrScanActivity : ComponentActivity() {
         cameraExecutor = executor
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
-            val provider = providerFuture.get()
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(previewView.surfaceProvider)
-            }
-            val analysis = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-                .also { it.setAnalyzer(executor) { proxy -> analyzeFrame(proxy) } }
             try {
+                val provider = providerFuture.get()
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+                val analysis = ImageAnalysis.Builder()
+                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                    .build()
+                    .also { it.setAnalyzer(executor) { proxy -> analyzeFrame(proxy) } }
                 provider.unbindAll()
                 provider.bindToLifecycle(
                     this, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
