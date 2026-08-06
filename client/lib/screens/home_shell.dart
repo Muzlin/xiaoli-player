@@ -7842,6 +7842,236 @@ class _HomeShellState extends State<HomeShell> {
       ),
     );
   }
+
+  // 睡眠定时：N 分钟后停止播放。
+  Future<void> _setSleepTimer() async {
+    final mins = await showDialog<int>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('睡眠定时'),
+        children: [
+          for (final m in [15, 30, 45, 60, 90])
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, m),
+              child: Text('$m 分钟后停止'),
+            ),
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(ctx, 0),
+              child: const Text('取消定时')),
+        ],
+      ),
+    );
+    if (mins == null) return;
+    _sleepTimer?.cancel();
+    if (mins <= 0) {
+      setState(() => _sleepTimer = null);
+      return;
+    }
+    setState(() {
+      _sleepMin = mins;
+      _sleepTimer = Timer(Duration(minutes: mins), () {
+        PlayerHolder.i.stop();
+        if (mounted) setState(() => _sleepTimer = null);
+        _snack('睡眠定时到，已停止播放');
+      });
+    });
+    _snack('已设定 $mins 分钟后停止播放');
+  }
+
+  void _cancelSleep() {
+    _sleepTimer?.cancel();
+    setState(() => _sleepTimer = null);
+    _snack('已取消睡眠定时');
+  }
+
+  Future<void> _clearSearchHistory() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('清空搜索历史'),
+        content: const Text('清除所有搜索记录？'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('清空')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    await p.remove('search_history_v1');
+    _snack('搜索历史已清空');
+  }
+
+  Future<void> _sendFeedback() async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('意见反馈'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: 4,
+          decoration: const InputDecoration(
+              hintText: '说说你的建议或遇到的问题…', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('提交')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final msg = ctrl.text.trim();
+    if (msg.isEmpty) return;
+    final sent = await PlatformService.feedback(msg);
+    _snack(sent ? '反馈已提交，谢谢！' : '提交失败，请检查网络');
+  }
+
+  // 恢复默认设置：只清偏好类键，不动收藏/历史/账号/缓存。
+  Future<void> _resetPrefs() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('恢复默认设置'),
+        content: const Text('将清除播放/外观等偏好（倍速、淡入淡出、主题色、字号、'
+            '睡眠定时、密度等）。收藏、历史、账号、缓存不受影响。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('恢复')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    final p = await SharedPreferences.getInstance();
+    const keys = [
+      'default_speed', 'loop_single', 'wifi_only', 'fade_in', 'fade_out',
+      'text_scale', 'accent_color', 'theme_mode', 'list_density',
+      'auto_palette', 'seek_step', 'skip_intro'
+    ];
+    for (final k in keys) {
+      await p.remove(k);
+    }
+    if (!mounted) return;
+    setState(() {
+      _defaultSpeed = 1.0;
+      _loopSingle = false;
+      _wifiOnly = false;
+      _fadeIn = false;
+      _fadeOut = false;
+      _listDensity = 1.0;
+      _autoPalette = false;
+      _seekStep = 10;
+      _skipIntro = 0;
+      textScaleNotifier.value = 1.0;
+      accentNotifier.value = const Color(0xFFF26B21);
+      themeModeNotifier.value = ThemeMode.system;
+    });
+    _snack('已恢复默认设置');
+  }
+
+  Future<void> _shareApp() async {
+    final url = _officialDownload;
+    final text = '推荐你用「${appNameNotifier.value}」看视频/听歌：$url';
+    await Clipboard.setData(ClipboardData(text: text));
+    _snack('下载链接已复制，发给好友即可');
+  }
+
+  void _showAbout() {
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AboutDialog(
+        applicationName: appNameNotifier.value,
+        applicationVersion: 'v${UpdateService.currentVersion}',
+        applicationIcon: const Icon(Icons.music_video, size: 40),
+        children: const [
+          SizedBox(height: 8),
+          Text('一个支持几乎所有格式的媒体播放器，内置共享视频平台、'
+              'B站搜索播放、小李兑换币经济、离线缓存、后台播放等。'),
+          SizedBox(height: 8),
+          Text('基于 Flutter + libmpv 构建。'),
+        ],
+      ),
+    );
+  }
+
+  // 使用说明：一页讲清各功能怎么用。
+  void _showGuide() {
+    const sections = <(String, String, String)>[
+      ('▶️', '播放与媒体库',
+          '左侧切换：音乐库 / 收藏 / 我的视频 / 历史。点任意条目即可播放，支持几乎所有音视频格式。'),
+      ('🎬', '看平台视频',
+          '首页和搜索里带「平台」标签的是本应用共享平台的视频，点开直接在线播放，无需下载。'),
+      ('🅱️', 'B站搜索播放',
+          '顶部搜索框可搜 B站 视频/UP主，支持评论、弹幕、分P、字幕；登录后可点赞投币关注。'),
+      ('👍', '播放页三连',
+          '播放平台视频时，控制按钮下方有 👍点赞 / 🪙投币 / ⭐收藏。点赞收藏免费可反复切，投币花小李兑换币。'),
+      ('👤', '个人中心',
+          '左侧👤进入：看兑换币余额、每日签到领币(连签7天额外+50)、做每日任务领币、查看我的收藏/点赞/投币、热门榜。'),
+      ('🪙', '小李兑换币',
+          '赚币：签到、每日任务。花币：投币、改创作者名。投币越多称号越高(路人→新粉→铁粉→真爱粉)。'),
+      ('🏆', '创作中心',
+          '左侧🏆进入：上传作品到平台、批量上传、看自己作品的数据、改创作者名。'),
+      ('📥', '缓存与离线',
+          '在线视频可一键缓存到本地，之后离线也能看；支持后台下载、批量/全选缓存。'),
+      ('🎵', '后台播放',
+          '退出播放页或切到别的界面，音视频继续播放；底部迷你条可控制。'),
+      ('🔗', '设为默认播放器',
+          '可把本应用设为系统打开音视频文件的默认方式（macOS「打开方式」/ 安卓选择应用）。'),
+      ('🌐', '连不上/网络异常',
+          '平台地址会自动跟随更新，通常稍等会自动恢复；也可在设置里测网速、改局域网服务器IP。'),
+    ];
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('使用说明'),
+        content: SizedBox(
+          width: 380,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (final s in sections)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 7),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('${s.$1}  ${s.$2}',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.w600, fontSize: 14)),
+                        const SizedBox(height: 2),
+                        Text(s.$3,
+                            style: const TextStyle(
+                                color: Colors.black54, fontSize: 13, height: 1.4)),
+                      ],
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('知道了')),
+        ],
+      ),
+    );
+  }
 }
 
 /// 「我的关注」页：列出关注的 UP主，可取关。
