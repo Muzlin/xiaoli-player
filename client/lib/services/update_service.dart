@@ -14,7 +14,7 @@ class UpdateInfo {
 /// 检查更新：平台 /version → 公网 git CDN(jsDelivr) → GitHub Releases。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.40.0';
+  static const currentVersion = '2.41.0';
 
   /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';

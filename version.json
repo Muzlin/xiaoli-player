@@ -1,6 +1,6 @@
 {
-  "version": "2.40.0",
-  "notes": "流畅直播 + 系统级后台保活 + 公网更新",
+  "version": "2.41.0",
+  "notes": "流畅直播 + 系统级后台保活 + 公网CDN更新检查",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
