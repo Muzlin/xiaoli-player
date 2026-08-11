@@ -186,7 +186,10 @@ class _HomeShellState extends State<HomeShell> {
   bool _blockQuit = false;
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
-  final Map<String, int> _resume = {}; // 断点续播：track key→秒
+  bool _bgLaunch = false; // 开机后台启动标志
+  bool get _bgLaunchFlag => Platform.executableArguments.contains('--bg');
+
+final Map<String, int> _resume = {}; // 断点续播：track key→秒
   final Map<String, int> _resumeDur = {}; // #7 继续观看：track key→总时长秒
   String _viewMode = 'list'; // #15 媒体库视图：list|grid
   List<Color> _redSkinGrad = const [
@@ -342,6 +345,11 @@ class _HomeShellState extends State<HomeShell> {
   @override
   void initState() {
     super.initState();
+    // 开机后台启动：暂停播放（音乐不继续放），消息接收不受影响
+    if (_bgLaunchFlag) {
+      PlayerHolder.i.player.pause();
+      _bgLaunch = true;
+    }
     _loadSaved();
     _loadBiliCookie();
     _loadAppearance();
