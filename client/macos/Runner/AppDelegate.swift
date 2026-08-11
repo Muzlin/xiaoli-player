@@ -4,6 +4,19 @@ import FlutterMacOS
 
 @main
 class AppDelegate: FlutterAppDelegate {
+  // --bg 启动（开机自启 LaunchAgent 带 --bg）：默认后台运行、不显示窗口。
+  static let bgLaunch = CommandLine.arguments.contains("--bg")
+
+  override func applicationDidFinishLaunching(_ notification: Notification) {
+    if AppDelegate.bgLaunch {
+      UserDefaults.standard.set(true, forKey: "backgroundRun")
+      // 开机后台启动：隐藏主窗口（音乐继续放、消息继续收，不打扰）
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+        for w in NSApp.windows { w.orderOut(nil) }
+      }
+    }
+    super.applicationDidFinishLaunching(notification)
+  }
   // 「打开方式」用小李播放器打开音视频文件：缓存待播路径，channel 就绪后交给 Dart 播放。
   static var pendingFiles: [String] = []
   static weak var openChannel: FlutterMethodChannel?

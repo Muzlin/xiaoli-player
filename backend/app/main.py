@@ -7,6 +7,7 @@ from .admin import router as admin_router
 from .auth import router as auth_router
 from .config import get_settings
 from .db import init_db
+from .devices import router as devices_router
 from .media import router as media_router
 
 _DEFAULT_SECRET = "dev-secret-change-me"
@@ -35,5 +36,6 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
+app.include_router(devices_router)
 app.include_router(media_router)
 app.include_router(admin_router)

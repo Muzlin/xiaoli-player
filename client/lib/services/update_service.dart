@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'platform_service.dart';
 
@@ -10,7 +11,7 @@ class UpdateInfo {
   UpdateInfo({required this.version, required this.url, required this.notes});
 }
 
-/// 检查更新：优先问自建平台 /version（国内直连稳），拿不到再退 GitHub Releases。
+/// 检查更新：平台 /version → 公网 git CDN(jsDelivr) → GitHub Releases。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
   static const currentVersion = '2.40.0';
@@ -26,11 +27,57 @@ class UpdateService {
 
   /// 有新版返回更新信息；无更新或失败返回 null（不打扰用户）。
   Future<UpdateInfo?> check() async {
-    // 1) 先问平台 /version（可达），下载跳平台页（页内含 GitHub 永久链接）。
+    // 1) 先问平台 /version（可达，国内直连稳）。
     final viaPlatform = await _checkPlatform();
     if (viaPlatform != null) return viaPlatform;
-    // 2) 退而求其次：问 GitHub（需代理可达）。
+    // 2) 公网 git 同步：jsDelivr CDN 从 GitHub 仓库拉 version.json（永久公网，无代理也快）。
+    final viaCdn = await _checkCdn();
+    if (viaCdn != null) return viaCdn;
+    // 3) 退而求其次：问 GitHub Releases。
     return _checkGithub();
+  }
+
+  /// 当前平台对应的安装包资源名。
+  static String _platformAsset() {
+    if (Platform.isMacOS) return 'xiaoli-player-macos.zip';
+    if (Platform.isAndroid) return 'xiaoli-player-android.apk';
+    if (Platform.isWindows) return 'xiaoli-player-windows.zip';
+    return '';
+  }
+
+  /// 公网 CDN（jsDelivr = git 仓库的永久公网镜像）：拿最新版本号与下载资源。
+  Future<UpdateInfo?> _checkCdn() async {
+    final urls = [
+      'https://cdn.jsdelivr.net/gh/Muzlin/xiaoli-player@flutter-client/version.json',
+      'https://raw.githubusercontent.com/Muzlin/xiaoli-player/flutter-client/version.json',
+    ];
+    for (final u in urls) {
+      try {
+        final r = await _http
+            .get(Uri.parse(u))
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode != 200) continue;
+        final m = jsonDecode(r.body) as Map<String, dynamic>;
+        final latest = (m['version'] ?? '') as String;
+        if (latest.isEmpty || !isNewer(latest, currentVersion)) return null;
+        var dl = (m['download_url'] ?? '') as String;
+        if (dl.isEmpty) {
+          final asset = _platformAsset();
+          if (asset.isNotEmpty) {
+            dl = 'https://github.com/$repo/releases/latest/download/$asset';
+          }
+        }
+        if (dl.isEmpty) return null;
+        return UpdateInfo(
+          version: latest,
+          url: dl,
+          notes: (m['notes'] ?? '') as String,
+        );
+      } catch (_) {
+        continue;
+      }
+    }
+    return null;
   }
 
   Future<UpdateInfo?> _checkPlatform() async {

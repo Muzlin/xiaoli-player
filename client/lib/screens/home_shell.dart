@@ -4502,16 +4502,31 @@ class _HomeShellState extends State<HomeShell> {
       if (on) {
         if (!dir.existsSync()) dir.createSync(recursive: true);
         final exe = Platform.resolvedExecutable;
+        // 系统级自启：开机后台运行 + KeepAlive（强退/崩溃自动重启，常驻后台）
         file.writeAsStringSync('<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
             '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
             '<plist version="1.0"><dict>\n'
             '<key>Label</key><string>com.xiaoli.player</string>\n'
-            '<key>ProgramArguments</key><array><string>$exe</string></array>\n'
+            '<key>ProgramArguments</key><array><string>$exe</string>'
+            '<string>--bg</string></array>\n'
             '<key>RunAtLoad</key><true/>\n'
+            '<key>KeepAlive</key><true/>\n'
+            '<key>ProcessType</key><string>Background</string>\n'
             '</dict></plist>\n');
+        // 立即注册（不用等下次登录）
+        try {
+          Process.run('launchctl', ['bootout', 'gui/${Platform.environment['UID'] ?? '501'}',
+                                    '${dir.path}/$_loginPlist']);
+          Process.run('launchctl', ['bootstrap', 'gui/${Platform.environment['UID'] ?? '501'}',
+                                    '${dir.path}/$_loginPlist']);
+        } catch (_) {}
       } else {
         if (file.existsSync()) file.deleteSync();
+        try {
+          Process.run('launchctl', ['bootout', 'gui/${Platform.environment['UID'] ?? '501'}',
+                                    '${dir.path}/$_loginPlist']);
+        } catch (_) {}
       }
     } catch (_) {}
   }
