@@ -47,9 +47,10 @@ class UpdateService {
 
   /// 公网 CDN（jsDelivr = git 仓库的永久公网镜像）：拿最新版本号与下载资源。
   Future<UpdateInfo?> _checkCdn() async {
+    // raw 无缓存最可靠；jsDelivr CDN 国内快（可能有缓存延迟）作兜底
     final urls = [
-      'https://cdn.jsdelivr.net/gh/Muzlin/xiaoli-player@flutter-client/version.json',
       'https://raw.githubusercontent.com/Muzlin/xiaoli-player/flutter-client/version.json',
+      'https://cdn.jsdelivr.net/gh/Muzlin/xiaoli-player@flutter-client/version.json',
     ];
     for (final u in urls) {
       try {
