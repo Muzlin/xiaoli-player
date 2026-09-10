@@ -1,6 +1,6 @@
 {
-  "version": "2.41.0",
-  "notes": "流畅直播 + 系统级后台保活 + 公网CDN更新检查",
+  "version": "2.42.0",
+  "notes": "修复公网更新检测：去掉宕机的 jsDelivr CDN，改为平台+raw.githubusercontent+GitHub 三源并行；Windows 新增系统级自动更新（MSIX App Installer）",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

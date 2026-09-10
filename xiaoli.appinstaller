@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<AppInstaller
+    Uri="https://github.com/Muzlin/xiaoli-player/releases/latest/download/xiaoli.appinstaller"
+    Version="2.42.0.0"
+    xmlns="http://schemas.microsoft.com/appx/appinstaller/2017/2">
+    <MainPackage
+        Name="com.xiaoli.player"
+        Publisher="CN=XiaoliPlayer"
+        Version="2.42.0.0"
+        ProcessorArchitecture="x64"
+        Uri="https://github.com/Muzlin/xiaoli-player/releases/latest/download/xiaoli.msix" />
+    <UpdateSettings>
+        <OnLaunch HoursBetweenUpdateChecks="6" />
+        <AutomaticBackgroundTask />
+    </UpdateSettings>
+</AppInstaller>

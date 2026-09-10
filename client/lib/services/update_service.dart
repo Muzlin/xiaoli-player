@@ -11,10 +11,11 @@ class UpdateInfo {
   UpdateInfo({required this.version, required this.url, required this.notes});
 }
 
-/// 检查更新：平台 /version → 公网 git CDN(jsDelivr) → GitHub Releases。
+/// 检查更新：平台公网 /version（国内直连稳）→ 公网 git（raw.githubusercontent）→ GitHub Releases。
+/// 所有公网源并行探测，总耗时≈最慢一个源（约 3 秒内），谁先确认有新版本就用谁。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.41.0';
+  static const currentVersion = '2.42.0';
 
   /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';
@@ -22,19 +23,29 @@ class UpdateService {
   static const githubApi =
       'https://api.github.com/repos/$repo/releases/latest';
 
+  /// 公网 version.json 镜像源：raw.githubusercontent 主源；GitHub raw 重定向端点兜底。
+  /// （曾用 jsDelivr CDN，但它多次 503「No healthy backends」且无法自愈，已移除。）
+  static const _versionJsonUrls = [
+    'https://raw.githubusercontent.com/$repo/flutter-client/version.json',
+    'https://github.com/$repo/raw/flutter-client/version.json',
+  ];
+
   final http.Client _http;
   UpdateService([http.Client? client]) : _http = client ?? http.Client();
 
   /// 有新版返回更新信息；无更新或失败返回 null（不打扰用户）。
+  /// 平台是首选（自建 cloudflared 隧道，国内直连快、地址由 GitHub 指针自愈）；
+  /// 平台没跑/数据过期时，公网 git 与 GitHub Releases 并行兜底。
   Future<UpdateInfo?> check() async {
-    // 1) 先问平台 /version（可达，国内直连稳）。
-    final viaPlatform = await _checkPlatform();
-    if (viaPlatform != null) return viaPlatform;
-    // 2) 公网 git 同步：jsDelivr CDN 从 GitHub 仓库拉 version.json（永久公网，无代理也快）。
-    final viaCdn = await _checkCdn();
-    if (viaCdn != null) return viaCdn;
-    // 3) 退而求其次：问 GitHub Releases。
-    return _checkGithub();
+    final results = await Future.wait([
+      _checkPlatform(),
+      _checkCdn(),
+      _checkGithub(),
+    ]);
+    for (final r in results) {
+      if (r != null) return r; // 平台优先，其次公网 CDN，最后 GitHub API
+    }
+    return null;
   }
 
   /// 当前平台对应的安装包资源名。
@@ -45,18 +56,14 @@ class UpdateService {
     return '';
   }
 
-  /// 公网 CDN（jsDelivr = git 仓库的永久公网镜像）：拿最新版本号与下载资源。
+  /// 公网 git 镜像（raw.githubusercontent / GitHub raw）：拿最新版本号与下载资源。
+  /// 平台挂了或数据过期时兜底，全公网可用、无需任何本地服务。
   Future<UpdateInfo?> _checkCdn() async {
-    // raw 无缓存最可靠；jsDelivr CDN 国内快（可能有缓存延迟）作兜底
-    final urls = [
-      'https://raw.githubusercontent.com/Muzlin/xiaoli-player/flutter-client/version.json',
-      'https://cdn.jsdelivr.net/gh/Muzlin/xiaoli-player@flutter-client/version.json',
-    ];
-    for (final u in urls) {
+    for (final u in _versionJsonUrls) {
       try {
         final r = await _http
             .get(Uri.parse(u))
-            .timeout(const Duration(seconds: 8));
+            .timeout(const Duration(seconds: 6));
         if (r.statusCode != 200) continue;
         final m = jsonDecode(r.body) as Map<String, dynamic>;
         final latest = (m['version'] ?? '') as String;
@@ -86,7 +93,7 @@ class UpdateService {
       final base = PlatformService.current;
       final r = await _http
           .get(Uri.parse('$base/version'))
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 5));
       if (r.statusCode != 200) return null;
       final m = jsonDecode(r.body) as Map<String, dynamic>;
       final latest = (m['version'] ?? '') as String;
@@ -108,7 +115,7 @@ class UpdateService {
       final r = await _http.get(Uri.parse(githubApi), headers: {
         'Accept': 'application/vnd.github+json',
         'User-Agent': 'xiaoli-player',
-      }).timeout(const Duration(seconds: 8));
+      }).timeout(const Duration(seconds: 6));
       if (r.statusCode != 200) return null;
       final m = jsonDecode(r.body) as Map<String, dynamic>;
       var latest = (m['tag_name'] ?? '') as String; // 形如 v2.37.0

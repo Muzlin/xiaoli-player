@@ -1,40 +1,38 @@
-小李播放器 Windows 11 版构建说明
-=================================
+小李播放器 Windows 11 版构建说明（v2.42.0）
+=============================================
 
 一、准备工作（Windows 11 电脑上）
-1. 安装 Flutter SDK（3.44.0 或更高稳定版）
-   - 官网: https://docs.flutter.dev/get-started/install/windows
-   - 安装后把 flutter\bin 加入系统 PATH
-2. 安装 Visual Studio 2022
-   - 安装器里勾选「使用 C++ 的桌面开发」(Desktop development with C++)
-   - 这是 Flutter Windows 编译必需的 MSVC 工具链
-3. 安装 Git（如果 Flutter 需要）
+1. 安装 Flutter SDK（3.44.0 或更高稳定版），flutter\bin 加入 PATH
+2. 安装 Visual Studio 2022（勾选「使用 C++ 的桌面开发」）
+3. 安装 Git
 
-
-二、开始构建
-1. 把整个「client」文件夹复制到 Windows 电脑
+二、一键构建（绿色版 exe）
+1. 把整个 client 文件夹复制到 Windows 电脑
 2. 双击运行 build_windows.bat
-3. 等待构建完成（首次 5-15 分钟）
-4. 构建产物在: build\windows\x64\runner\Release\
-   → 里面的「小李播放器.exe」就是成品
+3. 产物在 build\windows\x64\runner\Release\（里面 exe + DLL 一起拷走）
 
-
-三、分发给别人
-把 Release 文件夹里的所有文件一起拷走（exe 依赖旁边的 DLL）
-或者用 Inno Setup 打包成安装程序
-
+三、MSIX 系统自动更新包（系统自带更新机制）
+1. 安装证书工具（PowerShell 管理员）：
+   Set-ExecutionPolicy -Scope Process Bypass
+2. 生成自签名证书（首次）：
+   New-SelfSignedCertificate -Type Custom -Subject "CN=XiaoliPlayer" -KeyUsage DigitalSignature -FriendlyName "XiaoliPlayer" -CertStoreLocation "Cert:\CurrentUser\My" -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3") -NotAfter (Get-Date).AddYears(5)
+   导出证书为 xiaoli.cer（给用户安装信任用）：
+   Export-Certificate -Cert (Get-ChildItem Cert:\CurrentUser\My | Where-Object {$_.Subject -like "*XiaoliPlayer*"}) -FilePath xiaoli.cer
+3. 构建 MSIX 安装包：
+   cd client
+   flutter pub run msix:create
+   产物：build\windows\x64\runner\Release\xiaoli-player.msix → 改名 xiaoli.msix
+4. 发布到 GitHub Releases（v2.42.0 资产）：
+   - xiaoli.msix
+   - xiaoli.appinstaller（本包已带，直接上传，无需修改）
+   - xiaoli-player-windows.zip（第 2 步的 Release 文件夹打包）
+5. 用户机器首次安装：
+   双击 xiaoli.msix 安装（提示信任时选「安装」；企业环境可加域信任）
+6. 之后更新：app 内点「自动更新」→ 唤起系统 App Installer 自动下载安装新版
 
 四、常见问题
-- 「未找到 Visual Studio」→ 确认安装了 C++ 桌面开发组件
-- 构建报错缺插件 → 重新运行 flutter pub get
-- 如果 Flutter 版本过新导致依赖冲突 → 在 client 目录运行:
-    flutter pub upgrade
-- 控制台/中文乱码 → 已是 UTF-8 模式，一般不会
+- 未找到 Visual Studio → 装 C++ 桌面开发组件
+- msix:create 报 Publisher 错误 → 证书 Subject 必须与 pubspec msix_config.publisher 一致（CN=XiaoliPlayer）
+- 装 msix 提示「开发人员模式」→ 设置-隐私和安全性-开发者选项 开启开发人员模式
 
-五、本包已包含
-- 完整 Dart 源码 (lib/)
-- Windows 运行器 (windows/runner) — 窗口标题/产品名已是「小李播放器」
-- 构建脚本 build_windows.bat
-- 全部依赖 (pubspec.yaml + pubspec.lock)
-
-注意：本包由 macOS 导出，未包含 macos/ 构建缓存，不影响 Windows 构建。
+注意：本包由 macOS 导出，未包含 Windows 构建缓存，不影响构建。
