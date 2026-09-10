@@ -1,4 +1,4 @@
-小李播放器 Windows 11 版构建说明（v2.42.0）
+小李播放器 Windows 11 版构建说明（v2.43.0）
 =============================================
 
 一、准备工作（Windows 11 电脑上）
@@ -22,7 +22,7 @@
    cd client
    flutter pub run msix:create
    产物：build\windows\x64\runner\Release\xiaoli-player.msix → 改名 xiaoli.msix
-4. 发布到 GitHub Releases（v2.42.0 资产）：
+4. 发布到 GitHub Releases（v2.43.0 资产）：
    - xiaoli.msix
    - xiaoli.appinstaller（本包已带，直接上传，无需修改）
    - xiaoli-player-windows.zip（第 2 步的 Release 文件夹打包）

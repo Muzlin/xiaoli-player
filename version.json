@@ -1,6 +1,6 @@
 {
-  "version": "2.42.0",
-  "notes": "修复公网更新检测：去掉宕机的 jsDelivr CDN，改为平台+raw.githubusercontent+GitHub 三源并行；Windows 新增系统级自动更新（MSIX App Installer）",
+  "version": "2.43.0",
+  "notes": "新增账号系统：注册/登录（30天免登录）、验证码登录、忘记密码、绑定手机号；B站登录态随账号跨设备自动同步", 
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

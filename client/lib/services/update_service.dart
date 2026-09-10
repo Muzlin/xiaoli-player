@@ -15,7 +15,7 @@ class UpdateInfo {
 /// 所有公网源并行探测，总耗时≈最慢一个源（约 3 秒内），谁先确认有新版本就用谁。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.42.0';
+  static const currentVersion = '2.43.0';
 
   /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';
