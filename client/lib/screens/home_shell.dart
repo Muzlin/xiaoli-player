@@ -28,7 +28,9 @@ import '../services/download_manager.dart';
 import '../services/coin_ledger.dart';
 import '../services/a11y.dart';
 import '../services/native_notify.dart';
+import '../services/account_service.dart';
 import 'pay_page.dart';
+import 'account_page.dart';
 import 'license_pages_zh.dart';
 import 'live_page.dart';
 import '../player/player_holder.dart';
@@ -132,7 +134,9 @@ class Track {
 
 /// 桌面音乐播放器风格主界面：侧栏 + 顶部搜索（B站） + 列表 + 底部播放条。
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key});
+  /// 刚注册完 → 首帧后自动打开「账号与安全」引导绑定手机号和 B站。
+  final bool showBindPrompt;
+  const HomeShell({super.key, this.showBindPrompt = false});
 
   @override
   State<HomeShell> createState() => _HomeShellState();
@@ -231,6 +235,8 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
   bool _autoUpdate0 = true; // 自动更新（发现新版自动下载安装，默认开）
   int _skipIntro = 0; // 片头跳过秒数
   String _profileName = ''; // 本机显示名
+  String _accUser = ''; // 小李账号用户名(登录后)
+  String _accPhone = ''; // 小李账号绑定手机号
   String? _profileAvatar; // 本机头像路径
   final Map<String, List<int>> _bookmarks = {}; // 书签 track key→秒列表
   int _seekStep = 10; // 快进/快退步长
@@ -352,6 +358,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     }
     _loadSaved();
     _loadBiliCookie();
+    _loadAccSession();
     _loadAppearance();
     _loadFavorites();
     _loadMyVideos();
@@ -393,6 +400,13 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       });
       _silentCheckUpdate();
     });
+    if (widget.showBindPrompt) {
+      // 注册完成后引导绑定手机号 / B站账号。
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await Future.delayed(const Duration(milliseconds: 600));
+        if (mounted) _openAccountPage();
+      });
+    }
     _checkBan(); // 启动登记设备 + 查封号
     _checkGift(); // 启动查一次红包(后台空投)
     NativeNotify.requestAuth(); // 申请系统通知权限(macOS 弹框/Android 13+ 运行时)
@@ -462,6 +476,33 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       name = (p.getString('profile_name') ?? '').trim();
     }
     if (name.isNotEmpty) PlatformService.reportAccount(name, isBili);
+  }
+
+  // 账号与安全：账号/手机号/B站/改密码/退出登录。
+  Future<void> _openAccountPage() async {
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => AccountPage(
+        biliLoggedIn: _biliLoggedIn,
+        biliName: (_account?['uname'] ?? '').toString(),
+        onBindBili: () async {
+          Navigator.of(context).pop();
+          await Future.delayed(const Duration(milliseconds: 200));
+          if (mounted) await _showBiliLogin();
+        },
+      ),
+    ));
+    _loadAccSession();
+  }
+
+  Future<void> _loadAccSession() async {
+    final u = await AccountService.currentUser();
+    final ph = await AccountService.currentPhone();
+    if (mounted) {
+      setState(() {
+        _accUser = u;
+        _accPhone = ph;
+      });
+    }
   }
 
   // 远程指令：管理员给本设备下发的可见效果指令(发消息/刷新/维护/清缓存)。
@@ -837,6 +878,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         try {
           _bili.setUserCookie('');
         } catch (_) {}
+        AccountService.bindBili(''); // 退出登录也同步到账号云端
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('管理员已退出该设备的B站登录')));
@@ -971,6 +1013,8 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         try {
           _bili.setUserCookie('');
         } catch (_) {}
+        await AccountService.bindBili('');
+        await AccountService.logout(); // 清除登录态，重启后回登录页
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
               const SnackBar(content: Text('管理员已将本设备登出')));
@@ -2902,7 +2946,20 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         }
       }
     } catch (_) {}
-    final c = prefs.getString(_biliCookieKey) ?? '';
+    var c = prefs.getString(_biliCookieKey) ?? '';
+    // 账号云同步：登录账号后，B站登录态以服务端为准(换设备登录同账号自动同步)。
+    try {
+      final synced = await AccountService.getBili();
+      if (synced != null && synced.isNotEmpty) {
+        if (synced != c) {
+          await prefs.setString(_biliCookieKey, synced);
+          c = synced;
+        }
+      } else if (synced != null && synced.isEmpty && c.isNotEmpty) {
+        // 首次升级：本机已有 B站登录，把它推上云，其它设备随即同步。
+        await AccountService.bindBili(c);
+      }
+    } catch (_) {}
     if (c.isNotEmpty) _bili.setUserCookie(c);
     if (mounted) setState(() => _biliLoggedIn = c.isNotEmpty);
     if (c.isNotEmpty) _loadAccount();
@@ -2970,6 +3027,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_biliCookieKey, cookie);
     _bili.setUserCookie(cookie);
+    AccountService.bindBili(cookie); // 同步到账号，换设备登录自动带出
     if (!mounted) return;
     setState(() {
       _biliLoggedIn = cookie.isNotEmpty;
@@ -3027,6 +3085,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
                 final prefs = await SharedPreferences.getInstance();
                 await prefs.setString(_biliCookieKey, cookie);
                 _bili.setUserCookie(cookie);
+                AccountService.bindBili(cookie); // 同步到账号，换设备登录自动带出
                 if (ctx.mounted) Navigator.of(ctx).pop();
                 if (mounted) {
                   setState(() => _biliLoggedIn = true);
@@ -3222,8 +3281,9 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
   }
 
   void _showUpdateDialog(UpdateInfo info) {
-    // macOS/Android 支持一键自动更新（下载→替换→重启，全程不用手动）。
-    final canAuto = Platform.isMacOS || Platform.isAndroid;
+    // macOS/Android/Windows 支持一键自动更新：
+    // macOS=下载zip替换重启；Android=系统安装器；Windows=系统MSIX App Installer。
+    final canAuto = true;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
@@ -3260,13 +3320,33 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     );
   }
 
-  /// 一键自动更新：下载对应平台安装包→替换→重启，全程无需手动。
+  /// 一键自动更新：macOS=下载zip替换重启；Android=系统安装器；Windows=系统MSIX更新。
   Future<void> _autoUpdate(UpdateInfo info) async {
     final base = PlatformService.current;
     if (Platform.isMacOS) {
       await _autoUpdateMac('$base/dl/xiaoli-mac.zip', info.version);
     } else if (Platform.isAndroid) {
       await _autoUpdateAndroid('$base/dl/xiaoli-android.apk', info.version);
+    } else if (Platform.isWindows) {
+      await _autoUpdateWindows(info);
+    }
+  }
+
+  /// Windows：走系统自带更新——MSIX App Installer（系统级 UI + 后台自动更新）。
+  /// 唤起 ms-appinstaller 协议，由 Windows 系统安装器接管下载/校验/安装，
+  /// 无需 app 内自写替换逻辑；装完后系统自动重启应用。
+  Future<void> _autoUpdateWindows(UpdateInfo info) async {
+    final ok = await launchUrl(
+      Uri.parse(
+          'ms-appinstaller:?source=https://github.com/${UpdateService.repo}/releases/latest/download/xiaoli.appinstaller'),
+      mode: LaunchMode.externalApplication,
+    );
+    if (!ok) {
+      // 系统安装器缺失/协议失败：回退到打开下载页（GitHub releases）。
+      final uri = Uri.tryParse(info.url);
+      if (uri != null) {
+        await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
     }
   }
 
@@ -7356,6 +7436,16 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
           leading: Icon(Icons.travel_explore),
           title: Text('联网搜索'),
           subtitle: Text('搜索框输入歌名，联网搜索（可搜中文歌）'),
+        ),
+        ListTile(
+          leading: const Icon(Icons.manage_accounts_outlined),
+          title: Text(_accUser.isEmpty ? '账号与安全' : '账号：$_accUser'),
+          subtitle: Text(
+              _accPhone.isEmpty
+                  ? '未绑定手机号 · 点此绑定 / 改密码 / 退出登录'
+                  : '手机号 $_accPhone · 点此管理账号安全',
+              style: const TextStyle(fontSize: 12)),
+          onTap: _openAccountPage,
         ),
         ListTile(
           leading: (_account != null && _account!['face'] is String)

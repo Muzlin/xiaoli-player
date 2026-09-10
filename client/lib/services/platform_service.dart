@@ -247,6 +247,19 @@ class PlatformService {
     return id;
   }
 
+  /// 账号登录后：把本机钱包 uid 覆盖成账号主 uid，让余额/收藏/昵称/社交等
+  /// 既有数据全部随账号走。传空字符串=登出(清除本地 uid)。
+  static Future<void> setWalletUid(String id) async {
+    final p = await SharedPreferences.getInstance();
+    if (id.isEmpty) {
+      await p.remove('wallet_uid');
+      _uid = null;
+    } else {
+      await p.setString('wallet_uid', id);
+      _uid = id;
+    }
+  }
+
   /// 当前兑换币余额。
   static Future<int> getBalance() async {
     final uid = await walletUid();
