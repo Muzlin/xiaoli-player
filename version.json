@@ -1,6 +1,6 @@
 {
-  "version": "2.45.1",
-  "notes": "修复自动更新：改为从 GitHub Releases 最新版下载（此前会下到服务器上的旧包）；Windows 改为解压覆盖自动重启",
+  "version": "2.46.0",
+  "notes": "手机版登录简化：只输手机号即可登录（不存在则直接建号）；用密码/验证码登录可在登录页切换",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

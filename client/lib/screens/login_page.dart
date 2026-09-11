@@ -25,6 +25,8 @@ class _LoginPageState extends State<LoginPage> {
 
   _Mode _mode = _Mode.login;
   bool _useCode = false; // 登录方式：密码 / 验证码
+  // 手机端默认「只输手机号就登录」(用户明确要求；可用密码/验证码切换)。
+  bool _quickMode = Platform.isAndroid;
   bool _busy = false;
   bool _warming = true;
   String? _err;
@@ -123,6 +125,11 @@ class _LoginPageState extends State<LoginPage> {
         ? await AccountService.codeLogin(_phone.text.trim(), _code.text.trim())
         : await AccountService.login(_u.text.trim(), _p.text);
     await _finish(d, justRegistered: false);
+  }
+
+  Future<void> _doQuickLogin() async {
+    final d = await AccountService.quickLogin(_phone.text.trim());
+    await _finish(d, justRegistered: d['is_new'] == true);
   }
 
   Future<void> _doRegister() async {
@@ -431,6 +438,19 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   List<Widget> _loginForm() {
+    if (_quickMode) {
+      return [
+        _tf(_phone, '手机号(账号)',
+            keyboard: TextInputType.phone, maxLength: 20),
+        const SizedBox(height: 4),
+        _primary('登录', () => _run(_doQuickLogin)),
+        TextButton(
+          onPressed: () => setState(() => _quickMode = false),
+          child: const Text('用密码 / 验证码登录',
+              style: TextStyle(color: Colors.white54)),
+        ),
+      ];
+    }
     return [
       if (_useCode) ...[
         _tf(_phone, '手机号', keyboard: TextInputType.phone, maxLength: 20),
@@ -488,6 +508,15 @@ class _LoginPageState extends State<LoginPage> {
             ),
           ],
         ),
+        if (Platform.isAndroid)
+          TextButton(
+            onPressed: () => setState(() {
+              _quickMode = true;
+              _useCode = false;
+            }),
+            child: const Text('手机号直接登录',
+                style: TextStyle(color: Colors.white54)),
+          ),
       ],
     ];
   }

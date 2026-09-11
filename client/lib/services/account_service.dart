@@ -78,6 +78,13 @@ class AccountService {
     return d ?? _netErr();
   }
 
+  /// 手机端「只输手机号即登录」：存在就登，不存在就直接建号(is_new=true)。
+  static Future<Map<String, dynamic>> quickLogin(String phone) async {
+    final uid = await PlatformService.walletUid();
+    final d = await _post('/acc-quick-login', {'u': phone, 'uid': uid});
+    return d ?? _netErr();
+  }
+
   static Future<Map<String, dynamic>> codeLogin(String phone, String code) async {
     final d = await _post('/acc-code-login', {'phone': phone, 'code': code});
     return d ?? _netErr();
