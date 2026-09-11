@@ -1,6 +1,6 @@
 {
-  "version": "2.45.0",
-  "notes": "新增扫码登录：电脑(mac/win)登录页显示二维码，已登录的手机/电脑版扫一扫即可登录同账号（含B站态）",
+  "version": "2.45.1",
+  "notes": "修复自动更新：改为从 GitHub Releases 最新版下载（此前会下到服务器上的旧包）；Windows 改为解压覆盖自动重启",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

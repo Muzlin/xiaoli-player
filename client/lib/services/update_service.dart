@@ -15,7 +15,7 @@ class UpdateInfo {
 /// 所有公网源并行探测，总耗时≈最慢一个源（约 3 秒内），谁先确认有新版本就用谁。
 class UpdateService {
   /// 当前版本（与 pubspec version 保持一致）。
-  static const currentVersion = '2.45.0';
+  static const currentVersion = '2.45.1';
 
   /// GitHub 仓库（永久托管备份）。
   static const repo = 'Muzlin/xiaoli-player';
@@ -55,6 +55,11 @@ class UpdateService {
     if (Platform.isWindows) return 'xiaoli-player-windows.zip';
     return '';
   }
+
+  /// 当前平台在 GitHub Releases 最新版的直接下载地址。
+  /// 自动更新统一走这里：服务器 /dl/ 目录里的旧包会过期，之前因此装回旧版。
+  static String get latestAssetUrl =>
+      'https://github.com/$repo/releases/latest/download/${_platformAsset()}';
 
   /// 公网 git 镜像（raw.githubusercontent / GitHub raw）：拿最新版本号与下载资源。
   /// 平台挂了或数据过期时兜底，全公网可用、无需任何本地服务。

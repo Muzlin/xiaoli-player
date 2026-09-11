@@ -3442,31 +3442,104 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
 
   /// 一键自动更新：macOS=下载zip替换重启；Android=系统安装器；Windows=系统MSIX更新。
   Future<void> _autoUpdate(UpdateInfo info) async {
-    final base = PlatformService.current;
+    // 统一从 GitHub Releases 最新资产下载：服务器 /dl/ 里的包会过期，
+    // 之前因此把用户"更新"回旧版(下到的还是 2.39.57)。info.url 是直链时优先。
+    final u = info.url;
+    final url = (u.endsWith('.zip') || u.endsWith('.apk'))
+        ? u
+        : UpdateService.latestAssetUrl;
     if (Platform.isMacOS) {
-      await _autoUpdateMac('$base/dl/xiaoli-mac.zip', info.version);
+      await _autoUpdateMac(url, info.version);
     } else if (Platform.isAndroid) {
-      await _autoUpdateAndroid('$base/dl/xiaoli-android.apk', info.version);
+      await _autoUpdateAndroid(url, info.version);
     } else if (Platform.isWindows) {
-      await _autoUpdateWindows(info);
+      await _autoUpdateWindows(url, info.version);
     }
   }
 
-  /// Windows：走系统自带更新——MSIX App Installer（系统级 UI + 后台自动更新）。
-  /// 唤起 ms-appinstaller 协议，由 Windows 系统安装器接管下载/校验/安装，
-  /// 无需 app 内自写替换逻辑；装完后系统自动重启应用。
-  Future<void> _autoUpdateWindows(UpdateInfo info) async {
-    final ok = await launchUrl(
-      Uri.parse(
-          'ms-appinstaller:?source=https://github.com/${UpdateService.repo}/releases/latest/download/xiaoli.appinstaller'),
-      mode: LaunchMode.externalApplication,
-    );
-    if (!ok) {
-      // 系统安装器缺失/协议失败：回退到打开下载页（GitHub releases）。
-      final uri = Uri.tryParse(info.url);
-      if (uri != null) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
+  /// Windows：下载 zip → 解压 → 退出后 .bat 等待进程结束、覆盖安装目录、重启。
+  Future<void> _autoUpdateWindows(String url, String version) async {
+    final tmp = Directory.systemTemp.path;
+    final zipPath = '$tmp\\xiaoli_update_$version.zip';
+    final extractDir = '$tmp\\xiaoli_update_$version';
+    final progress = ValueNotifier<double>(0);
+    final status = ValueNotifier<String>('准备下载…');
+    var dialogOpen = true;
+    void close() {
+      if (dialogOpen && mounted) {
+        dialogOpen = false;
+        Navigator.of(context).pop();
       }
+    }
+
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: const Text('自动更新中'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ValueListenableBuilder<double>(
+              valueListenable: progress,
+              builder: (_, v, __) =>
+                  LinearProgressIndicator(value: v > 0 ? v : null),
+            ),
+            const SizedBox(height: 12),
+            ValueListenableBuilder<String>(
+              valueListenable: status,
+              builder: (_, s, __) => Text(s, textAlign: TextAlign.center),
+            ),
+          ],
+        ),
+      ),
+    );
+    try {
+      if (!await _downloadInto(url, zipPath, progress, status)) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      status.value = '解压中…';
+      final ed = Directory(extractDir);
+      if (ed.existsSync()) ed.deleteSync(recursive: true);
+      ed.createSync(recursive: true);
+      final ps = await Process.run('powershell', [
+        '-NoProfile', '-Command',
+        'Expand-Archive -LiteralPath "$zipPath" -DestinationPath "$extractDir" -Force',
+      ]);
+      if (ps.exitCode != 0) {
+        status.value = '解压失败';
+        await Future<void>.delayed(const Duration(seconds: 2));
+        close();
+        return;
+      }
+      final exe = Platform.resolvedExecutable; // ...\Release\media_client.exe
+      final destDir = File(exe).parent.path; // ...\Release
+      status.value = '安装中…即将自动重启';
+      final batPath = '$tmp\\xiaoli_update.bat';
+      final bat = '@echo off\r\n'
+          'set PID=%1\r\n'
+          ':wait\r\n'
+          'tasklist /FI "PID eq %PID%" 2>nul | find "%PID%" >nul\r\n'
+          'if not errorlevel 1 (\r\n'
+          '  timeout /t 1 /nobreak >nul\r\n'
+          '  goto wait\r\n'
+          ')\r\n'
+          'timeout /t 1 /nobreak >nul\r\n'
+          'xcopy /E /Y /I "$extractDir\\*" "$destDir\\" >nul\r\n'
+          'start "" "$exe"\r\n'
+          'del "%~f0"\r\n';
+      File(batPath).writeAsStringSync(bat);
+      await Process.start('cmd', ['/c', batPath, '$pid'],
+          mode: ProcessStartMode.detached);
+      await Future<void>.delayed(const Duration(milliseconds: 400));
+      exit(0); // 退出后脚本接管覆盖并重启
+    } catch (e) {
+      status.value = '自动更新失败：$e';
+      await Future<void>.delayed(const Duration(seconds: 2));
+      close();
+      _snack('自动更新失败，请用「前往下载」手动更新');
     }
   }
 
