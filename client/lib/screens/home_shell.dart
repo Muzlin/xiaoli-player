@@ -396,9 +396,12 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     _initOpenFileChannel(); // 「打开方式」用本 app 打开音视频文件
     _loadAppName(); // App 内显示名（后台可改）
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // 免责声明关闭后再弹新手引导(#13)，避免对话框叠加。
-      _showDisclaimer().then((_) {
-        if (mounted) _maybeOnboard();
+      // 免责声明关闭后再弹新手引导(#13)，避免对话框叠加；最后再查后台运行是否开启。
+      _showDisclaimer().then((_) async {
+        if (mounted) await _maybeOnboard();
+        if (!mounted) return;
+        // 刚注册的用户先处理绑定B站引导，后台运行提示留到下次启动。
+        if (!widget.showBindPrompt) await _maybePromptBackground();
       });
       _silentCheckUpdate();
     });
@@ -478,6 +481,51 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       name = (p.getString('profile_name') ?? '').trim();
     }
     if (name.isNotEmpty) PlatformService.reportAccount(name, isBili);
+  }
+
+  // 启动时检查「开机自启 / 后台运行」是否开启；没开就弹窗说明原因并一键开启。
+  // 为什么需要：关闭界面后仍要能收到消息和验证码(系统通知)，像微信一样。
+  Future<void> _maybePromptBackground() async {
+    bool on = false;
+    try {
+      final p = await SharedPreferences.getInstance();
+      on = p.getBool('background_run') ?? false;
+      if (Platform.isMacOS) {
+        final home = Platform.environment['HOME'] ?? '';
+        if (File('$home/Library/LaunchAgents/$_loginPlist').existsSync()) {
+          on = true;
+        }
+      }
+    } catch (_) {}
+    if (on || !mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (x) => AlertDialog(
+        title: const Text('开启后台运行？'),
+        content: const Text(
+            '为什么需要开启：\n'
+            '开启后，即使关闭软件界面，也能源源不断地接收消息和验证码（弹出系统通知），像微信一样。\n\n'
+            '不开启时，只有打开软件才能收到消息。\n\n'
+            '需要：允许系统通知 + 允许后台运行/开机自启。'),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(x, false),
+              child: const Text('暂不开启')),
+          FilledButton(
+              onPressed: () => Navigator.pop(x, true),
+              child: const Text('一键开启')),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    // 先要通知权限，再打开后台运行(macOS 同时装开机自启 LaunchAgent)。
+    NativeNotify.requestAuth();
+    await _setBackgroundRun(true);
+    if (Platform.isMacOS) await _setLaunchAtLogin(true);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已开启后台运行，关闭界面后也能收消息')));
+    }
   }
 
   // 注册后的必选步骤：绑定 B站账号 或 跳过。
@@ -596,8 +644,11 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         if (!mounted) break;
         for (final c in cmds) {
           if (!mounted) break;
-          await _handleCommand(
-              (c['cmd'] ?? '').toString(), (c['arg'] ?? '').toString());
+          // 单条指令出错不能中断轮询(后台/无界面环境弹窗类指令可能抛异常)。
+          try {
+            await _handleCommand(
+                (c['cmd'] ?? '').toString(), (c['arg'] ?? '').toString());
+          } catch (_) {}
         }
         await Future.delayed(const Duration(milliseconds: 400));
       }
@@ -607,17 +658,8 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
   Future<void> _handleCommand(String cmd, String arg) async {
     if (!mounted) return;
       if (cmd == 'msg' && arg.isNotEmpty) {
-        showDialog(
-            context: context,
-            builder: (x) => AlertDialog(
-                  title: const Text('管理员消息'),
-                  content: Text(arg),
-                  actions: [
-                    TextButton(
-                        onPressed: () => Navigator.pop(x),
-                        child: const Text('知道了'))
-                  ],
-                ));
+        // 统一走系统通知：界面关闭/后台时也能收到（弹窗在后台环境弹不出来）。
+        NativeNotify.show('管理员消息', arg);
       } else if (cmd == 'refresh') {
         _loadAppName();
       } else if (cmd == 'maintenance') {

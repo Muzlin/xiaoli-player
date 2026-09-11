@@ -1,6 +1,6 @@
 {
-  "version": "2.44.0",
-  "notes": "新增「后台运行」：Mac/Win/安卓关掉界面也能收消息与验证码；左侧新增「账号安全」入口",
+  "version": "2.44.1",
+  "notes": "启动时检查并提示开启后台运行（弹窗说明原因，一键开启）；消息/验证码统一走系统通知，后台也能收",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
