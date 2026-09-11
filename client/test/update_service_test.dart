@@ -18,31 +18,31 @@ void main() {
       final mock = MockClient((req) async {
         if (req.url.path == '/version') {
           return _json(
-              '{"version":"2.44.0","notes":"测试新版","download_url":"https://dl.example/app.zip"}',
+              '{"version":"2.45.0","notes":"测试新版","download_url":"https://dl.example/app.zip"}',
               200);
         }
         return _json('{}', 404);
       });
       final info = await UpdateService(mock).check();
       expect(info, isNotNull);
-      expect(info!.version, '2.44.0');
+      expect(info!.version, '2.45.0');
     });
   });
 
-  testWidgets('平台数据过期(2.40.0) + raw公网2.44.0 → 走公网发现更新', (tester) async {
+  testWidgets('平台数据过期(2.40.0) + raw公网2.45.0 → 走公网发现更新', (tester) async {
     await tester.runAsync(() async {
       final mock = MockClient((req) async {
         if (req.url.path == '/version') {
           return _json('{"version":"2.40.0","notes":"过期"}', 200);
         }
         if (req.url.host.contains('raw.githubusercontent.com')) {
-          return _json('{"version":"2.44.0","notes":"公网新版"}', 200);
+          return _json('{"version":"2.45.0","notes":"公网新版"}', 200);
         }
         return _json('{}', 404);
       });
       final info = await UpdateService(mock).check();
       expect(info, isNotNull);
-      expect(info!.version, '2.44.0');
+      expect(info!.version, '2.45.0');
     });
   });
 

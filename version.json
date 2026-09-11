@@ -1,6 +1,6 @@
 {
-  "version": "2.43.0",
-  "notes": "新增账号系统：注册/登录（30天免登录）、验证码登录、忘记密码、绑定手机号；B站登录态随账号跨设备自动同步", 
+  "version": "2.44.0",
+  "notes": "新增「后台运行」：Mac/Win/安卓关掉界面也能收消息与验证码；左侧新增「账号安全」入口",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

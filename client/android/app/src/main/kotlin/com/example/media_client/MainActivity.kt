@@ -37,6 +37,7 @@ class MainActivity : FlutterActivity() {
     private var installerChannel: MethodChannel? = null
     private var openChannel: MethodChannel? = null
     private var notifChannel: MethodChannel? = null
+    private var bgChannel: MethodChannel? = null
     private var qrChannel: MethodChannel? = null
     private var pendingQrScanResult: MethodChannel.Result? = null
     // 直播采集(摄像头)：与 screenChannel(xiaoli/screen_lock，锁屏广播用) 是完全不同的东西，
@@ -121,6 +122,18 @@ class MainActivity : FlutterActivity() {
                     val title = call.argument<String>("title") ?: "新消息"
                     val body = call.argument<String>("body") ?: ""
                     showNotification(title, body)
+                    result.success(true)
+                }
+                else -> result.notImplemented()
+            }
+        }
+        // 常驻后台：开关前台服务(带常驻通知)，界面关闭后仍能收消息。
+        bgChannel = MethodChannel(messenger, "xiaoli/background")
+        bgChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "setEnabled" -> {
+                    val on = call.argument<Boolean>("on") ?: false
+                    if (on) BackgroundService.start(this) else BackgroundService.stop(this)
                     result.success(true)
                 }
                 else -> result.notImplemented()
@@ -391,6 +404,33 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    /** 后台运行开：界面销毁也不销毁 Flutter 引擎，Dart 的轮询继续跑 → 关掉界面也能收消息。 */
+    private fun bgEnabled(): Boolean = try {
+        getSharedPreferences("FlutterSharedPreferences", MODE_PRIVATE)
+            .getBoolean("flutter.background_run", false)
+    } catch (_: Exception) {
+        false
+    }
+
+    override fun provideFlutterEngine(context: Context): FlutterEngine {
+        if (!bgEnabled()) {
+            sharedEngine = null
+            return FlutterEngine(context) // 后台运行关：普通行为，随 Activity 销毁
+        }
+        var e = sharedEngine
+        if (e == null) {
+            e = FlutterEngine(context)
+            sharedEngine = e
+        }
+        return e
+    }
+
+    override fun shouldDestroyEngineWithHost(): Boolean {
+        val bg = bgEnabled()
+        if (!bg) sharedEngine = null
+        return !bg
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         handleShareIntent(intent)
@@ -567,5 +607,7 @@ class MainActivity : FlutterActivity() {
     companion object {
         private const val QR_SCAN_REQUEST_CODE = 4201
         private const val SCREEN_CAPTURE_REQUEST_CODE = 1003
+        @Volatile
+        var sharedEngine: FlutterEngine? = null
     }
 }

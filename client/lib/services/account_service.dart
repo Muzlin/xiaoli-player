@@ -12,6 +12,9 @@ class AccountService {
   static const tokenKey = 'acc_token';
   static const userKey = 'acc_user';
   static const phoneKey = 'acc_phone';
+  // 刚注册、还没选「绑定B站 / 跳过」时置 1：此期间不做 B站登录态云同步，
+  // 等用户在注册引导里做出选择后再处理。
+  static const biliPendingKey = 'acc_bili_pending';
 
   /// 依次尝试的服务器地址：本机(若在跑) → 隧道当前 → 内置兜底。
   static List<String> _bases() {
@@ -128,7 +131,7 @@ class AccountService {
 
   /// 登录/注册成功：持久化 token、账号名、手机号，并把账号主 uid 设为钱包 uid。
   static Future<void> applySession(Map<String, dynamic> d,
-      {String? token}) async {
+      {String? token, bool fresh = false}) async {
     final p = await SharedPreferences.getInstance();
     final t = token ?? d['token'];
     if (t is String && t.isNotEmpty) await p.setString(tokenKey, t);
@@ -138,11 +141,31 @@ class AccountService {
     if (uid is String && uid.isNotEmpty) {
       await PlatformService.setWalletUid(uid);
     }
-    // B站登录态随账号同步：登录响应里带就直接落到 HomeShell 用的 prefs。
+    // 新建账号：先不继承/同步本机 B站登录，等注册引导里选「绑定 / 跳过」；
+    // 普通登录：清掉标记，B站登录态随账号同步(登录响应里带就直接落盘)。
+    await p.setString(biliPendingKey, fresh ? '1' : '0');
+    // 新用户没有名称：默认显示名就是手机号(可在个人资料里改)。
+    if (fresh) {
+      final cur = (p.getString('profile_name') ?? '').trim();
+      final ph = d['phone'];
+      if (cur.isEmpty && ph is String && ph.isNotEmpty) {
+        await p.setString('profile_name', ph);
+      }
+    }
     final bili = d['bili'];
-    if (bili is String && bili.isNotEmpty) {
+    if (!fresh && bili is String && bili.isNotEmpty) {
       await p.setString('bili_cookie', bili);
     }
+  }
+
+  static Future<bool> biliChoicePending() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getString(biliPendingKey) == '1';
+  }
+
+  static Future<void> clearBiliPending() async {
+    final p = await SharedPreferences.getInstance();
+    await p.setString(biliPendingKey, '0');
   }
 
   /// 退出登录：清本地 token/账号信息/钱包 uid/B站登录，服务器账号数据不动。

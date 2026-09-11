@@ -11,6 +11,9 @@
     <!-- 直播屏幕采集(MediaProjection)：需前台服务承载录屏会话 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+    <!-- 常驻后台收消息：前台服务(dataSync) + 开机自启 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
     <application
         android:label="小李播放器"
         android:name="${applicationName}"
@@ -68,6 +71,21 @@
             android:name=".ScreenCaptureService"
             android:foregroundServiceType="mediaProjection"
             android:exported="false"/>
+        <!-- 常驻后台：带常驻通知，保持消息/验证码轮询 -->
+        <service
+            android:name=".BackgroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false"/>
+        <!-- 开机/升级后自启常驻服务(仅当用户开过后台运行) -->
+        <receiver
+            android:name=".BootReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED"/>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+            </intent-filter>
+        </receiver>
         <!-- 自动更新：把下载好的 apk 交给系统安装器（Android 7+ 需 content:// URI） -->
         <provider
             android:name="androidx.core.content.FileProvider"

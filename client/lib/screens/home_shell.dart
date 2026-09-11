@@ -177,6 +177,7 @@ class _HomeShellState extends State<HomeShell> {
   final Map<String, String> _platUploader = {}; // 平台曲目 key→上传者名(#8 作者作品页)
   final List<BiliUser> _accountResults = []; // 搜索到的 B站账号
   static const _winChannel = MethodChannel('xiaoli/window');
+  static const _bgChannel = MethodChannel('xiaoli/background'); // 安卓常驻后台服务
   bool _launchAtLogin = false;
   bool _backgroundRun = false;
   bool _hotkey = false;
@@ -237,6 +238,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
   String _profileName = ''; // 本机显示名
   String _accUser = ''; // 小李账号用户名(登录后)
   String _accPhone = ''; // 小李账号绑定手机号
+  bool _biliPending = false; // 刚注册、待选「绑定B站/跳过」(此期间不同步B站登录态)
   String? _profileAvatar; // 本机头像路径
   final Map<String, List<int>> _bookmarks = {}; // 书签 track key→秒列表
   int _seekStep = 10; // 快进/快退步长
@@ -401,10 +403,10 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       _silentCheckUpdate();
     });
     if (widget.showBindPrompt) {
-      // 注册完成后引导绑定手机号 / B站账号。
+      // 注册完成后：必选「绑定B站账号 / 跳过」，再引导绑定手机号。
       WidgetsBinding.instance.addPostFrameCallback((_) async {
         await Future.delayed(const Duration(milliseconds: 600));
-        if (mounted) _openAccountPage();
+        if (mounted) _handleFreshBili();
       });
     }
     _checkBan(); // 启动登记设备 + 查封号
@@ -476,6 +478,80 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       name = (p.getString('profile_name') ?? '').trim();
     }
     if (name.isNotEmpty) PlatformService.reportAccount(name, isBili);
+  }
+
+  // 注册后的必选步骤：绑定 B站账号 或 跳过。
+  // 跳过 = 不自动登录 B站：清掉本机 B站登录并确保账号云端也为空。
+  Future<void> _handleFreshBili() async {
+    final prefs = await SharedPreferences.getInstance();
+    final hasLocal = (prefs.getString(_biliCookieKey) ?? '').isNotEmpty;
+    bool doBind = false;
+    if (hasLocal && _biliLoggedIn) {
+      final name = (_account?['uname'] ?? '').toString();
+      doBind = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (x) => AlertDialog(
+              title: const Text('绑定B站账号'),
+              content: Text('检测到本机已登录 B站'
+                  '${name.isEmpty ? '' : '（$name）'}' + '。\n\n'
+                  '绑定：换设备登录本账号会同步该 B站登录状态；\n'
+                  '跳过：不自动登录 B站，并退出本机当前 B站登录（之后可在设置里重登）。'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(x, false),
+                    child: const Text('跳过')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(x, true),
+                    child: const Text('绑定')),
+              ],
+            ),
+          ) ??
+          false;
+    } else {
+      final go = await showDialog<bool>(
+            context: context,
+            barrierDismissible: false,
+            builder: (x) => AlertDialog(
+              title: const Text('绑定B站账号'),
+              content: const Text('绑定 B站账号后搜索更稳定，换设备登录同账号会自动同步 B站登录状态。\n\n'
+                  '现在绑定，或先跳过（之后可在 设置 → B站登录 里再绑）。'),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(x, false),
+                    child: const Text('跳过')),
+                FilledButton(
+                    onPressed: () => Navigator.pop(x, true),
+                    child: const Text('去绑定')),
+              ],
+            ),
+          ) ??
+          false;
+      if (go) {
+        await _showBiliLogin();
+        doBind = (prefs.getString(_biliCookieKey) ?? '').isNotEmpty;
+      }
+    }
+    if (doBind) {
+      await AccountService.bindBili(prefs.getString(_biliCookieKey) ?? '');
+    } else {
+      await prefs.remove(_biliCookieKey);
+      try {
+        _bili.setUserCookie('');
+      } catch (_) {}
+      await AccountService.bindBili('');
+      if (mounted) {
+        setState(() {
+          _biliLoggedIn = false;
+          _account = null;
+        });
+      }
+    }
+    await AccountService.clearBiliPending();
+    _loadAccSession();
+    // 手机号还没绑定则引导(用户名是手机号时注册已自动绑定，不会再弹)。
+    final phone = await AccountService.currentPhone();
+    if (phone.isEmpty && mounted) await _openAccountPage();
   }
 
   // 账号与安全：账号/手机号/B站/改密码/退出登录。
@@ -2946,10 +3022,12 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         }
       }
     } catch (_) {}
+    // 刚注册、还没选「绑定B站/跳过」→ 先不做云同步，等注册引导里选完再处理。
+    _biliPending = await AccountService.biliChoicePending();
     var c = prefs.getString(_biliCookieKey) ?? '';
     // 账号云同步：登录账号后，B站登录态以服务端为准(换设备登录同账号自动同步)。
     try {
-      final synced = await AccountService.getBili();
+      final synced = _biliPending ? null : await AccountService.getBili();
       if (synced != null && synced.isNotEmpty) {
         if (synced != c) {
           await prefs.setString(_biliCookieKey, synced);
@@ -4118,6 +4196,14 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: IconButton(
+              tooltip: '账号安全',
+              onPressed: _openAccountPage,
+              icon: const Icon(Icons.security, color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
               tooltip: '创作中心',
               onPressed: _openCreatorCenter,
               icon: const Icon(Icons.workspace_premium_outlined,
@@ -4540,19 +4626,34 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
   }
 
   Future<void> _loadAppSettings() async {
-    if (!Platform.isMacOS && !Platform.isWindows) return;
     var login = false, bg = false, hk = false, hidehk = false, bq = false;
+    SharedPreferences? p0;
+    try {
+      p0 = await SharedPreferences.getInstance();
+      bg = p0.getBool('background_run') ?? false; // 后台运行：所有平台统一持久化
+    } catch (_) {}
     if (Platform.isMacOS) {
       try {
         final home = Platform.environment['HOME'] ?? '';
         login = File('$home/Library/LaunchAgents/$_loginPlist').existsSync();
+        if (login) bg = true; // 已有 LaunchAgent 常驻 → 视为后台运行开
       } catch (_) {}
     }
-    try {
-      bg = (await _winChannel.invokeMethod<bool>('backgroundRunEnabled')) ??
-          false;
-      bq = (await _winChannel.invokeMethod<bool>('blockQuitEnabled')) ?? false;
-    } catch (_) {}
+    if (Platform.isMacOS || Platform.isWindows) {
+      try {
+        bq = (await _winChannel.invokeMethod<bool>('blockQuitEnabled')) ?? false;
+      } catch (_) {}
+      // 把持久化的后台运行状态应用到原生(Windows 关窗只最小化)。
+      try {
+        await _winChannel.invokeMethod('setBackgroundRun', {'on': bg});
+      } catch (_) {}
+    }
+    if (Platform.isAndroid && bg) {
+      // 上次开了后台运行：进程起来就把常驻服务拉起来。
+      try {
+        await _bgChannel.invokeMethod('setEnabled', {'on': true});
+      } catch (_) {}
+    }
     if (Platform.isMacOS) {
       try {
         hk = (await _winChannel.invokeMethod<bool>('hotkeyEnabled')) ?? false;
@@ -4561,7 +4662,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       } catch (_) {}
     }
     try {
-      final p = await SharedPreferences.getInstance();
+      final p = p0 ?? await SharedPreferences.getInstance();
       _hotkeyCode = p.getInt('hotkey_code') ?? _hotkeyCode;
       _hotkeyMods = p.getInt('hotkey_mods') ?? _hotkeyMods;
       _hotkeyLabel = p.getString('hotkey_label') ?? _hotkeyLabel;
@@ -4621,8 +4722,38 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
 
   Future<void> _setBackgroundRun(bool on) async {
     setState(() => _backgroundRun = on);
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('background_run', on); // 持久化，重启后仍生效
+    if (Platform.isMacOS) {
+      // macOS：后台运行 = 装 LaunchAgent(开机常驻 + KeepAlive 崩溃/强退自动拉起)
+      await _setLaunchAtLogin(on);
+    } else if (Platform.isWindows) {
+      try {
+        await _winChannel.invokeMethod('setBackgroundRun', {'on': on});
+      } catch (_) {}
+      await _setWindowsAutoStart(on);
+    } else if (Platform.isAndroid) {
+      // 安卓：前台常驻服务(带通知栏)，被系统回收后靠它保活收消息。
+      try {
+        await _bgChannel.invokeMethod('setEnabled', {'on': on});
+      } catch (_) {}
+    }
+  }
+
+  // Windows 开机自启：写 HKCU\...\Run 一条带 --bg 的启动项(免管理员权限)。
+  Future<void> _setWindowsAutoStart(bool on) async {
+    if (!Platform.isWindows) return;
+    const key = r'HKCU\Software\Microsoft\Windows\CurrentVersion\Run';
     try {
-      await _winChannel.invokeMethod('setBackgroundRun', {'on': on});
+      if (on) {
+        final exe = Platform.resolvedExecutable;
+        await Process.run('reg', [
+          'add', key, '/v', 'XiaoliPlayer', '/t', 'REG_SZ',
+          '/d', '"$exe" --bg', '/f',
+        ]);
+      } else {
+        await Process.run('reg', ['delete', key, '/v', 'XiaoliPlayer', '/f']);
+      }
     } catch (_) {}
   }
 
@@ -7479,17 +7610,20 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
             onChanged: (v) =>
                 _guard('launchAtLogin', () => _setLaunchAtLogin(v)),
           ),
-        if (Platform.isMacOS || Platform.isWindows) ...[
-          SwitchListTile(
-            secondary: const Icon(Icons.dark_mode_outlined),
-            title: const Text('后台运行'),
-            subtitle: Text(
-                Platform.isWindows ? '关窗口只最小化到任务栏，不退出' : '关窗口不退出，点 Dock 图标重新打开',
-                style: const TextStyle(fontSize: 12)),
-            value: _backgroundRun,
-            onChanged: (v) =>
-                _guard('backgroundRun', () => _setBackgroundRun(v)),
-          ),
+        SwitchListTile(
+          secondary: const Icon(Icons.dark_mode_outlined),
+          title: const Text('后台运行'),
+          subtitle: Text(
+              Platform.isWindows
+                  ? '关窗口不退出，常驻后台收消息（开机自启）'
+                  : Platform.isAndroid
+                      ? '常驻后台收消息（通知栏常驻；系统省电优化仍可能限制）'
+                      : '关窗口不退出，点 Dock 图标重新打开，后台收消息',
+              style: const TextStyle(fontSize: 12)),
+          value: _backgroundRun,
+          onChanged: (v) => _guard('backgroundRun', () => _setBackgroundRun(v)),
+        ),
+        if (Platform.isMacOS || Platform.isWindows)
           SwitchListTile(
             secondary: const Icon(Icons.block),
             title: const Text('禁止退出'),
@@ -7500,7 +7634,6 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
             onChanged: (v) =>
                 _guard('blockQuit', () => _setBlockQuit(v)),
           ),
-        ],
         if (Platform.isMacOS) ...[
           ListTile(
             leading: const Icon(Icons.keyboard_outlined),

@@ -121,7 +121,7 @@ class _LoginPageState extends State<LoginPage> {
       _setErr('两次输入的密码不一致');
       return;
     }
-    final d = await AccountService.register(_u.text.trim(), _p.text);
+    final d = await AccountService.register(_phone.text.trim(), _p.text);
     await _finish(d, justRegistered: true);
   }
 
@@ -148,7 +148,7 @@ class _LoginPageState extends State<LoginPage> {
     if (!mounted) return;
     if (d['ok'] == true) {
       _setErr(null);
-      await AccountService.applySession(d);
+      await AccountService.applySession(d, fresh: justRegistered);
       if (mounted) widget.onLoggedIn(d, justRegistered);
     } else {
       _setErr('${d['error'] ?? '操作失败'}');
@@ -349,7 +349,7 @@ class _LoginPageState extends State<LoginPage> {
               style: TextStyle(color: Colors.white54)),
         ),
       ] else ...[
-        _tf(_u, '用户名', maxLength: 20),
+        _tf(_u, '手机号', keyboard: TextInputType.phone, maxLength: 20),
         _tf(_p, '密码', obscure: true, maxLength: 64),
         const SizedBox(height: 4),
         _primary('登录', () => _run(_doLogin)),
@@ -374,14 +374,15 @@ class _LoginPageState extends State<LoginPage> {
 
   List<Widget> _registerForm() {
     return [
-      _tf(_u, '用户名(2-20位，中文/字母/数字/下划线)', maxLength: 20),
+      _tf(_phone, '手机号(即账号)',
+          keyboard: TextInputType.phone, maxLength: 20),
       _tf(_p, '密码(至少6位)', obscure: true, maxLength: 64),
       _tf(_p2, '确认密码', obscure: true, maxLength: 64),
       const SizedBox(height: 4),
       _primary('注册并进入', () => _run(_doRegister)),
       const Padding(
         padding: EdgeInsets.only(top: 8),
-        child: Text('注册后可绑定手机号和 B站账号，换设备登录自动同步',
+        child: Text('账号即手机号，无需另起用户名；注册后可绑定 B站账号或跳过',
             style: TextStyle(color: Colors.white38, fontSize: 12),
             textAlign: TextAlign.center),
       ),
