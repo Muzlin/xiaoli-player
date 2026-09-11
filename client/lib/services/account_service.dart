@@ -208,6 +208,28 @@ class AccountService {
     await _post('/acc-bind-bili', {'tk': t, 'cookie': cookie});
   }
 
+  // ===== 扫码登录 =====
+  /// 电脑端(申请方)：创建扫码登录会话，返回 {qid, secret, url}。
+  static Future<Map<String, dynamic>> qrNew() async {
+    final d = await _post('/acc-qr-new', {});
+    return d ?? _netErr();
+  }
+
+  /// 电脑端轮询会话状态；confirmed 时带 token/uid/u，可直接 applySession。
+  static Future<Map<String, dynamic>?> qrPoll(String qid, String secret) =>
+      _get('/acc-qr-poll?qid=${Uri.encodeComponent(qid)}'
+          '&secret=${Uri.encodeComponent(secret)}');
+
+  /// 已登录设备扫码确认：传 qid+secret(或整段 content 由服务端解析)。
+  static Future<Map<String, dynamic>> qrConfirm(
+      {required String qid, required String secret, String content = ''}) async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录账号再扫码'};
+    final d = await _post('/acc-qr-scan',
+        {'tk': t, 'qid': qid, 'secret': secret, 'content': content});
+    return d ?? _netErr();
+  }
+
   /// 拉账号云端的 B站登录态。未登录/失败返回 null。
   static Future<String?> getBili() async {
     final t = await token();

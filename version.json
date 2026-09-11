@@ -1,6 +1,6 @@
 {
-  "version": "2.44.1",
-  "notes": "启动时检查并提示开启后台运行（弹窗说明原因，一键开启）；消息/验证码统一走系统通知，后台也能收",
+  "version": "2.45.0",
+  "notes": "新增扫码登录：电脑(mac/win)登录页显示二维码，已登录的手机/电脑版扫一扫即可登录同账号（含B站态）",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

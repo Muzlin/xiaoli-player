@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import '../services/account_service.dart';
 import '../services/platform_service.dart';
@@ -17,7 +18,7 @@ class LoginPage extends StatefulWidget {
   State<LoginPage> createState() => _LoginPageState();
 }
 
-enum _Mode { login, register, forgot }
+enum _Mode { login, register, forgot, qr }
 
 class _LoginPageState extends State<LoginPage> {
   static const _accent = Color(0xFFF26B21);
@@ -38,6 +39,13 @@ class _LoginPageState extends State<LoginPage> {
   Timer? _cdTimer;
   int _cd = 0;
 
+  // 扫码登录(电脑端显示二维码，手机/已登录设备扫码确认)
+  String? _qrUrl;
+  String? _qrQid;
+  String? _qrSecret;
+  bool _qrExpired = false;
+  Timer? _qrTimer;
+
   @override
   void initState() {
     super.initState();
@@ -47,6 +55,7 @@ class _LoginPageState extends State<LoginPage> {
   @override
   void dispose() {
     _cdTimer?.cancel();
+    _qrTimer?.cancel();
     _u.dispose();
     _p.dispose();
     _p2.dispose();
@@ -167,6 +176,109 @@ class _LoginPageState extends State<LoginPage> {
     }
   }
 
+  // ===== 扫码登录 =====
+  void _enterQr() {
+    setState(() {
+      _mode = _Mode.qr;
+      _err = null;
+    });
+    _startQr();
+  }
+
+  Future<void> _startQr() async {
+    _qrTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _qrUrl = null;
+      _qrExpired = false;
+      _err = null;
+    });
+    final d = await AccountService.qrNew();
+    if (!mounted) return;
+    if (d['ok'] != true) {
+      setState(() => _err = '${d['error'] ?? '生成二维码失败'}');
+      return;
+    }
+    setState(() {
+      _qrQid = '${d['qid']}';
+      _qrSecret = '${d['secret']}';
+      _qrUrl = '${d['url']}';
+    });
+    _qrTimer = Timer.periodic(const Duration(seconds: 2), (t) async {
+      final q = await AccountService.qrPoll(_qrQid!, _qrSecret!);
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      if (q == null) return;
+      if (q['ok'] == true && q['status'] == 'confirmed') {
+        t.cancel();
+        await AccountService.applySession(q);
+        if (mounted) widget.onLoggedIn(q, false);
+      } else if (q['status'] == 'expired') {
+        t.cancel();
+        setState(() => _qrExpired = true);
+      }
+    });
+  }
+
+  List<Widget> _qrForm() {
+    final img = _qrUrl == null
+        ? null
+        : 'https://api.qrserver.com/v1/create-qr-code/?size=260x260'
+            '&data=${Uri.encodeComponent(_qrUrl!)}';
+    return [
+      const Text('用已登录的「小李播放器」手机版 / 电脑版扫一扫：',
+          style: TextStyle(color: Colors.white70, fontSize: 13),
+          textAlign: TextAlign.center),
+      const SizedBox(height: 12),
+      Center(
+        child: Container(
+          width: 260,
+          height: 260,
+          color: Colors.white,
+          alignment: Alignment.center,
+          child: _qrExpired
+              ? const Text('二维码已过期',
+                  style: TextStyle(color: Colors.black54))
+              : (img == null
+                  ? const CircularProgressIndicator()
+                  : Image.network(img,
+                      width: 244,
+                      height: 244,
+                      errorBuilder: (_, __, ___) => const Text('二维码加载失败',
+                          style: TextStyle(color: Colors.black54)))),
+        ),
+      ),
+      const SizedBox(height: 10),
+      Text(_qrExpired ? '请点击「刷新二维码」重试' : '扫码后请在手机上确认登录',
+          style: const TextStyle(color: Colors.white54, fontSize: 12),
+          textAlign: TextAlign.center),
+      Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          TextButton(
+              onPressed: _startQr,
+              child: const Text('刷新二维码',
+                  style: TextStyle(color: Colors.white54))),
+          TextButton(
+              onPressed: () {
+                _qrTimer?.cancel();
+                setState(() => _mode = _Mode.login);
+              },
+              child: const Text('返回密码登录',
+                  style: TextStyle(color: Colors.white54))),
+        ],
+      ),
+      const Padding(
+        padding: EdgeInsets.only(top: 4),
+        child: Text('扫码登录会把该账号登录到这台电脑，并同步 B站登录态',
+            style: TextStyle(color: Colors.white38, fontSize: 11),
+            textAlign: TextAlign.center),
+      ),
+    ];
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -238,6 +350,7 @@ class _LoginPageState extends State<LoginPage> {
         if (_mode == _Mode.login) ..._loginForm(),
         if (_mode == _Mode.register) ..._registerForm(),
         if (_mode == _Mode.forgot) ..._forgotForm(),
+        if (_mode == _Mode.qr) ..._qrForm(),
         if (_err != null) ...[
           const SizedBox(height: 12),
           Text(_err!,
@@ -353,6 +466,13 @@ class _LoginPageState extends State<LoginPage> {
         _tf(_p, '密码', obscure: true, maxLength: 64),
         const SizedBox(height: 4),
         _primary('登录', () => _run(_doLogin)),
+        if (Platform.isMacOS || Platform.isWindows)
+          TextButton.icon(
+            onPressed: _enterQr,
+            icon: const Icon(Icons.qr_code_2, color: Colors.white54),
+            label: const Text('扫码登录',
+                style: TextStyle(color: Colors.white54)),
+          ),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [

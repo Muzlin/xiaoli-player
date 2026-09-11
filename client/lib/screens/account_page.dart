@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../services/account_service.dart';
+import '../services/native_qr.dart';
 import '../restart_widget.dart';
 
 /// 账号与安全：显示注册账号、绑定手机号、绑定/管理 B站账号、修改密码、退出登录。
@@ -125,6 +126,40 @@ class _AccountPageState extends State<AccountPage> {
     _toast(d['ok'] == true ? '密码已修改' : '${d['error'] ?? '修改失败'}');
   }
 
+  // 用本机(已登录)扫电脑登录页的二维码，把当前账号登录到那台电脑。
+  Future<void> _scanToLogin() async {
+    if (!NativeQr.supported) return;
+    final mode = await showDialog<String>(
+      context: context,
+      builder: (x) => SimpleDialog(
+        title: const Text('扫码方式'),
+        children: [
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(x, 'cam'),
+              child: const Text('用相机扫码')),
+          SimpleDialogOption(
+              onPressed: () => Navigator.pop(x, 'img'),
+              child: const Text('从图片识别')),
+        ],
+      ),
+    );
+    if (mode == null) return;
+    final content =
+        mode == 'cam' ? await NativeQr.scan() : await NativeQr.scanImage();
+    if (content == null || content.isEmpty) return;
+    final uri = Uri.tryParse(content);
+    final qid = uri?.queryParameters['qid'] ?? '';
+    final secret = uri?.queryParameters['secret'] ?? '';
+    if (qid.isEmpty || secret.isEmpty) {
+      _toast('这不是登录二维码');
+      return;
+    }
+    final d = await AccountService.qrConfirm(
+        qid: qid, secret: secret, content: content);
+    if (!mounted) return;
+    _toast(d['ok'] == true ? '已确认，电脑端即将登录' : '${d['error'] ?? '确认失败'}');
+  }
+
   Future<void> _logout() async {
     final ok = await showDialog<bool>(
       context: context,
@@ -201,6 +236,15 @@ class _AccountPageState extends State<AccountPage> {
                   trailing: const Icon(Icons.chevron_right),
                   onTap: _changePassword,
                 ),
+                if (NativeQr.supported)
+                  ListTile(
+                    leading: const Icon(Icons.qr_code_scanner),
+                    title: const Text('扫一扫登录其它设备'),
+                    subtitle: const Text('扫电脑登录页的二维码，把本账号登录到那台电脑',
+                        style: TextStyle(fontSize: 12)),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: _scanToLogin,
+                  ),
                 const Divider(),
                 ListTile(
                   leading: const Icon(Icons.logout, color: Colors.red),
