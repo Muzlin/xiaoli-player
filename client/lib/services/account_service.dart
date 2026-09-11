@@ -12,6 +12,9 @@ class AccountService {
   static const tokenKey = 'acc_token';
   static const userKey = 'acc_user';
   static const phoneKey = 'acc_phone';
+  // 上次登录账号的 uid：退出登录后仍保留，登录页据此继续接收验证码
+  // (验证码是推到账号 uid 的，原注册设备即使退登也能收)。
+  static const lastUidKey = 'acc_last_uid';
   // 刚注册、还没选「绑定B站 / 跳过」时置 1：此期间不做 B站登录态云同步，
   // 等用户在注册引导里做出选择后再处理。
   static const biliPendingKey = 'acc_bili_pending';
@@ -124,6 +127,12 @@ class AccountService {
     return p.getString(phoneKey) ?? '';
   }
 
+  /// 上次登录的账号 uid(退登后仍在)，登录页用它收验证码。
+  static Future<String> lastUid() async {
+    final p = await SharedPreferences.getInstance();
+    return p.getString(lastUidKey) ?? '';
+  }
+
   /// 用本地 token 恢复登录态(30 天有效)。成功返回会话并把账号主 uid 写回钱包。
   static Future<Map<String, dynamic>?> restore() async {
     final t = await token();
@@ -147,6 +156,7 @@ class AccountService {
     final uid = d['uid'];
     if (uid is String && uid.isNotEmpty) {
       await PlatformService.setWalletUid(uid);
+      await p.setString(lastUidKey, uid);
     }
     // 新建账号：先不继承/同步本机 B站登录，等注册引导里选「绑定 / 跳过」；
     // 普通登录：清掉标记，B站登录态随账号同步(登录响应里带就直接落盘)。
@@ -178,6 +188,9 @@ class AccountService {
   /// 退出登录：清本地 token/账号信息/钱包 uid/B站登录，服务器账号数据不动。
   static Future<void> logout() async {
     final p = await SharedPreferences.getInstance();
+    // 先记住账号 uid，退登后登录页仍能收验证码。
+    final uid = p.getString('wallet_uid') ?? '';
+    if (uid.isNotEmpty) await p.setString(lastUidKey, uid);
     await p.remove(tokenKey);
     await p.remove(userKey);
     await p.remove(phoneKey);
@@ -234,6 +247,27 @@ class AccountService {
     if (t == null) return {'ok': false, 'error': '请先登录账号再扫码'};
     final d = await _post('/acc-qr-scan',
         {'tk': t, 'qid': qid, 'secret': secret, 'content': content});
+    return d ?? _netErr();
+  }
+
+  // ===== 充值（微信支付） =====
+  /// 服务器 /version（含充值是否开启/汇率）。
+  static Future<Map<String, dynamic>?> versionInfo() => _get('/version');
+
+  /// 创建充值订单。[yuan] 元，返回 {out_trade_no, points, mock, code_url}。
+  static Future<Map<String, dynamic>> rechargeCreate(int yuan) async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录账号'};
+    final d = await _post('/recharge-create', {'tk': t, 'yuan': yuan});
+    return d ?? _netErr();
+  }
+
+  static Future<Map<String, dynamic>?> rechargeStatus(String otn) =>
+      _get('/recharge-status?out_trade_no=${Uri.encodeComponent(otn)}');
+
+  /// 模拟支付（仅服务端 recharge_mock=true 时可用，用于不接微信时测试）。
+  static Future<Map<String, dynamic>> rechargeMockPay(String otn) async {
+    final d = await _post('/recharge-mock-pay', {'out_trade_no': otn});
     return d ?? _netErr();
   }
 

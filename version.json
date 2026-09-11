@@ -1,6 +1,6 @@
 {
-  "version": "2.46.0",
-  "notes": "手机版登录简化：只输手机号即可登录（不存在则直接建号）；用密码/验证码登录可在登录页切换",
+  "version": "2.47.0",
+  "notes": "新增充值：1元=10积分，微信支付(电脑端可用本机登录的微信直接付/手机扫码)；后台可看充值订单",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

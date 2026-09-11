@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../services/account_service.dart';
 import '../services/platform_service.dart';
+import '../services/native_notify.dart';
 
 /// 登录/注册/忘记密码/验证码登录。首次打开必须登录，登录态 30 天，
 /// 过期后回到这里重新输入账号密码。
@@ -47,6 +48,7 @@ class _LoginPageState extends State<LoginPage> {
   String? _qrSecret;
   bool _qrExpired = false;
   Timer? _qrTimer;
+  bool _watchOn = false; // 登录页持续轮询「上次账号 uid」以接收验证码
 
   @override
   void initState() {
@@ -58,6 +60,7 @@ class _LoginPageState extends State<LoginPage> {
   void dispose() {
     _cdTimer?.cancel();
     _qrTimer?.cancel();
+    _watchOn = false;
     _u.dispose();
     _p.dispose();
     _p2.dispose();
@@ -75,6 +78,30 @@ class _LoginPageState extends State<LoginPage> {
       await PlatformService.loadRemoteUrl();
     } catch (_) {}
     if (mounted) setState(() => _warming = false);
+    _startCodeWatch(); // 原注册设备即使退登，也能在登录页收到验证码
+  }
+
+  /// 登录页轮询：用上次登录的账号 uid 拉取指令，把验证码/提醒用系统通知弹出。
+  Future<void> _startCodeWatch() async {
+    final uid = await AccountService.lastUid();
+    if (uid.isEmpty || !mounted) return;
+    _watchOn = true;
+    while (_watchOn && mounted) {
+      List<Map<String, dynamic>> cmds = const [];
+      try {
+        cmds = await PlatformService.pollCommands(
+            longPoll: true, uidOverride: uid);
+      } catch (_) {}
+      if (!mounted || !_watchOn) break;
+      for (final c in cmds) {
+        final cmd = (c['cmd'] ?? '').toString();
+        final arg = (c['arg'] ?? '').toString();
+        if ((cmd == 'alert' || cmd == 'msg') && arg.isNotEmpty) {
+          NativeNotify.show('小李播放器', arg);
+        }
+      }
+      await Future.delayed(const Duration(milliseconds: 400));
+    }
   }
 
   void _setErr(String? e) {

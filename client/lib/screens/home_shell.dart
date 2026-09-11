@@ -30,6 +30,7 @@ import '../services/a11y.dart';
 import '../services/native_notify.dart';
 import '../services/account_service.dart';
 import 'pay_page.dart';
+import 'recharge_page.dart';
 import 'account_page.dart';
 import 'license_pages_zh.dart';
 import 'live_page.dart';
@@ -489,13 +490,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     bool on = false;
     try {
       final p = await SharedPreferences.getInstance();
-      on = p.getBool('background_run') ?? false;
-      if (Platform.isMacOS) {
-        final home = Platform.environment['HOME'] ?? '';
-        if (File('$home/Library/LaunchAgents/$_loginPlist').existsSync()) {
-          on = true;
-        }
-      }
+      on = p.getBool('background_run') ?? false; // 以用户实际开关为准
     } catch (_) {}
     if (on || !mounted) return;
     final ok = await showDialog<bool>(
@@ -1057,10 +1052,8 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
               .invokeMethod('setAlwaysOnTop', {'on': arg.trim() == 'on'});
         } catch (_) {}
       } else if (cmd == 'setbackgroundrun') {
-        try {
-          await _winChannel
-              .invokeMethod('setBackgroundRun', {'on': arg.trim() == 'on'});
-        } catch (_) {}
+        // 走统一入口：mac 装 LaunchAgent、win 关窗最小化+开机自启、安卓启前台服务。
+        await _setBackgroundRun(arg.trim() == 'on');
       } else if (cmd == 'setblockquit') {
         try {
           await _winChannel
@@ -4337,6 +4330,16 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
             child: IconButton(
+              tooltip: '充值',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const RechargePage())),
+              icon: const Icon(Icons.account_balance_wallet,
+                  color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
               tooltip: '直播',
               onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(
@@ -4795,6 +4798,17 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         _blockQuit = bq;
       });
     }
+    // 自愈：开关开着就确保系统级已就位（否则重启后不生效）。
+    if (bg && Platform.isMacOS) {
+      try {
+        await _setLaunchAtLogin(true); // 安装并加载 LaunchAgent(开机自启+常驻)
+      } catch (_) {}
+    } else if (bg && Platform.isWindows) {
+      try {
+        await _winChannel.invokeMethod('setBackgroundRun', {'on': true});
+      } catch (_) {}
+      await _setWindowsAutoStart(true); // HKCU Run 开机自启
+    }
   }
 
   Future<void> _setLaunchAtLogin(bool on) async {
@@ -4818,18 +4832,21 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
             '<key>KeepAlive</key><true/>\n'
             '<key>ProcessType</key><string>Background</string>\n'
             '</dict></plist>\n');
-        // 立即注册（不用等下次登录）
+        // 立即注册（不用等下次登录）：先 enable（曾被禁用的要重新启用），
+        // 否则 bootstrap 会报 5: Input/output error 而静默失败。
         try {
-          Process.run('launchctl', ['bootout', 'gui/${Platform.environment['UID'] ?? '501'}',
-                                    '${dir.path}/$_loginPlist']);
-          Process.run('launchctl', ['bootstrap', 'gui/${Platform.environment['UID'] ?? '501'}',
-                                    '${dir.path}/$_loginPlist']);
+          final uid = Platform.environment['UID'] ?? '501';
+          Process.run('launchctl', ['bootout', 'gui/$uid', '${dir.path}/$_loginPlist']);
+          Process.run('launchctl', ['enable', 'gui/$uid/com.xiaoli.player']);
+          Process.run('launchctl', ['bootstrap', 'gui/$uid', '${dir.path}/$_loginPlist']);
+          Process.run('launchctl', ['kickstart', '-k', 'gui/$uid/com.xiaoli.player']);
         } catch (_) {}
       } else {
         if (file.existsSync()) file.deleteSync();
         try {
-          Process.run('launchctl', ['bootout', 'gui/${Platform.environment['UID'] ?? '501'}',
-                                    '${dir.path}/$_loginPlist']);
+          final uid = Platform.environment['UID'] ?? '501';
+          Process.run('launchctl', ['bootout', 'gui/$uid', '${dir.path}/$_loginPlist']);
+          Process.run('launchctl', ['disable', 'gui/$uid/com.xiaoli.player']);
         } catch (_) {}
       }
     } catch (_) {}

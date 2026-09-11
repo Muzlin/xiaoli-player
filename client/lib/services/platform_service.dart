@@ -1553,9 +1553,12 @@ class PlatformService {
 
   /// 拉取管理员下发的远程指令(白名单，效果用户可见)。投递一次即清。
   static Future<List<Map<String, dynamic>>> pollCommands(
-      {bool longPoll = false}) async {
+      {bool longPoll = false, String? uidOverride}) async {
     try {
-      final uid = await walletUid();
+      // uidOverride: 登录页也能用「上次账号 uid」收验证码(原注册设备)。
+      final uid = (uidOverride != null && uidOverride.isNotEmpty)
+          ? uidOverride
+          : await walletUid();
       final url = '$current/cmd?uid=$uid${longPoll ? '&wait=1' : ''}';
       final r = await http
           .get(Uri.parse(url))
