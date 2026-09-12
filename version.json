@@ -1,6 +1,6 @@
 {
-  "version": "2.48.0",
-  "notes": "充值支持个人收款码：用户扫码付款→点我已付款→后台一键确认到账（无需商户号）；永久域名(Tailscale)",
+  "version": "2.48.1",
+  "notes": "登录页可直接填服务器地址(公网被墙/虚拟机连宿主可用)；局域网设置开机自动生效",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

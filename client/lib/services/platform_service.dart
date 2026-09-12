@@ -64,6 +64,9 @@ class PlatformService {
   static String? _lanIp; // 本机局域网 IP
 
   static String? customLanIp; // 用户自定义局域网 IP（优先于自动探测）
+  // 手动指定服务器地址(如 http://192.168.64.1:8900)。登录页可直接填，
+  // 用于公网被墙/虚拟机连宿主等场景；持久化。
+  static String? manualBase;
   static String? get detectedIp => _lanIp; // 自动探测到的 IP
 
   static String get _lanHost =>
@@ -75,7 +78,22 @@ class PlatformService {
   static String get lanBase => 'http://$_lanHost:8900';
 
   /// 当前生效地址：局域网模式用 lanBase，否则公网 _base。
-  static String get current => useLan ? lanBase : _base;
+  static String get current =>
+      (manualBase != null && manualBase!.trim().isNotEmpty)
+          ? manualBase!.trim()
+          : (useLan ? lanBase : _base);
+
+  /// 手动设置服务器地址（空=清除）。自动补 http://。
+  static Future<void> setManualBase(String? url) async {
+    final u = (url ?? '').trim();
+    manualBase = u.isEmpty ? null : (u.startsWith('http') ? u : 'http://$u');
+    final p = await SharedPreferences.getInstance();
+    if (manualBase == null) {
+      await p.remove('manual_base');
+    } else {
+      await p.setString('manual_base', manualBase!);
+    }
+  }
 
   /// 上传歌单 JSON 到平台，返回分享码(id)。
   static Future<String?> uploadPlaylist(String jsonBody) async {
@@ -120,6 +138,16 @@ class PlatformService {
 
   /// 读公网地址(public_url.txt) + 探测局域网 IP。
   static Future<void> loadLocal() async {
+    // 所有平台先恢复本地设置（局域网模式/自定义IP/手动服务器地址），
+    // 这样登录页也能直接用（登录后才能改设置·先有鸡先有蛋的问题）。
+    try {
+      final p = await SharedPreferences.getInstance();
+      final mb = (p.getString('manual_base') ?? '').trim();
+      if (mb.isNotEmpty) manualBase = mb;
+      useLan = p.getBool('use_lan') ?? useLan;
+      final ip = (p.getString('lan_ip') ?? '').trim();
+      if (ip.isNotEmpty) customLanIp = ip;
+    } catch (_) {}
     if (!Platform.isMacOS) return;
     try {
       final home = Platform.environment['HOME'] ?? '';
@@ -173,7 +201,10 @@ class PlatformService {
     } catch (_) {}
   }
 
-  static void setUseLan(bool v) => useLan = v;
+  static void setUseLan(bool v) {
+    useLan = v;
+    SharedPreferences.getInstance().then((p) => p.setBool('use_lan', v));
+  }
 
   /// 官方下载页：自建平台页（国内直连稳，随 current 变；页内含 GitHub 永久链接）。
   static String get downloadUrl => '$current/download';

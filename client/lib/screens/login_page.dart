@@ -390,8 +390,44 @@ class _LoginPageState extends State<LoginPage> {
           Text(_err!,
               style: const TextStyle(color: Color(0xFFFF6B6B), fontSize: 13)),
         ],
+        const SizedBox(height: 6),
+        TextButton.icon(
+          onPressed: _setServer,
+          icon: const Icon(Icons.dns_outlined,
+              size: 16, color: Colors.white38),
+          label: Text('服务器：${PlatformService.current}',
+              style: const TextStyle(color: Colors.white38, fontSize: 11),
+              overflow: TextOverflow.ellipsis),
+        ),
       ],
     );
+  }
+
+  // 登录页直接设置服务器地址（公网被墙/虚拟机连宿主等场景）。
+  Future<void> _setServer() async {
+    final c = TextEditingController(
+        text: PlatformService.manualBase ?? PlatformService.current);
+    final url = await showDialog<String>(
+      context: context,
+      builder: (x) => AlertDialog(
+        title: const Text('服务器地址'),
+        content: TextField(
+          controller: c,
+          decoration: const InputDecoration(
+              hintText: '如 http://192.168.64.1:8900\n留空=恢复自动'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(x), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(x, c.text.trim()),
+              child: const Text('保存')),
+        ],
+      ),
+    );
+    if (url == null) return;
+    await PlatformService.setManualBase(url);
+    if (mounted) setState(() {});
   }
 
   Widget _segBtn(String label, bool active, VoidCallback onTap) {
