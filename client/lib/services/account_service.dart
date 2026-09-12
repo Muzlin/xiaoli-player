@@ -22,10 +22,15 @@ class AccountService {
   /// 依次尝试的服务器地址：本机(若在跑) → 隧道当前 → 内置兜底。
   static List<String> _bases() {
     final s = <String>[];
+    final mb = PlatformService.manualBase;
+    if (mb != null && mb.trim().isNotEmpty) s.add(mb.trim());
     if (PlatformService.localServerUp) s.add('http://localhost:8900');
     s.add(PlatformService.current);
     s.add(PlatformService.baseUrl);
     s.add('http://localhost:8900');
+    // 虚拟机(UTM 等)连宿主：共享网段的宿主地址通常是 x.x.x.1，端口仍是 8900。
+    s.add('http://192.168.64.1:8900');
+    s.add('http://10.0.2.2:8900'); // QEMU/VirtualBox NAT 里的宿主
     return s.toSet().toList();
   }
 

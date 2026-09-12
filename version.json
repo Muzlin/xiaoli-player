@@ -1,6 +1,6 @@
 {
-  "version": "2.48.1",
-  "notes": "登录页可直接填服务器地址(公网被墙/虚拟机连宿主可用)；局域网设置开机自动生效",
+  "version": "2.48.2",
+  "notes": "登录页自动兜底局域网(虚拟机连宿主)：无需设置，公网连不上时自动试 192.168.64.1:8900 等宿主地址",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
