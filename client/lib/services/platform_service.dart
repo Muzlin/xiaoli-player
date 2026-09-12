@@ -48,10 +48,10 @@ class PlatformVideo {
 
 /// 本应用的共享视频平台：上传到自建服务器（cloudflared 公网），别人跨设备可搜可看。
 class PlatformService {
-  /// 平台公网地址（cloudflared 隧道）。隧道重启会变——所有平台启动时都会
-  /// 从 [_remotePointer] 拉取当前地址，所以这里只是首次启动的兜底初值。
+  /// 平台公网地址。已改为 Tailscale Funnel 的【永久固定】地址，不再随隧道换址；
+  /// 仍会在启动时从 [_remotePointer] 拉一次（万一以后换域名，可自愈）。
   static const baseUrl =
-      'https://internal-apt-saturn-navy.trycloudflare.com';
+      'https://linmacbook-pro.tail3fcaa7.ts.net';
   static String _base = baseUrl; // 公网地址（运行时由 GitHub 指针/本机文件刷新）
   static bool localServerUp = false; // 本机在跑服务器→播放走 localhost(快)，不绕隧道
 

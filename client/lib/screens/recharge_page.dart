@@ -19,8 +19,10 @@ class _RechargePageState extends State<RechargePage> {
   int _yuan = 10;
   bool _busy = false;
   String? _err;
-  String? _otn, _codeUrl;
+  String? _otn, _codeUrl, _payQr;
+  String _mode = 'mock';
   bool _paid = false;
+  bool _confirming = false;
   int _points = 0;
   Timer? _poll;
   final _custom = TextEditingController();
@@ -46,6 +48,7 @@ class _RechargePageState extends State<RechargePage> {
       _mock = d?['recharge_mock'] == true;
       _rate = (d?['recharge_rate'] as num?)?.toInt() ?? 10;
       _min = (d?['recharge_min'] as num?)?.toInt() ?? 1;
+      _mode = '${d?['recharge_mode'] ?? (_mock ? 'mock' : 'wechat')}';
       if (_yuan < _min) _yuan = _min;
     });
   }
@@ -75,8 +78,11 @@ class _RechargePageState extends State<RechargePage> {
       _otn = '${d['out_trade_no']}';
       _points = (d['points'] as num?)?.toInt() ?? _yuan * _rate;
       _codeUrl = '${d['code_url'] ?? ''}';
+      _mode = '${d['mode'] ?? _mode}';
+      _payQr = '${d['pay_qr'] ?? ''}';
+      _confirming = false;
     });
-    if (!_mock && _codeUrl != null && _codeUrl!.isNotEmpty) {
+    if (_mode == 'wechat' && _codeUrl != null && _codeUrl!.isNotEmpty) {
       await _openWeChat();
     }
     _startPoll();
@@ -107,6 +113,20 @@ class _RechargePageState extends State<RechargePage> {
         _toast('充值成功，+$_points 积分');
       }
     });
+  }
+
+  Future<void> _markPaid() async {
+    final otn = _otn;
+    if (otn == null) return;
+    final d = await AccountService.rechargeMarkPaid(otn);
+    if (!mounted) return;
+    if (d['ok'] == true) {
+      setState(() => _confirming = true);
+      _toast('已提交，等待管理员确认到账');
+      _startPoll();
+    } else {
+      _toast('${d['error'] ?? '失败'}');
+    }
   }
 
   Future<void> _mockPay() async {
@@ -195,12 +215,35 @@ class _RechargePageState extends State<RechargePage> {
             const Text('请完成支付：',
                 style: TextStyle(fontWeight: FontWeight.bold)),
             const SizedBox(height: 8),
-            if (_mock)
+            if (_mode == 'mock')
               FilledButton(
                 onPressed: _mockPay,
                 child: const Text('模拟支付（测试）'),
               ),
-            if (!_mock && _codeUrl != null && _codeUrl!.isNotEmpty) ...[
+            if (_mode == 'manual') ...[
+              if (_payQr != null && _payQr!.isNotEmpty)
+                Center(
+                  child: Image.network(_payQr!, width: 220, height: 220,
+                      errorBuilder: (_, __, ___) =>
+                          const Text('收款码加载失败')),
+                )
+              else
+                const Text('管理员尚未设置收款码，请稍后再试',
+                    style: TextStyle(color: Colors.orange)),
+              const SizedBox(height: 8),
+              Text('请扫码转账 $_yuan 元（备注：${_otn ?? ''}）',
+                  style: const TextStyle(fontSize: 12, color: Colors.black54),
+                  textAlign: TextAlign.center),
+              const SizedBox(height: 8),
+              if (!_confirming)
+                FilledButton(
+                    onPressed: _markPaid,
+                    child: const Text('我已付款'))
+              else
+                const Text('已提交，等待管理员确认到账…',
+                    style: TextStyle(color: Colors.orange)),
+            ],
+            if (_mode == 'wechat' && _codeUrl != null && _codeUrl!.isNotEmpty) ...[
               Center(
                 child: FutureBuilder(
                   future: NativeQr.generate(_codeUrl!),

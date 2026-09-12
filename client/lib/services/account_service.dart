@@ -271,6 +271,15 @@ class AccountService {
     return d ?? _netErr();
   }
 
+  /// 手动模式：用户付完点「我已付款」→ 订单转待确认，等管理员确认到账。
+  static Future<Map<String, dynamic>> rechargeMarkPaid(String otn) async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录账号'};
+    final d = await _post('/recharge-mark-paid',
+        {'tk': t, 'out_trade_no': otn});
+    return d ?? _netErr();
+  }
+
   /// 拉账号云端的 B站登录态。未登录/失败返回 null。
   static Future<String?> getBili() async {
     final t = await token();

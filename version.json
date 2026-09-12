@@ -1,6 +1,6 @@
 {
-  "version": "2.47.0",
-  "notes": "新增充值：1元=10积分，微信支付(电脑端可用本机登录的微信直接付/手机扫码)；后台可看充值订单",
+  "version": "2.48.0",
+  "notes": "充值支持个人收款码：用户扫码付款→点我已付款→后台一键确认到账（无需商户号）；永久域名(Tailscale)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
