@@ -148,6 +148,27 @@ class PlatformService {
       final ip = (p.getString('lan_ip') ?? '').trim();
       if (ip.isNotEmpty) customLanIp = ip;
     } catch (_) {}
+    // 虚拟机/内网：服务器(8900)常常就在宿主/网关上(x.x.x.1)。
+    // 启动探测一下，通了就自动改走局域网直连(所有接口)，免公网被墓问题。
+    if (!useLan && (manualBase == null || manualBase!.trim().isEmpty)) {
+      for (final cand in const ['192.168.64.1', '10.0.2.2']) {
+        try {
+          final r = await http
+              .get(Uri.parse('http://$cand:8900/health'))
+              .timeout(const Duration(milliseconds: 900));
+          if (r.statusCode == 200) {
+            customLanIp = cand;
+            useLan = true;
+            try {
+              final p = await SharedPreferences.getInstance();
+              await p.setBool('use_lan', true);
+              await p.setString('lan_ip', cand);
+            } catch (_) {}
+            break;
+          }
+        } catch (_) {}
+      }
+    }
     if (!Platform.isMacOS) return;
     try {
       final home = Platform.environment['HOME'] ?? '';

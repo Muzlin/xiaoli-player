@@ -1,6 +1,6 @@
 {
-  "version": "2.48.4",
-  "notes": "Windows 自保护改为默认开启：任务管理器「结束任务」提示拒绝访问；可在设置里关闭",
+  "version": "2.48.5",
+  "notes": "启动自动探测宿主(192.168.64.1/10.0.2.2:8900)并直连：虚拟机里不再因公网被墓而连不上",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
