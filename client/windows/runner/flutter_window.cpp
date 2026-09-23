@@ -3,8 +3,13 @@
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
 
+#include <aclapi.h>
+#include <windows.h>
+
 #include <optional>
 #include <variant>
+
+#pragma comment(lib, "advapi32.lib")
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -83,6 +88,34 @@ void FlutterWindow::SetMini(bool on) {
   }
 }
 
+// 自保护：在当前进程对象的安全描述符上加一条「拒绝 EVERYONE 的 PROCESS_TERMINATE」。
+// 之后任务管理器「结束任务」会拿到 ACCESS_DENIED(拒绝访问)；本进程自己 exit() 不受影响。
+void FlutterWindow::SetKillProtection(bool on) {
+  HANDLE hProc = GetCurrentProcess();
+  PSECURITY_DESCRIPTOR pSD = nullptr;
+  PACL pOldDacl = nullptr;
+  PACL pNewDacl = nullptr;
+  if (GetSecurityInfo(hProc, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                      nullptr, nullptr, &pOldDacl, nullptr, &pSD) !=
+      ERROR_SUCCESS) {
+    return;
+  }
+  EXPLICIT_ACCESSW ea = {};
+  ea.grfAccessPermissions = PROCESS_TERMINATE;
+  ea.grfAccessMode = on ? DENY_ACCESS : REVOKE_ACCESS;
+  ea.grfInheritance = NO_INHERITANCE;
+  ea.Trustee.TrusteeForm = TRUSTEE_IS_NAME;
+  ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+  ea.Trustee.ptstrName = const_cast<LPWSTR>(L"EVERYONE");
+  if (SetEntriesInAclW(1, &ea, pOldDacl, &pNewDacl) == ERROR_SUCCESS) {
+    SetSecurityInfo(hProc, SE_KERNEL_OBJECT, DACL_SECURITY_INFORMATION,
+                    nullptr, nullptr, pNewDacl, nullptr);
+    kill_protect_ = on;
+  }
+  if (pNewDacl) LocalFree(pNewDacl);
+  if (pSD) LocalFree(pSD);
+}
+
 void FlutterWindow::HandleWindowCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
@@ -125,6 +158,11 @@ void FlutterWindow::HandleWindowCall(
     result->Success();
   } else if (method == "blockQuitEnabled") {
     result->Success(flutter::EncodableValue(block_quit_));
+  } else if (method == "setKillProtect") {
+    SetKillProtection(get_bool("on"));
+    result->Success();
+  } else if (method == "killProtectEnabled") {
+    result->Success(flutter::EncodableValue(kill_protect_));
   } else if (method == "hotkeyEnabled" || method == "hideHotkeyEnabled") {
     // 全局热键在 Windows 端暂未实现（macOS Carbon 键码不通用）。
     result->Success(flutter::EncodableValue(false));

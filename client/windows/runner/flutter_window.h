@@ -34,6 +34,9 @@ class FlutterWindow : public Win32Window {
   // 小窗播放：缩成右下角置顶悬浮小窗 / 还原。
   void SetMini(bool on);
 
+  // 自保护：拒绝任务管理器「结束任务」(TerminateProcess 返回拒绝访问)。
+  void SetKillProtection(bool on);
+
   // The project to run.
   flutter::DartProject project_;
 
@@ -48,6 +51,7 @@ class FlutterWindow : public Win32Window {
   bool background_run_ = false;  // 关窗时最小化而非退出
   bool block_quit_ = false;      // 禁止退出
   bool mini_ = false;            // 当前是否小窗
+  bool kill_protect_ = false;    // 拒绝任务管理器结束任务
   RECT saved_frame_ = {0, 0, 0, 0};  // 进小窗前的窗口矩形
 };
 

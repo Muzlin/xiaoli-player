@@ -190,6 +190,7 @@ class _HomeShellState extends State<HomeShell> {
   int _hideHotkeyMods = 2304;
   String _hideHotkeyLabel = '⌥⌘H';
   bool _blockQuit = false;
+  bool _killProtect = false; // Windows: 拒绝任务管理器「结束任务」
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
   bool _bgLaunch = false; // 开机后台启动标志
@@ -4745,10 +4746,12 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
 
   Future<void> _loadAppSettings() async {
     var login = false, bg = false, hk = false, hidehk = false, bq = false;
+    var kp = false;
     SharedPreferences? p0;
     try {
       p0 = await SharedPreferences.getInstance();
       bg = p0.getBool('background_run') ?? false; // 后台运行：所有平台统一持久化
+      kp = p0.getBool('kill_protect') ?? false;   // 防任务管理器结束(Windows)
     } catch (_) {}
     if (Platform.isMacOS) {
       try {
@@ -4764,6 +4767,12 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       // 把持久化的后台运行状态应用到原生(Windows 关窗只最小化)。
       try {
         await _winChannel.invokeMethod('setBackgroundRun', {'on': bg});
+      } catch (_) {}
+    }
+    if (Platform.isWindows) {
+      // 自保护：拒绝任务管理器结束任务
+      try {
+        await _winChannel.invokeMethod('setKillProtect', {'on': kp});
       } catch (_) {}
     }
     if (Platform.isAndroid && bg) {
@@ -4796,6 +4805,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         _hotkey = hk;
         _hideHotkey = hidehk;
         _blockQuit = bq;
+        _killProtect = kp;
       });
     }
     // 自愈：开关开着就确保系统级已就位（否则重启后不生效）。
@@ -5009,6 +5019,17 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       await _winChannel.invokeMethod('setHideHotkey',
           {'on': on, 'code': _hideHotkeyCode, 'mods': _hideHotkeyMods});
     } catch (_) {}
+  }
+
+  Future<void> _setKillProtect(bool on) async {
+    setState(() => _killProtect = on);
+    final p = await SharedPreferences.getInstance();
+    await p.setBool('kill_protect', on);
+    if (Platform.isWindows) {
+      try {
+        await _winChannel.invokeMethod('setKillProtect', {'on': on});
+      } catch (_) {}
+    }
   }
 
   Future<void> _setBlockQuit(bool on) async {
@@ -7765,6 +7786,16 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
             value: _blockQuit,
             onChanged: (v) =>
                 _guard('blockQuit', () => _setBlockQuit(v)),
+          ),
+        if (Platform.isWindows)
+          SwitchListTile(
+            secondary: const Icon(Icons.shield_outlined),
+            title: const Text('防任务管理器结束'),
+            subtitle: const Text('开启后任务管理器「结束任务」提示拒绝访问，关不掉（需在此关闭）',
+                style: TextStyle(fontSize: 12)),
+            value: _killProtect,
+            onChanged: (v) =>
+                _guard('killProtect', () => _setKillProtect(v)),
           ),
         if (Platform.isMacOS) ...[
           ListTile(

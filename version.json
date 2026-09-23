@@ -1,6 +1,6 @@
 {
-  "version": "2.48.2",
-  "notes": "登录页自动兜底局域网(虚拟机连宿主)：无需设置，公网连不上时自动试 192.168.64.1:8900 等宿主地址",
+  "version": "2.48.3",
+  "notes": "Windows 自保护：开启后任务管理器「结束任务」提示拒绝访问(关不掉)；设置里可关闭",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
