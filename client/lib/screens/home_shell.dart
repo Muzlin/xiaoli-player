@@ -190,7 +190,7 @@ class _HomeShellState extends State<HomeShell> {
   int _hideHotkeyMods = 2304;
   String _hideHotkeyLabel = '⌥⌘H';
   bool _blockQuit = false;
-  bool _killProtect = false; // Windows: 拒绝任务管理器「结束任务」
+  bool _killProtect = true; // Windows: 拒绝任务管理器「结束任务」(默认开)
   String? _pwdHash;
   final Set<String> _protectedKeys = {};
   bool _bgLaunch = false; // 开机后台启动标志
@@ -4751,7 +4751,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     try {
       p0 = await SharedPreferences.getInstance();
       bg = p0.getBool('background_run') ?? false; // 后台运行：所有平台统一持久化
-      kp = p0.getBool('kill_protect') ?? false;   // 防任务管理器结束(Windows)
+      kp = p0.getBool('kill_protect') ?? true;   // 防任务管理器结束(Windows)
     } catch (_) {}
     if (Platform.isMacOS) {
       try {
