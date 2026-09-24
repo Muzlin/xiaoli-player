@@ -1,6 +1,6 @@
 {
-  "version": "2.48.6",
-  "notes": "自动更新改为从本服务器下载安装包(局域网/Tailscale 都通)，不再因 GitHub 直连失败",
+  "version": "2.48.7",
+  "notes": "Windows 自保护改为启动即生效(登录页也无法用任务管理器结束)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

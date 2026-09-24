@@ -1,5 +1,8 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'screens/home_shell.dart';
 import 'screens/login_page.dart';
 import 'services/account_service.dart';
@@ -79,7 +82,19 @@ class _AuthGateState extends State<_AuthGate> {
     _boot();
   }
 
+  // Windows：一启动就开启自保护(登录前也拒绝任务管理器结束)，避免"登录页还能被关"。
+  Future<void> _applyKillProtection() async {
+    if (!Platform.isWindows) return;
+    try {
+      final p = await SharedPreferences.getInstance();
+      final on = p.getBool('kill_protect') ?? true; // 默认开
+      await const MethodChannel('xiaoli/window')
+          .invokeMethod('setKillProtect', {'on': on});
+    } catch (_) {}
+  }
+
   Future<void> _boot() async {
+    await _applyKillProtection();
     try {
       await PlatformService.loadLocal();
     } catch (_) {}
