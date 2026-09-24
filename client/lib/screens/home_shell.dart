@@ -3436,12 +3436,18 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
 
   /// 一键自动更新：macOS=下载zip替换重启；Android=系统安装器；Windows=系统MSIX更新。
   Future<void> _autoUpdate(UpdateInfo info) async {
-    // 统一从 GitHub Releases 最新资产下载：服务器 /dl/ 里的包会过期，
-    // 之前因此把用户"更新"回旧版(下到的还是 2.39.57)。info.url 是直链时优先。
-    final u = info.url;
-    final url = (u.endsWith('.zip') || u.endsWith('.apk'))
-        ? u
-        : UpdateService.latestAssetUrl;
+    // 从【本服务器】下载安装包(局域网/Tailscale 都通，避免 GitHub 直连失败)；
+    // 服务器没托管时再退回 GitHub 最新资产。
+    final base = PlatformService.current;
+    var url = '';
+    if (Platform.isMacOS) {
+      url = '$base/dl/xiaoli-mac.zip';
+    } else if (Platform.isAndroid) {
+      url = '$base/dl/xiaoli-android.apk';
+    } else if (Platform.isWindows) {
+      url = '$base/dl/xiaoli-win.zip';
+    }
+    if (url.isEmpty) url = UpdateService.latestAssetUrl;
     if (Platform.isMacOS) {
       await _autoUpdateMac(url, info.version);
     } else if (Platform.isAndroid) {

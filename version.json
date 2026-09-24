@@ -1,6 +1,6 @@
 {
-  "version": "2.48.5",
-  "notes": "启动自动探测宿主(192.168.64.1/10.0.2.2:8900)并直连：虚拟机里不再因公网被墓而连不上",
+  "version": "2.48.6",
+  "notes": "自动更新改为从本服务器下载安装包(局域网/Tailscale 都通)，不再因 GitHub 直连失败",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
