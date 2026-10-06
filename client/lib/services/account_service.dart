@@ -31,6 +31,8 @@ class AccountService {
     // 虚拟机(UTM 等)连宿主：共享网段的宿主地址通常是 x.x.x.1，端口仍是 8900。
     s.add('http://192.168.64.1:8900');
     s.add('http://10.0.2.2:8900'); // QEMU/VirtualBox NAT 里的宿主
+    s.add('http://10.10.10.61:8900');   // 本机 Mac 局域网 IP
+    s.add('http://100.116.249.16:8900'); // 本机 Mac Tailscale IP
     return s.toSet().toList();
   }
 
@@ -83,6 +85,12 @@ class AccountService {
 
   static Future<Map<String, dynamic>> login(String u, String p) async {
     final d = await _post('/acc-login', {'u': u, 'p': p});
+    return d ?? _netErr();
+  }
+
+  /// 管理员快捷入口：账号 potato + 管理密码 → 返回后台地址(url)。
+  static Future<Map<String, dynamic>> adminLogin(String u, String p) async {
+    final d = await _post('/acc-admin-login', {'u': u, 'p': p});
     return d ?? _netErr();
   }
 

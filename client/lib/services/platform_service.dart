@@ -151,7 +151,7 @@ class PlatformService {
     // 虚拟机/内网：服务器(8900)常常就在宿主/网关上(x.x.x.1)。
     // 启动探测一下，通了就自动改走局域网直连(所有接口)，免公网被墓问题。
     if (!useLan && (manualBase == null || manualBase!.trim().isEmpty)) {
-      for (final cand in const ['192.168.64.1', '10.0.2.2']) {
+      for (final cand in const ['192.168.64.1', '10.0.2.2', '10.10.10.61', '100.116.249.16']) {
         try {
           final r = await http
               .get(Uri.parse('http://$cand:8900/health'))

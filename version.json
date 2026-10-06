@@ -1,6 +1,6 @@
 {
-  "version": "2.48.7",
-  "notes": "Windows 自保护改为启动即生效(登录页也无法用任务管理器结束)",
+  "version": "2.49.0",
+  "notes": "登录页新增管理员入口：账号 potato + 管理密码，直接打开后台管理台",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

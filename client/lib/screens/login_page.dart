@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/account_service.dart';
 import '../services/platform_service.dart';
 import '../services/native_notify.dart';
@@ -148,10 +149,31 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _doLogin() async {
+    // 管理员快捷入口：账号 potato + 管理密码 → 直接打开后台(经济管理台网页)
+    if (!_useCode && _u.text.trim().toLowerCase() == 'potato') {
+      final d = await AccountService.adminLogin(_u.text.trim(), _p.text);
+      if (!mounted) return;
+      if (d['ok'] == true) {
+        final uri = Uri.tryParse('${PlatformService.current}${d['url']}');
+        if (uri != null) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
+        if (mounted) _toast('已打开后台管理台');
+      } else {
+        _setErr('${d['error'] ?? '账号或密码错误'}');
+      }
+      return;
+    }
     final d = _useCode
         ? await AccountService.codeLogin(_phone.text.trim(), _code.text.trim())
         : await AccountService.login(_u.text.trim(), _p.text);
     await _finish(d, justRegistered: false);
+  }
+
+  void _toast(String s) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
+    }
   }
 
   Future<void> _doQuickLogin() async {
