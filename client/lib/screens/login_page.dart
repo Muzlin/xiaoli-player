@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../services/account_service.dart';
 import '../services/platform_service.dart';
 import '../services/native_notify.dart';
+import 'admin_console_page.dart';
 
 /// 登录/注册/忘记密码/验证码登录。首次打开必须登录，登录态 30 天，
 /// 过期后回到这里重新输入账号密码。
@@ -154,11 +154,9 @@ class _LoginPageState extends State<LoginPage> {
       final d = await AccountService.adminLogin(_u.text.trim(), _p.text);
       if (!mounted) return;
       if (d['ok'] == true) {
-        final uri = Uri.tryParse('${PlatformService.current}${d['url']}');
-        if (uri != null) {
-          await launchUrl(uri, mode: LaunchMode.externalApplication);
-        }
-        if (mounted) _toast('已打开后台管理台');
+        final url = '${PlatformService.current}${d['url']}';
+        await Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => AdminConsolePage(url: url)));
       } else {
         _setErr('${d['error'] ?? '账号或密码错误'}');
       }
@@ -168,12 +166,6 @@ class _LoginPageState extends State<LoginPage> {
         ? await AccountService.codeLogin(_phone.text.trim(), _code.text.trim())
         : await AccountService.login(_u.text.trim(), _p.text);
     await _finish(d, justRegistered: false);
-  }
-
-  void _toast(String s) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(s)));
-    }
   }
 
   Future<void> _doQuickLogin() async {
