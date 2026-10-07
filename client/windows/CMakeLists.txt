@@ -2,6 +2,10 @@
 cmake_minimum_required(VERSION 3.14)
 project(media_client LANGUAGES CXX)
 
+# 兼容新版 MSVC(VS18 / 14.51+ 移除了 <experimental/coroutine> 与 /await)：
+# flutter_inappwebview_windows 等插件仍在使用，加这个宏抑制 STL1011 报错。
+add_compile_definitions(_SILENCE_EXPERIMENTAL_COROUTINE_DEPRECATION_WARNINGS)
+
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
 set(BINARY_NAME "media_client")

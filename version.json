@@ -1,6 +1,6 @@
 {
-  "version": "2.50.0",
-  "notes": "后台改为 App 内嵌窗口(mac/Win/安卓)：登录 potato + 管理密码后直接在 App 内打开管理台，不再弹密码",
+  "version": "2.50.1",
+  "notes": "后台 App 内嵌窗口(mac/Win/安卓)；修复 Windows 构建兼容",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
