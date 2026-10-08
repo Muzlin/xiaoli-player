@@ -293,6 +293,21 @@ class AccountService {
     return d ?? _netErr();
   }
 
+  // ===== 创作 AI 助手 =====
+  static Future<Map<String, dynamic>?> aiUsage() async {
+    final t = await token();
+    if (t == null) return null;
+    return _post('/ai/usage', {'tk': t});
+  }
+
+  static Future<Map<String, dynamic>> aiChat(
+      List<Map<String, String>> messages) async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录账号'};
+    final d = await _post('/ai/chat', {'tk': t, 'messages': messages});
+    return d ?? _netErr();
+  }
+
   /// 拉账号云端的 B站登录态。未登录/失败返回 null。
   static Future<String?> getBili() async {
     final t = await token();

@@ -1,6 +1,6 @@
 {
-  "version": "2.50.1",
-  "notes": "后台 App 内嵌窗口(mac/Win/安卓)；修复 Windows 构建兼容",
+  "version": "2.51.0",
+  "notes": "新增创作 AI 助手(侧栏入口)：每月 10 万 token，用完即不可用",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

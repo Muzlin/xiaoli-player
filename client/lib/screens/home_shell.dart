@@ -32,6 +32,7 @@ import '../services/account_service.dart';
 import 'pay_page.dart';
 import 'recharge_page.dart';
 import 'account_page.dart';
+import 'ai_page.dart';
 import 'license_pages_zh.dart';
 import 'live_page.dart';
 import '../player/player_holder.dart';
@@ -4314,6 +4315,15 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
               tooltip: '账号安全',
               onPressed: _openAccountPage,
               icon: const Icon(Icons.security, color: Colors.white60),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: IconButton(
+              tooltip: '创作AI助手',
+              onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const AiPage())),
+              icon: const Icon(Icons.auto_awesome, color: Colors.white60),
             ),
           ),
           Padding(
