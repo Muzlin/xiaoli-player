@@ -14,7 +14,7 @@ class _AiPageState extends State<AiPage> {
   final _scroll = ScrollController();
   final List<Map<String, String>> _msgs = []; // {role, content}
   bool _busy = false;
-  int _used = 0, _limit = 100000;
+  int _used = 0, _limit = 10000;
   String _model = '';
   bool _enabled = true;
   String? _err;
@@ -37,7 +37,7 @@ class _AiPageState extends State<AiPage> {
     if (!mounted || d == null) return;
     setState(() {
       _used = (d['used'] as num?)?.toInt() ?? 0;
-      _limit = (d['limit'] as num?)?.toInt() ?? 100000;
+      _limit = (d['limit'] as num?)?.toInt() ?? 10000;
       _model = '${d['model'] ?? ''}';
       _enabled = d['enabled'] != false;
     });
@@ -69,6 +69,54 @@ class _AiPageState extends State<AiPage> {
     _jump();
   }
 
+  Future<void> _makeVideo() async {
+    final c = TextEditingController();
+    final topic = await showDialog<String>(
+      context: context,
+      builder: (x) => AlertDialog(
+        title: const Text('AI 生成视频'),
+        content: TextField(
+          controller: c,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: '视频主题，如：健康饮食小知识'),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(x), child: const Text('取消')),
+          FilledButton(
+              onPressed: () => Navigator.pop(x, c.text.trim()),
+              child: const Text('生成')),
+        ],
+      ),
+    );
+    if (topic == null || topic.isEmpty || !mounted) return;
+    setState(() => _busy = true);
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const AlertDialog(
+        title: Text('正在生成视频…'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          LinearProgressIndicator(),
+          SizedBox(height: 12),
+          Text('AI 写脚本 + 配音 + 合成，约 1~2 分钟'),
+        ]),
+      ),
+    );
+    final d = await AccountService.aiVideo(topic);
+    if (mounted) Navigator.of(context).pop();
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (d['ok'] == true) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('已生成并发布：${d['title']}（去「视频」里看）'),
+        duration: const Duration(seconds: 5),
+      ));
+    } else {
+      setState(() => _err = '${d['error'] ?? '生成失败'}');
+    }
+  }
+
   void _jump() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scroll.hasClients) {
@@ -86,6 +134,11 @@ class _AiPageState extends State<AiPage> {
       appBar: AppBar(
         title: const Text('创作 AI 助手'),
         actions: [
+          IconButton(
+            tooltip: 'AI 生成视频并发布',
+            onPressed: _busy ? null : _makeVideo,
+            icon: const Icon(Icons.movie_creation_outlined),
+          ),
           Center(
             child: Padding(
               padding: const EdgeInsets.only(right: 12),
@@ -136,8 +189,25 @@ class _AiPageState extends State<AiPage> {
                 : ListView.builder(
                     controller: _scroll,
                     padding: const EdgeInsets.all(12),
-                    itemCount: _msgs.length,
+                    itemCount: _msgs.length + (_busy ? 1 : 0),
                     itemBuilder: (_, i) {
+                      if (i >= _msgs.length) {
+                        return const Padding(
+                          padding: EdgeInsets.symmetric(
+                              vertical: 10, horizontal: 8),
+                          child: Row(children: [
+                            SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2)),
+                            SizedBox(width: 8),
+                            Text('AI 思考中…',
+                                style: TextStyle(
+                                    fontSize: 13, color: Colors.black54)),
+                          ]),
+                        );
+                      }
                       final m = _msgs[i];
                       final me = m['role'] == 'user';
                       return Align(
