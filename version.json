@@ -1,6 +1,6 @@
 {
-  "version": "2.52.0",
-  "notes": "创作AI可生成视频并发布到平台；后台AI助手可改后台；AI接本机模型(可配DeepSeek等)",
+  "version": "2.53.0",
+  "notes": "AI助手改腾讯元宝风格；菜单栏新增独立AI助手分类；用户AI改为每日10000token；AI接入32B(qwen2.5)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

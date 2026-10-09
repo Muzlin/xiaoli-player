@@ -4317,13 +4317,37 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
               icon: const Icon(Icons.security, color: Colors.white60),
             ),
           ),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 12),
+            child: Divider(color: Colors.white12, height: 16),
+          ),
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
-            child: IconButton(
-              tooltip: '创作AI助手',
-              onPressed: () => Navigator.of(context).push(
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => Navigator.of(context).push(
                   MaterialPageRoute<void>(builder: (_) => const AiPage())),
-              icon: const Icon(Icons.auto_awesome, color: Colors.white60),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      gradient: LinearGradient(
+                          colors: [Color(0xFF2B7BFF), Color(0xFF00C2C7)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight),
+                    ),
+                    child: const Icon(Icons.auto_awesome,
+                        color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(height: 3),
+                  const Text('AI助手',
+                      style: TextStyle(fontSize: 10, color: Colors.white70)),
+                ],
+              ),
             ),
           ),
           Padding(
