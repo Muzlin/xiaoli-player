@@ -46,14 +46,14 @@ class AccountService {
       {'ok': false, 'error': '连不上服务器，请检查网络后重试'};
 
   static Future<Map<String, dynamic>?> _post(
-      String path, Map<String, dynamic> body) async {
+      String path, Map<String, dynamic> body, {int secs = 12}) async {
     for (final base in _bases()) {
       try {
         final r = await http
             .post(Uri.parse('$base$path'),
                 headers: {'Content-Type': 'application/json'},
                 body: jsonEncode(body))
-            .timeout(const Duration(seconds: 12));
+            .timeout(Duration(seconds: secs));
         final d = jsonDecode(utf8.decode(r.bodyBytes));
         if (d is Map) return _asMap(d);
       } catch (_) {}
@@ -305,7 +305,8 @@ class AccountService {
       {String title = ''}) async {
     final t = await token();
     if (t == null) return {'ok': false, 'error': '请先登录账号'};
-    final d = await _post('/ai/video', {'tk': t, 'topic': topic, 'title': title});
+    final d = await _post('/ai/video', {'tk': t, 'topic': topic, 'title': title},
+        secs: 900);
     return d ?? _netErr();
   }
 
@@ -313,7 +314,8 @@ class AccountService {
       List<Map<String, String>> messages) async {
     final t = await token();
     if (t == null) return {'ok': false, 'error': '请先登录账号'};
-    final d = await _post('/ai/chat', {'tk': t, 'messages': messages});
+    final d = await _post('/ai/chat', {'tk': t, 'messages': messages},
+        secs: 180);
     return d ?? _netErr();
   }
 

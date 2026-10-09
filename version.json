@@ -1,6 +1,6 @@
 {
-  "version": "2.53.0",
-  "notes": "AI助手改腾讯元宝风格；菜单栏新增独立AI助手分类；用户AI改为每日10000token；AI接入32B(qwen2.5)",
+  "version": "2.54.0",
+  "notes": "修复AI对话超时(32B需15~25秒，客户端超时改为180秒)；生成视频900秒",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
