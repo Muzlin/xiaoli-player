@@ -5,7 +5,9 @@ import '../services/account_service.dart';
 /// 每日额度(默认 1 万)用完即不可用，次日 0 点重置。
 /// 界面风格仿「腾讯元宝」：浅色、圆润气泡、底部胶囊输入条、欢迎页建议卡片。
 class AiPage extends StatefulWidget {
-  const AiPage({super.key});
+  const AiPage({super.key, this.onAction});
+  /// AI 返回的操作指令，交由宿主(App)执行：play/search/open/pause/next/prev。
+  final void Function(String action, Map<String, dynamic> params)? onAction;
   @override
   State<AiPage> createState() => _AiPageState();
 }
@@ -22,7 +24,6 @@ class _AiPageState extends State<AiPage> {
   final List<Map<String, String>> _msgs = []; // {role, content}
   bool _busy = false;
   int _used = 0, _limit = 10000;
-  String _model = '';
   bool _enabled = true;
   String? _err;
 
@@ -52,7 +53,6 @@ class _AiPageState extends State<AiPage> {
     setState(() {
       _used = (d['used'] as num?)?.toInt() ?? 0;
       _limit = (d['limit'] as num?)?.toInt() ?? 10000;
-      _model = '${d['model'] ?? ''}';
       _enabled = d['enabled'] != false;
     });
   }
@@ -82,6 +82,18 @@ class _AiPageState extends State<AiPage> {
         _used = (d['used'] as num?)?.toInt() ?? _used;
         _limit = (d['limit'] as num?)?.toInt() ?? _limit;
       });
+      // 执行 AI 给出的 App 操作(play/search/open/pause/next/prev…)
+      final acts = d['actions'];
+      if (acts is List && widget.onAction != null) {
+        for (final a in acts) {
+          if (a is Map && a['action'] != null) {
+            final params = (a['params'] is Map)
+                ? Map<String, dynamic>.from(a['params'] as Map)
+                : <String, dynamic>{};
+            widget.onAction!('${a['action']}', params);
+          }
+        }
+      }
     } else {
       setState(() => _err = '${d['error'] ?? 'AI 请求失败'}');
     }
@@ -242,7 +254,7 @@ class _AiPageState extends State<AiPage> {
         const SizedBox(height: 6),
         Center(
           child: Text(
-            _model.isEmpty ? '视频标题 · 简介 · 脚本 · 文案，样样都行' : '模型：$_model',
+            '视频标题 · 简介 · 脚本 · 文案，样样都行',
             style: const TextStyle(fontSize: 13, color: Color(0xFF8A93A6)),
           ),
         ),

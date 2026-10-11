@@ -1,6 +1,6 @@
 {
-  "version": "2.54.0",
-  "notes": "修复AI对话超时(32B需15~25秒，客户端超时改为180秒)；生成视频900秒",
+  "version": "2.55.0",
+  "notes": "App内AI助手可直接操作播放器(播放/搜索/打开页面/暂停/切歌)；AI页不再显示模型名",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

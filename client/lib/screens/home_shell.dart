@@ -4087,6 +4087,89 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     }).catchError((_) {});
   }
 
+  // ===== AI 助手操作 App：执行 AI 返回的动作 =====
+  void _aiAction(String action, Map<String, dynamic> params) {
+    switch (action) {
+      case 'play':
+        _aiPlay('${params['q'] ?? ''}');
+        break;
+      case 'search':
+        final q = '${params['q'] ?? ''}'.trim();
+        if (q.isNotEmpty) {
+          _searchCtrl.text = q;
+          _searchOnline(q);
+        }
+        break;
+      case 'pause':
+        if (PlayerHolder.i.current.value != null) {
+          PlayerHolder.i.playPause();
+        } else if (_current != null) {
+          _play(_current!);
+        }
+        break;
+      case 'next':
+        _next();
+        break;
+      case 'prev':
+        _prev();
+        break;
+      case 'open':
+        _aiOpen('${params['page'] ?? ''}');
+        break;
+    }
+  }
+
+  Future<void> _aiPlay(String q) async {
+    final key = q.trim();
+    if (key.isEmpty) return;
+    await _searchOnline(key);
+    if (!mounted) return;
+    if (_onlineTracks.isNotEmpty) {
+      _play(_onlineTracks.first);
+    } else {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('没搜到「$key」')));
+    }
+  }
+
+  void _aiOpen(String page) {
+    switch (page) {
+      case 'messages':
+        _openMessagesTop();
+        break;
+      case 'recharge':
+        Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const RechargePage()));
+        break;
+      case 'personal':
+        _openPersonalCenter();
+        break;
+      case 'account':
+        _openAccountPage();
+        break;
+      case 'live':
+        Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => LivePage(onPlayVideo: _liveOnPlay)));
+        break;
+      case 'creator':
+        _openCreatorCenter();
+        break;
+      case 'pay':
+        Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const PayPage()));
+        break;
+      case 'settings':
+        setState(() => _navIndex = 3);
+        break;
+      case 'favorites':
+        setState(() => _navIndex = 1);
+        break;
+      case 'history':
+        setState(() => _navIndex = 4);
+        break;
+    }
+  }
+
   void _prev() {
     final list = _playQueue;
     if (_current == null || list.isEmpty) return;
@@ -4326,7 +4409,8 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
             child: InkWell(
               borderRadius: BorderRadius.circular(14),
               onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute<void>(builder: (_) => const AiPage())),
+                  MaterialPageRoute<void>(
+                      builder: (_) => AiPage(onAction: _aiAction))),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
