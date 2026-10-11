@@ -34,6 +34,7 @@ import 'pay_page.dart';
 import 'recharge_page.dart';
 import 'account_page.dart';
 import 'ai_page.dart';
+import 'ai_trainer_page.dart';
 import 'license_pages_zh.dart';
 import 'live_page.dart';
 import '../player/player_holder.dart';
@@ -4258,6 +4259,18 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'add_kb':
         _aiStore('kb', 'add', text: '${params['text'] ?? ''}');
         break;
+      case 'add_train':
+        _aiStore('train', 'add', text: '${params['text'] ?? ''}');
+        break;
+      case 'list_train':
+        _aiStore('train', 'list');
+        break;
+      case 'add_rule':
+        _aiStore('rule', 'add', text: '${params['text'] ?? ''}');
+        break;
+      case 'list_rule':
+        _aiStore('rule', 'list');
+        break;
       case 'set_persona':
         AccountService.aiPrefs(persona: '${params['v'] ?? ''}');
         ScaffoldMessenger.of(context).showSnackBar(
@@ -4562,7 +4575,7 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
           .showSnackBar(const SnackBar(content: Text('已保存')));
       return;
     }
-    final label = {'todo': '待办', 'note': '笔记', 'remind': '提醒', 'kb': '知识库'}[kind] ?? kind;
+    final label = {'todo': '待办', 'note': '笔记', 'remind': '提醒', 'kb': '知识库', 'train': '训练样本', 'rule': '规则'}[kind] ?? kind;
     showDialog<void>(
       context: context,
       builder: (_) => AlertDialog(
@@ -5000,6 +5013,33 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
                   ),
                   const SizedBox(height: 3),
                   const Text('AI助手',
+                      style: TextStyle(fontSize: 10, color: Colors.white70)),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) => const AiTrainerPage())),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white12,
+                    ),
+                    child: const Icon(Icons.school_outlined,
+                        color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(height: 3),
+                  const Text('训练师',
                       style: TextStyle(fontSize: 10, color: Colors.white70)),
                 ],
               ),

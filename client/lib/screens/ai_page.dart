@@ -26,6 +26,7 @@ class _AiPageState extends State<AiPage> {
   final _scroll = ScrollController();
   final List<Map<String, String>> _msgs = []; // {role, content}
   bool _busy = false;
+  bool _atBottom = true;
   bool _uploading = false;
   String? _attachName;
   String? _attachText;
@@ -74,6 +75,12 @@ class _AiPageState extends State<AiPage> {
     _loadMeta();
     _tts.setLanguage('zh-CN');
     _tts.setSpeechRate(0.5);
+    _scroll.addListener(() {
+      if (!_scroll.hasClients) return;
+      final atEnd =
+          _scroll.position.pixels >= _scroll.position.maxScrollExtent - 48;
+      if (atEnd != _atBottom && mounted) setState(() => _atBottom = atEnd);
+    });
   }
 
   Future<void> _loadMeta() async {
@@ -562,6 +569,14 @@ class _AiPageState extends State<AiPage> {
     final remaining = (_limit - _used).clamp(0, _limit);
     return Scaffold(
       backgroundColor: _cBg,
+      floatingActionButton: (_msgs.isNotEmpty && !_atBottom)
+          ? FloatingActionButton.small(
+              backgroundColor: _cCard,
+              foregroundColor: _brand1,
+              onPressed: _jump,
+              child: const Icon(Icons.keyboard_arrow_down),
+            )
+          : null,
       appBar: AppBar(
         backgroundColor: _cCard,
         elevation: 0,
@@ -648,23 +663,32 @@ class _AiPageState extends State<AiPage> {
     return ListView(
       padding: const EdgeInsets.fromLTRB(20, 36, 20, 20),
       children: [
-        Center(child: _avatar(64)),
-        const SizedBox(height: 16),
-        const Center(
-          child: Text('Hi，我是小李 AI 助手',
-              style: TextStyle(
-                  fontSize: 22,
-                  fontWeight: FontWeight.w700,
-                  color: Color(0xFF1A1A1A))),
-        ),
-        const SizedBox(height: 6),
-        Center(
-          child: Text(
-            '视频标题 · 简介 · 脚本 · 文案，样样都行',
-            style: TextStyle(fontSize: 13, color: _cSub),
+        Container(
+          padding: const EdgeInsets.symmetric(vertical: 22),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            gradient: LinearGradient(
+              colors: _dark
+                  ? [const Color(0xFF1B2740), const Color(0xFF14283A)]
+                  : [const Color(0xFFEAF2FF), const Color(0xFFE6FBFA)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
           ),
+          child: Column(children: [
+            _avatar(64),
+            const SizedBox(height: 14),
+            Text('Hi，我是小李 AI 助手',
+                style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    color: _cText)),
+            const SizedBox(height: 6),
+            Text('视频标题 · 简介 · 脚本 · 文案，样样都行',
+                style: TextStyle(fontSize: 13, color: _cSub)),
+          ]),
         ),
-        const SizedBox(height: 26),
+        const SizedBox(height: 22),
         ..._suggestions.map((s) => Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Material(
@@ -850,6 +874,25 @@ class _AiPageState extends State<AiPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_msgs.isNotEmpty && !_busy && _attachName == null)
+              SizedBox(
+                height: 36,
+                child: ListView(
+                  scrollDirection: Axis.horizontal,
+                  children: _suggestions
+                      .map((s) => Padding(
+                            padding: const EdgeInsets.only(right: 8),
+                            child: ActionChip(
+                              label: Text(s[1],
+                                  style: const TextStyle(fontSize: 12)),
+                              backgroundColor: _cInputBg,
+                              side: BorderSide(color: _cBorder),
+                              onPressed: () => _sendText(s[1]),
+                            ),
+                          ))
+                      .toList(),
+                ),
+              ),
             if (_attachName != null)
               Container(
                 margin: const EdgeInsets.only(bottom: 8),
