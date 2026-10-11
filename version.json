@@ -1,6 +1,6 @@
 {
-  "version": "2.61.0",
-  "notes": "AI助手再各加20功能：用户端(备份/视图切换/定时关闭/导入文件夹/智能歌单/主题预设/B站昵称签名等)，后台端(解绑B站/禁言/手机黑名单/价格/白名单/水印/回收站等)",
+  "version": "2.62.0",
+  "notes": "AI助手新增20个功能：朗读/复制/重新生成/点赞反馈、偏好记忆、语气/语言/长度、快捷模板、常见问题、用量统计、会话历史、导出对话、敏感词过滤、限流、可用时段、失败重试、后台用量排行与反馈统计",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

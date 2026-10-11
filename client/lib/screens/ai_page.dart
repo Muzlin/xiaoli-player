@@ -1,6 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:file_picker/file_picker.dart';
 import '../services/account_service.dart';
 
@@ -29,6 +31,10 @@ class _AiPageState extends State<AiPage> {
   bool _uploading = false;
   String? _attachName;
   String? _attachText;
+  final FlutterTts _tts = FlutterTts();
+  String _notice = '';
+  List _tpls = [];
+  List _faq = [];
   int _used = 0, _limit = 10000;
   bool _enabled = true;
   String? _err;
@@ -44,6 +50,78 @@ class _AiPageState extends State<AiPage> {
   void initState() {
     super.initState();
     _loadUsage();
+    _loadMeta();
+    _tts.setLanguage('zh-CN');
+    _tts.setSpeechRate(0.5);
+  }
+
+  Future<void> _loadMeta() async {
+    final d = await AccountService.aiMeta();
+    if (!mounted || d['ok'] != true) return;
+    setState(() {
+      _notice = '${d['notice'] ?? ''}';
+      _tpls = (d['templates'] as List?) ?? [];
+      _faq = (d['faq'] as List?) ?? [];
+    });
+  }
+
+  void _speak(String t) async {
+    try {
+      await _tts.stop();
+      await _tts.speak(t);
+    } catch (_) {}
+  }
+
+  void _copy(String t) {
+    Clipboard.setData(ClipboardData(text: t));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(const SnackBar(content: Text('已复制')));
+  }
+
+  void _vote(String v, String t) {
+    AccountService.aiFeedback(v, t);
+    ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(v == 'up' ? '感谢反馈 👍' : '已记录，我们会改进')));
+  }
+
+  void _runActions(Map<String, dynamic> d) {
+    final acts = d['actions'];
+    if (acts is List && widget.onAction != null) {
+      for (final a in acts) {
+        if (a is Map && a['action'] != null) {
+          final params = (a['params'] is Map)
+              ? Map<String, dynamic>.from(a['params'] as Map)
+              : <String, dynamic>{};
+          widget.onAction!('${a['action']}', params);
+        }
+      }
+    }
+  }
+
+  Future<void> _regenerate() async {
+    if (_busy) return;
+    final ui = _msgs.lastIndexWhere((m) => m['role'] == 'user');
+    if (ui < 0) return;
+    setState(() {
+      if (_msgs.length > ui + 1) _msgs.removeRange(ui + 1, _msgs.length);
+      _busy = true;
+      _err = null;
+    });
+    _jump();
+    final d = await AccountService.aiChat(_msgs);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (d['ok'] == true) {
+      setState(() {
+        _msgs.add({'role': 'assistant', 'content': '${d['reply'] ?? ''}'});
+        _used = (d['used'] as num?)?.toInt() ?? _used;
+        _limit = (d['limit'] as num?)?.toInt() ?? _limit;
+      });
+      _runActions(d);
+    } else {
+      setState(() => _err = '${d['error'] ?? 'AI 请求失败'}');
+    }
+    _jump();
   }
 
   @override
@@ -135,17 +213,7 @@ class _AiPageState extends State<AiPage> {
         _limit = (d['limit'] as num?)?.toInt() ?? _limit;
       });
       // 执行 AI 给出的 App 操作(play/search/open/pause/next/prev…)
-      final acts = d['actions'];
-      if (acts is List && widget.onAction != null) {
-        for (final a in acts) {
-          if (a is Map && a['action'] != null) {
-            final params = (a['params'] is Map)
-                ? Map<String, dynamic>.from(a['params'] as Map)
-                : <String, dynamic>{};
-            widget.onAction!('${a['action']}', params);
-          }
-        }
-      }
+      _runActions(d);
     } else {
       setState(() => _err = '${d['error'] ?? 'AI 请求失败'}');
     }
@@ -209,6 +277,249 @@ class _AiPageState extends State<AiPage> {
     });
   }
 
+  Widget _msgBtn(IconData ic, String tip, VoidCallback onTap) {
+    return IconButton(
+      tooltip: tip,
+      onPressed: onTap,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints(minWidth: 34, minHeight: 30),
+      iconSize: 16,
+      icon: Icon(ic, color: const Color(0xFF9AA3B2)),
+    );
+  }
+
+  Future<void> _onMenu(String v) async {
+    switch (v) {
+      case 'tpl':
+        _showTemplates();
+        break;
+      case 'pref':
+        _showPrefs();
+        break;
+      case 'faq':
+        _showFaq();
+        break;
+      case 'stats':
+        _showStats();
+        break;
+      case 'hist':
+        _showHistory();
+        break;
+      case 'exp':
+        final d = await AccountService.aiExport();
+        if (!mounted) return;
+        if (d['ok'] == true) _copy('${d['text'] ?? ''}');
+        break;
+      case 'clr':
+        await AccountService.aiHistory(clear: true);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('已清除会话历史')));
+        }
+        break;
+    }
+  }
+
+  void _showTemplates() {
+    showModalBottomSheet<void>(
+      context: context,
+      builder: (_) => ListView(
+        shrinkWrap: true,
+        children: [
+          const Padding(
+              padding: EdgeInsets.all(14),
+              child: Text('快捷模板',
+                  style: TextStyle(fontWeight: FontWeight.w700))),
+          ..._tpls.map((t) => ListTile(
+                leading: const Icon(Icons.auto_awesome,
+                    size: 18, color: _brand1),
+                title: Text('${t['t']}'),
+                subtitle: Text('${t['v']}',
+                    maxLines: 1, overflow: TextOverflow.ellipsis),
+                onTap: () {
+                  Navigator.pop(context);
+                  _sendText('${t['v']}');
+                },
+              )),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showPrefs() async {
+    final d = await AccountService.aiMeta();
+    if (!mounted) return;
+    final p = (d['prefs'] as Map?) ?? {};
+    final mem = TextEditingController(text: '${p['memory'] ?? ''}');
+    final tone = TextEditingController(text: '${p['tone'] ?? ''}');
+    String lang = '${p['lang'] ?? 'zh'}';
+    String length = '${p['length'] ?? ''}';
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (x) => StatefulBuilder(
+        builder: (x, setSt) => AlertDialog(
+          title: const Text('我的偏好'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: tone,
+                  decoration: const InputDecoration(
+                      labelText: '语气（如：简洁/详细/幽默）')),
+              const SizedBox(height: 8),
+              TextField(
+                  controller: mem,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                      labelText: '记忆（如：我喜欢搞笑风格）')),
+              const SizedBox(height: 10),
+              Row(children: [
+                const Text('语言：'),
+                DropdownButton<String>(
+                  value: lang,
+                  items: const [
+                    DropdownMenuItem(value: 'zh', child: Text('中文')),
+                    DropdownMenuItem(value: 'en', child: Text('English')),
+                  ],
+                  onChanged: (v) => setSt(() => lang = v ?? 'zh'),
+                ),
+              ]),
+              Row(children: [
+                const Text('长度：'),
+                DropdownButton<String>(
+                  value: length.isEmpty ? '默认' : length,
+                  items: const [
+                    DropdownMenuItem(value: '默认', child: Text('默认')),
+                    DropdownMenuItem(value: '短', child: Text('简短')),
+                    DropdownMenuItem(value: '详细', child: Text('详细')),
+                  ],
+                  onChanged: (v) =>
+                      setSt(() => length = (v == '默认') ? '' : (v ?? '')),
+                ),
+              ]),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(x), child: const Text('取消')),
+            FilledButton(
+                onPressed: () async {
+                  await AccountService.aiPrefs(
+                      memory: mem.text,
+                      tone: tone.text,
+                      lang: lang,
+                      length: length);
+                  if (x.mounted) Navigator.pop(x);
+                },
+                child: const Text('保存')),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showFaq() {
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('常见问题'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: _faq
+                .map((f) => Padding(
+                      padding: const EdgeInsets.only(bottom: 12),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('Q：${f['q']}',
+                              style: const TextStyle(
+                                  fontWeight: FontWeight.w600)),
+                          const SizedBox(height: 2),
+                          Text('A：${f['a']}',
+                              style: const TextStyle(
+                                  fontSize: 13, color: Color(0xFF4A5568))),
+                        ],
+                      ),
+                    ))
+                .toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('知道了')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showStats() async {
+    final d = await AccountService.aiStats();
+    if (!mounted) return;
+    if (d['ok'] != true) return;
+    final ser = (d['series'] as List?) ?? [];
+    final buf = StringBuffer('近 14 天用量：\n\n');
+    for (final s in ser) {
+      buf.writeln('${s['d']}   ${s['n']} token');
+    }
+    buf.writeln('\n累计：${d['total']} token');
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('用量统计'),
+        content: SingleChildScrollView(child: Text('$buf')),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _showHistory() async {
+    final d = await AccountService.aiHistory();
+    if (!mounted) return;
+    if (d['ok'] != true) return;
+    final arr = (d['history'] as List?) ?? [];
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('会话历史'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 380,
+          child: arr.isEmpty
+              ? const Center(child: Text('暂无历史'))
+              : ListView.builder(
+                  itemCount: arr.length,
+                  itemBuilder: (_, i) {
+                    final m = arr[i];
+                    final me = m['role'] == 'user';
+                    return Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 4),
+                      child: Text('${me ? '我' : 'AI'}：${m['content']}',
+                          style: TextStyle(
+                              fontSize: 13,
+                              color: me
+                                  ? const Color(0xFF17233D)
+                                  : const Color(0xFF4A5568))),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
   Widget _avatar(double size) {
     return Container(
       width: size,
@@ -248,6 +559,20 @@ class _AiPageState extends State<AiPage> {
           ],
         ),
         actions: [
+          PopupMenuButton<String>(
+            tooltip: '更多',
+            icon: const Icon(Icons.more_horiz, color: Color(0xFF4A5568)),
+            onSelected: _onMenu,
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'tpl', child: Text('快捷模板')),
+              PopupMenuItem(value: 'pref', child: Text('我的偏好（语气/记忆）')),
+              PopupMenuItem(value: 'faq', child: Text('常见问题')),
+              PopupMenuItem(value: 'stats', child: Text('用量统计')),
+              PopupMenuItem(value: 'hist', child: Text('会话历史')),
+              PopupMenuItem(value: 'exp', child: Text('导出对话')),
+              PopupMenuItem(value: 'clr', child: Text('清除历史')),
+            ],
+          ),
           IconButton(
             tooltip: 'AI 生成视频并发布',
             onPressed: _busy ? null : _makeVideo,
@@ -265,6 +590,15 @@ class _AiPageState extends State<AiPage> {
               padding: const EdgeInsets.all(10),
               child: const Text('创作 AI 助手已被管理员关闭',
                   style: TextStyle(color: Color(0xFF8A5A00))),
+            ),
+          if (_notice.isNotEmpty)
+            Container(
+              width: double.infinity,
+              color: const Color(0xFFFFF7E6),
+              padding: const EdgeInsets.all(10),
+              child: Text(_notice,
+                  style: const TextStyle(
+                      color: Color(0xFF8A5A00), fontSize: 12.5)),
             ),
           if (remaining <= 0)
             Container(
@@ -419,30 +753,48 @@ class _AiPageState extends State<AiPage> {
               _avatar(30),
               const SizedBox(width: 8),
               Flexible(
-                child: Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 11),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(4),
-                      topRight: Radius.circular(16),
-                      bottomLeft: Radius.circular(16),
-                      bottomRight: Radius.circular(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 11),
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: const BorderRadius.only(
+                          topLeft: Radius.circular(4),
+                          topRight: Radius.circular(16),
+                          bottomLeft: Radius.circular(16),
+                          bottomRight: Radius.circular(16),
+                        ),
+                        border: Border.all(color: const Color(0xFFEDEFF5)),
+                        boxShadow: const [
+                          BoxShadow(
+                              color: Color(0x0A000000),
+                              blurRadius: 8,
+                              offset: Offset(0, 2)),
+                        ],
+                      ),
+                      child: SelectableText(m['content'] ?? '',
+                          style: const TextStyle(
+                              color: Color(0xFF1A1F2B),
+                              fontSize: 14.5,
+                              height: 1.55)),
                     ),
-                    border: Border.all(color: const Color(0xFFEDEFF5)),
-                    boxShadow: const [
-                      BoxShadow(
-                          color: Color(0x0A000000),
-                          blurRadius: 8,
-                          offset: Offset(0, 2)),
-                    ],
-                  ),
-                  child: SelectableText(m['content'] ?? '',
-                      style: const TextStyle(
-                          color: Color(0xFF1A1F2B),
-                          fontSize: 14.5,
-                          height: 1.55)),
+                    Row(
+                      children: [
+                        _msgBtn(Icons.volume_up_outlined, '朗读',
+                            () => _speak(m['content'] ?? '')),
+                        _msgBtn(Icons.copy_outlined, '复制',
+                            () => _copy(m['content'] ?? '')),
+                        _msgBtn(Icons.refresh, '重新生成', _regenerate),
+                        _msgBtn(Icons.thumb_up_outlined, '赞',
+                            () => _vote('up', m['content'] ?? '')),
+                        _msgBtn(Icons.thumb_down_outlined, '踩',
+                            () => _vote('down', m['content'] ?? '')),
+                      ],
+                    ),
+                  ],
                 ),
               ),
             ],

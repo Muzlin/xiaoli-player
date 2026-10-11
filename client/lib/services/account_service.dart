@@ -309,6 +309,54 @@ class AccountService {
     return d ?? _netErr();
   }
 
+  static Future<Map<String, dynamic>> aiMeta() async {
+    final t = await token();
+    if (t == null) return {'ok': false};
+    final d = await _post('/ai/meta', {'tk': t});
+    return d ?? {'ok': false};
+  }
+
+  static Future<Map<String, dynamic>> aiPrefs(
+      {String? memory, String? tone, String? lang, String? length}) async {
+    final t = await token();
+    if (t == null) return {'ok': false};
+    final d = await _post('/ai/prefs', {
+      'tk': t,
+      if (memory != null) 'memory': memory,
+      if (tone != null) 'tone': tone,
+      if (lang != null) 'lang': lang,
+      if (length != null) 'length': length,
+    });
+    return d ?? {'ok': false};
+  }
+
+  static Future<Map<String, dynamic>> aiHistory({bool clear = false}) async {
+    final t = await token();
+    if (t == null) return {'ok': false};
+    final d = await _post('/ai/history', {'tk': t, if (clear) 'clear': '1'});
+    return d ?? {'ok': false};
+  }
+
+  static Future<Map<String, dynamic>> aiStats() async {
+    final t = await token();
+    if (t == null) return {'ok': false};
+    final d = await _post('/ai/stats', {'tk': t});
+    return d ?? {'ok': false};
+  }
+
+  static Future<Map<String, dynamic>> aiExport() async {
+    final t = await token();
+    if (t == null) return {'ok': false};
+    final d = await _post('/ai/export', {'tk': t});
+    return d ?? {'ok': false};
+  }
+
+  static Future<void> aiFeedback(String vote, String text) async {
+    final t = await token();
+    if (t == null) return;
+    await _post('/ai/feedback', {'tk': t, 'vote': vote, 'text': text});
+  }
+
   static Future<Map<String, dynamic>> aiVideo(String topic,
       {String title = ''}) async {
     final t = await token();
