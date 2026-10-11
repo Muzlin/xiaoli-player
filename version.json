@@ -1,6 +1,6 @@
 {
-  "version": "2.63.0",
-  "notes": "AI助手再加20功能：待办清单/笔记/定时提醒(到点推送)/专属知识库/AI人设/分享卡片/自定义快捷指令/多会话；以及起话题标签、润色、翻译、分镜脚本、标题评分、歌词、表情包文案、计算换算等",
+  "version": "2.64.0",
+  "notes": "AI助手再加20功能：记账本、对话收藏、自定义模板、每日自动任务、历史搜索、长对话摘要、模型切换、创意度、AI体检、今日报告、随机决定/抛硬币/骰子/生成密码/番茄钟等",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

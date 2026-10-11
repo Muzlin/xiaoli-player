@@ -4266,6 +4266,64 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'share_reply':
         _aiShare('${params['text'] ?? ''}');
         break;
+      case 'add_expense':
+        _aiStore('expense', 'add',
+            text: '${params['text'] ?? ''}',
+            amount: '${params['amount'] ?? ''}',
+            cat: '${params['cat'] ?? '其它'}');
+        break;
+      case 'list_expense':
+        _aiStore('expense', 'list');
+        break;
+      case 'add_automation':
+        _aiStore('automation', 'add',
+            text: '${params['text'] ?? ''}', at: '${params['at'] ?? ''}', daily: true);
+        break;
+      case 'pin_reply':
+        _aiStore('pin', 'add', text: '${params['text'] ?? ''}');
+        break;
+      case 'list_pins':
+        _aiStore('pin', 'list');
+        break;
+      case 'add_tpl':
+        _aiStore('tpl', 'add',
+            text: '${params['text'] ?? ''}', name: '${params['name'] ?? ''}');
+        break;
+      case 'list_tpl':
+        _aiStore('tpl', 'list');
+        break;
+      case 'doctor':
+        _aiDoctor();
+        break;
+      case 'report':
+        _aiReport();
+        break;
+      case 'random_pick':
+        _aiRandomPick('${params['options'] ?? ''}');
+        break;
+      case 'coin_flip':
+        _aiSnack(Random().nextBool() ? '🪙 正面' : '🪙 反面');
+        break;
+      case 'dice':
+        _aiDice('${params['n'] ?? '6'}');
+        break;
+      case 'gen_password':
+        _aiGenPassword('${params['len'] ?? '16'}');
+        break;
+      case 'start_pomodoro':
+        _aiPomodoro('${params['min'] ?? '25'}');
+        break;
+      case 'search_history':
+        _aiSearchHistory('${params['q'] ?? ''}');
+        break;
+      case 'set_model':
+        AccountService.aiPrefs(model: '${params['v'] ?? ''}');
+        _aiSnack('模型已切换');
+        break;
+      case 'set_creativity':
+        AccountService.aiPrefs(temp: '${params['v'] ?? ''}');
+        _aiSnack('创意度已设置');
+        break;
       case 'backup':
         _backup();
         break;
@@ -4338,9 +4396,160 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     }
   }
 
+  void _aiSnack(String msg) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  void _aiRandomPick(String options) {
+    final list = options
+        .split(RegExp(r'[,，、\s]+'))
+        .where((s) => s.trim().isNotEmpty)
+        .toList();
+    if (list.isEmpty) {
+      _aiSnack('没有可选项');
+      return;
+    }
+    _aiSnack('🎯 就选：${list[Random().nextInt(list.length)]}');
+  }
+
+  void _aiDice(String n) {
+    final faces = int.tryParse(n) ?? 6;
+    _aiSnack('🎲 掷出了：${1 + Random().nextInt(faces < 2 ? 6 : faces)}');
+  }
+
+  void _aiGenPassword(String n) {
+    final len = (int.tryParse(n) ?? 16).clamp(6, 64);
+    const chars =
+        'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#\$%&*';
+    final r = Random.secure();
+    final s = List.generate(len, (_) => chars[r.nextInt(chars.length)]).join();
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('随机密码'),
+        content: SelectableText(s,
+            style: const TextStyle(fontSize: 18, fontFamily: 'monospace')),
+        actions: [
+          TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: s));
+                Navigator.pop(context);
+                _aiSnack('已复制密码');
+              },
+              child: const Text('复制')),
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  void _aiPomodoro(String n) {
+    final mins = (int.tryParse(n) ?? 25).clamp(1, 180);
+    _aiSnack('🍅 番茄钟开始，$mins 分钟后提醒你');
+    Future.delayed(Duration(minutes: mins), () {
+      if (mounted) _aiSnack('🍅 番茄钟结束，该休息一下了！');
+      AccountService.aiUserData('remind', 'add',
+          text: '番茄钟结束，休息一下',
+          at: TimeOfDay.now().format(context).substring(0, 5));
+    });
+  }
+
+  Future<void> _aiDoctor() async {
+    final d = await AccountService.aiDoctor();
+    if (!mounted || d['ok'] != true) return;
+    final items = (d['items'] as List?) ?? [];
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('AI 体检'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: items
+              .map((it) => Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 3),
+                    child: Text('${it['k']}：${it['v']}'),
+                  ))
+              .toList(),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _aiReport() async {
+    final d = await AccountService.aiReport();
+    if (!mounted || d['ok'] != true) return;
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('今日报告 ${d['date']}'),
+        content: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text('AI 用量：${d['tokens']} token'),
+          Text('待办未完成：${d['todo']} 项'),
+          Text('待提醒：${d['remind']} 条'),
+          Text('记账笔数：${d['expense']} 笔'),
+        ]),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _aiSearchHistory(String q) async {
+    final d = await AccountService.aiHistory();
+    if (!mounted || d['ok'] != true) return;
+    final all = (d['history'] as List?) ?? [];
+    final hit = q.trim().isEmpty
+        ? all
+        : all.where((m) => '${m['content']}'.contains(q)).toList();
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('搜索结果（${hit.length} 条）'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 340,
+          child: hit.isEmpty
+              ? const Center(child: Text('没找到'))
+              : ListView(
+                  children: hit
+                      .map((m) => ListTile(
+                            dense: true,
+                            title: Text('${m['role'] == 'user' ? '我' : 'AI'}：${m['content']}',
+                                maxLines: 3,
+                                overflow: TextOverflow.ellipsis),
+                          ))
+                      .toList(),
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _aiStore(String kind, String op,
-      {String? text, String? at}) async {
-    final d = await AccountService.aiUserData(kind, op, text: text, at: at);
+      {String? text, String? at, String? amount, String? cat, String? name,
+      bool daily = false}) async {
+    final d = await AccountService.aiUserData(kind, op,
+        text: text, at: at, amount: amount, cat: cat, name: name, daily: daily);
     if (!mounted) return;
     if (d['ok'] != true) {
       ScaffoldMessenger.of(context).showSnackBar(

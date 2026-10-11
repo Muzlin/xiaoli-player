@@ -318,7 +318,7 @@ class AccountService {
 
   static Future<Map<String, dynamic>> aiPrefs(
       {String? memory, String? tone, String? lang, String? length,
-      String? persona}) async {
+      String? persona, String? model, String? temp}) async {
     final t = await token();
     if (t == null) return {'ok': false};
     final d = await _post('/ai/prefs', {
@@ -328,12 +328,15 @@ class AccountService {
       if (lang != null) 'lang': lang,
       if (length != null) 'length': length,
       if (persona != null) 'persona': persona,
+      if (model != null) 'model': model,
+      if (temp != null) 'temp': temp,
     });
     return d ?? {'ok': false};
   }
 
   static Future<Map<String, dynamic>> aiUserData(String kind, String op,
-      {String? id, String? text, String? at, String? name}) async {
+      {String? id, String? text, String? at, String? name, String? amount,
+      String? cat, bool daily = false}) async {
     final t = await token();
     if (t == null) return {'ok': false, 'error': '请先登录'};
     final d = await _post('/ai/userdata', {
@@ -344,7 +347,24 @@ class AccountService {
       if (text != null) 'text': text,
       if (at != null) 'at': at,
       if (name != null) 'name': name,
+      if (amount != null) 'amount': amount,
+      if (cat != null) 'cat': cat,
+      if (daily) 'daily': '1',
     });
+    return d ?? _netErr();
+  }
+
+  static Future<Map<String, dynamic>> aiDoctor() async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录'};
+    final d = await _post('/ai/doctor', {'tk': t}, secs: 120);
+    return d ?? _netErr();
+  }
+
+  static Future<Map<String, dynamic>> aiReport() async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录'};
+    final d = await _post('/ai/report', {'tk': t});
     return d ?? _netErr();
   }
 
