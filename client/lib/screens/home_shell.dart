@@ -4236,6 +4236,36 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'set_autostart':
         _setLaunchAtLogin('${params['on'] ?? '1'}' != '0');
         break;
+      case 'add_todo':
+        _aiStore('todo', 'add', text: '${params['text'] ?? ''}');
+        break;
+      case 'list_todo':
+        _aiStore('todo', 'list');
+        break;
+      case 'add_note':
+        _aiStore('note', 'add', text: '${params['text'] ?? ''}');
+        break;
+      case 'list_note':
+        _aiStore('note', 'list');
+        break;
+      case 'add_remind':
+        _aiStore('remind', 'add',
+            text: '${params['text'] ?? ''}', at: '${params['at'] ?? ''}');
+        break;
+      case 'list_remind':
+        _aiStore('remind', 'list');
+        break;
+      case 'add_kb':
+        _aiStore('kb', 'add', text: '${params['text'] ?? ''}');
+        break;
+      case 'set_persona':
+        AccountService.aiPrefs(persona: '${params['v'] ?? ''}');
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('AI 人设已更新')));
+        break;
+      case 'share_reply':
+        _aiShare('${params['text'] ?? ''}');
+        break;
       case 'backup':
         _backup();
         break;
@@ -4306,6 +4336,79 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         _aiOpen('${params['page'] ?? ''}');
         break;
     }
+  }
+
+  Future<void> _aiStore(String kind, String op,
+      {String? text, String? at}) async {
+    final d = await AccountService.aiUserData(kind, op, text: text, at: at);
+    if (!mounted) return;
+    if (d['ok'] != true) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${d['error'] ?? '操作失败'}')));
+      return;
+    }
+    final items = (d['items'] as List?) ?? [];
+    if (op != 'list') {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('已保存')));
+      return;
+    }
+    final label = {'todo': '待办', 'note': '笔记', 'remind': '提醒', 'kb': '知识库'}[kind] ?? kind;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text('我的$label'),
+        content: SizedBox(
+          width: double.maxFinite,
+          height: 340,
+          child: items.isEmpty
+              ? const Center(child: Text('暂无'))
+              : ListView(
+                  children: items
+                      .map((it) => ListTile(
+                            dense: true,
+                            leading: const Icon(Icons.circle, size: 8),
+                            title: Text('${it['text']}'),
+                            subtitle: (kind == 'remind' &&
+                                    '${it['at'] ?? ''}'.isNotEmpty)
+                                ? Text('时间：${it['at']}')
+                                : null,
+                          ))
+                      .toList(),
+                ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _aiShare(String text) async {
+    final d = await AccountService.aiShare(text);
+    if (!mounted) return;
+    if (d['ok'] != true) return;
+    final card = '${d['card'] ?? ''}';
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('分享卡片'),
+        content: SingleChildScrollView(child: SelectableText(card)),
+        actions: [
+          TextButton(
+              onPressed: () {
+                Clipboard.setData(ClipboardData(text: card));
+                Navigator.pop(context);
+              },
+              child: const Text('复制')),
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭')),
+        ],
+      ),
+    );
   }
 
   Future<void> _aiTheme(String mode) async {
