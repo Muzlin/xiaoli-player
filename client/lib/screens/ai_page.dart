@@ -1,4 +1,7 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:file_picker/file_picker.dart';
 import '../services/account_service.dart';
 
 /// 创作 AI 助手：调用服务端 AI 接口(默认本机 Ollama)，按账号计费 token，
@@ -23,6 +26,9 @@ class _AiPageState extends State<AiPage> {
   final _scroll = ScrollController();
   final List<Map<String, String>> _msgs = []; // {role, content}
   bool _busy = false;
+  bool _uploading = false;
+  String? _attachName;
+  String? _attachText;
   int _used = 0, _limit = 10000;
   bool _enabled = true;
   String? _err;
@@ -62,15 +68,61 @@ class _AiPageState extends State<AiPage> {
     _send();
   }
 
+  Future<void> _pickFile() async {
+    try {
+      final r = await FilePicker.platform.pickFiles(withData: false);
+      if (r == null || r.files.isEmpty) return;
+      final f = r.files.single;
+      final path = f.path;
+      if (path == null) return;
+      setState(() => _uploading = true);
+      final bytes = await File(path).readAsBytes();
+      if (bytes.length > 20 * 1024 * 1024) {
+        setState(() {
+          _uploading = false;
+          _err = '文件太大（最多 20MB）';
+        });
+        return;
+      }
+      final d = await AccountService.aiUpload(f.name, base64Encode(bytes));
+      if (!mounted) return;
+      setState(() {
+        _uploading = false;
+        if (d['ok'] == true) {
+          _attachName = '${d['name'] ?? f.name}';
+          _attachText = '${d['text'] ?? ''}';
+          _err = null;
+        } else {
+          _err = '${d['error'] ?? '上传失败'}';
+        }
+      });
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _uploading = false;
+          _err = '上传失败：$e';
+        });
+      }
+    }
+  }
+
   Future<void> _send() async {
-    final text = _input.text.trim();
-    if (text.isEmpty || _busy) return;
+    var text = _input.text.trim();
+    if (_busy) return;
+    if (text.isEmpty && _attachName == null) return;
     if (_used >= _limit) return;
+    if (_attachName != null) {
+      final ex = (_attachText ?? '').trim();
+      text = '${text.isEmpty ? '看看这个文件' : text}\n📎 $_attachName'
+          '${ex.isEmpty ? '' : '\n\n$ex'}';
+    }
     setState(() {
       _msgs.add({'role': 'user', 'content': text});
       _busy = true;
       _err = null;
       _input.clear();
+      _attachName = null;
+      _attachText = null;
     });
     _jump();
     final d = await AccountService.aiChat(_msgs);
@@ -425,10 +477,54 @@ class _AiPageState extends State<AiPage> {
       child: Container(
         color: Colors.white,
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.end,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Expanded(
+            if (_attachName != null)
+              Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFEEF3FF),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.attach_file, size: 16, color: _brand1),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(_attachName!,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                              fontSize: 12.5, color: Color(0xFF2A2F3A))),
+                    ),
+                    GestureDetector(
+                      onTap: () => setState(() {
+                        _attachName = null;
+                        _attachText = null;
+                      }),
+                      child: const Icon(Icons.close,
+                          size: 16, color: Color(0xFF8A93A6)),
+                    ),
+                  ],
+                ),
+              ),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                IconButton(
+                  tooltip: '发送图片/文件（图片自动识别文字）',
+                  onPressed: (_uploading || !_enabled) ? null : _pickFile,
+                  icon: _uploading
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.add_photo_alternate_outlined,
+                          color: Color(0xFF8A93A6)),
+                ),
+                Expanded(
               child: Container(
                 decoration: BoxDecoration(
                   color: const Color(0xFFF2F3F7),
@@ -479,6 +575,8 @@ class _AiPageState extends State<AiPage> {
                     : const Icon(Icons.arrow_upward,
                         color: Colors.white, size: 22),
               ),
+            ),
+              ],
             ),
           ],
         ),

@@ -1,6 +1,6 @@
 {
-  "version": "2.55.0",
-  "notes": "App内AI助手可直接操作播放器(播放/搜索/打开页面/暂停/切歌)；AI页不再显示模型名",
+  "version": "2.56.0",
+  "notes": "AI助手支持发送图片/文件(图片自动OCR识别文字、文本读取内容)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

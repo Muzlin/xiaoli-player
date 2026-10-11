@@ -301,6 +301,14 @@ class AccountService {
   }
 
   /// AI 生成视频并发布到平台(服务端写脚本+TTS+合成)。
+  static Future<Map<String, dynamic>> aiUpload(String name, String b64) async {
+    final t = await token();
+    if (t == null) return {'ok': false, 'error': '请先登录账号'};
+    final d = await _post('/ai/upload', {'tk': t, 'name': name, 'data': b64},
+        secs: 180);
+    return d ?? _netErr();
+  }
+
   static Future<Map<String, dynamic>> aiVideo(String topic,
       {String title = ''}) async {
     final t = await token();
