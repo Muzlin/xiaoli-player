@@ -29,6 +29,7 @@ import '../services/coin_ledger.dart';
 import '../services/a11y.dart';
 import '../services/native_notify.dart';
 import '../services/account_service.dart';
+import '../restart_widget.dart';
 import 'pay_page.dart';
 import 'recharge_page.dart';
 import 'account_page.dart';
@@ -4143,6 +4144,29 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'clear_history':
         _clearHistory();
         break;
+      case 'send_message':
+        _aiSendMessage('${params['to'] ?? ''}', '${params['text'] ?? ''}');
+        break;
+      case 'comment':
+        _aiComment('${params['text'] ?? ''}');
+        break;
+      case 'post_moment':
+        _aiPostMoment('${params['text'] ?? ''}');
+        break;
+      case 'recharge':
+        Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const RechargePage()));
+        break;
+      case 'pay':
+        Navigator.of(context).push(
+            MaterialPageRoute<void>(builder: (_) => const PayPage()));
+        break;
+      case 'change_password':
+        _openAccountPage();
+        break;
+      case 'logout':
+        _aiLogout();
+        break;
       case 'open':
         _aiOpen('${params['page'] ?? ''}');
         break;
@@ -4159,6 +4183,52 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
     themeModeNotifier.value = m;
     final p = await SharedPreferences.getInstance();
     await p.setInt('theme_mode', m.index);
+  }
+
+  Future<void> _aiSendMessage(String to, String text) async {
+    final peer = to.trim();
+    final body = text.trim();
+    if (peer.isEmpty || body.isEmpty) return;
+    final ok = await PlatformService.dmSend(peer, text: body);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(ok ? '已发送给 $peer' : '发送失败（对方昵称是否正确？）')));
+    }
+  }
+
+  Future<void> _aiComment(String text) async {
+    final body = text.trim();
+    if (body.isEmpty) return;
+    final t = _current;
+    if (t == null || t.url == null || !t.url!.contains('/video/')) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('请先播放一个平台视频再评论')));
+      return;
+    }
+    final vid = t.url!.split('/').last;
+    final p = await SharedPreferences.getInstance();
+    final name = (p.getString('profile_name') ?? '').trim();
+    final ok = await PlatformService.comment(
+        vid, body, name.isEmpty ? '用户' : name);
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(ok ? '评论已发送' : '评论失败')));
+    }
+  }
+
+  Future<void> _aiPostMoment(String text) async {
+    final body = text.trim();
+    if (body.isEmpty) return;
+    final ok = await PlatformService.momentPost(body);
+    if (mounted) {
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(ok ? '已发布动态' : '发布失败')));
+    }
+  }
+
+  Future<void> _aiLogout() async {
+    await AccountService.logout();
+    if (mounted) RestartWidget.restart(context);
   }
 
   Future<void> _aiPlay(String q) async {
