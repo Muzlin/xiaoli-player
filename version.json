@@ -1,6 +1,6 @@
 {
-  "version": "2.58.0",
-  "notes": "AI可完成全部操作：发私信/评论/发动态/充值/收付款/改密码/退出登录等",
+  "version": "2.60.0",
+  "notes": "AI助手各新增20+功能：用户端(随机播放/测速/清缓存/下载管理/查重复/换主题色/开机自启等)，后台端(封号/封IP/停用设备/改手机号/审批/备份/恢复等)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

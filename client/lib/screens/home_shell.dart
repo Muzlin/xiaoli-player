@@ -4167,6 +4167,75 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'logout':
         _aiLogout();
         break;
+      case 'random_play':
+        _randomPlay();
+        break;
+      case 'play_next':
+        _playNextNow();
+        break;
+      case 'open_fav_folders':
+        _openFavFolders();
+        break;
+      case 'clear_cache':
+        _clearCacheConfirm();
+        break;
+      case 'clear_search_history':
+        _clearSearchHistory();
+        break;
+      case 'speed_test':
+        _runSpeedTest();
+        break;
+      case 'share_app':
+        _shareApp();
+        break;
+      case 'check_update':
+        _checkUpdateManually();
+        break;
+      case 'open_profile':
+        _showMyProfile();
+        break;
+      case 'open_disclaimer':
+        _showDisclaimer();
+        break;
+      case 'open_guide':
+        _showGuide();
+        break;
+      case 'pick_accent':
+        _pickAccent();
+        break;
+      case 'open_downloads':
+        _showDownloadsPanel();
+        break;
+      case 'open_followings':
+        _showFollowings();
+        break;
+      case 'reset_bg':
+        _resetBg();
+        break;
+      case 'open_bili_login':
+        _showBiliLogin();
+        break;
+      case 'detect_duplicates':
+        _detectDuplicates();
+        break;
+      case 'edit_profile':
+        _editProfile();
+        break;
+      case 'add_files':
+        _addFiles();
+        break;
+      case 'contact_admin':
+        _contactAdmin();
+        break;
+      case 'send_feedback':
+        _sendFeedback();
+        break;
+      case 'open_about':
+        _showAbout();
+        break;
+      case 'set_autostart':
+        _setLaunchAtLogin('${params['on'] ?? '1'}' != '0');
+        break;
       case 'open':
         _aiOpen('${params['page'] ?? ''}');
         break;
