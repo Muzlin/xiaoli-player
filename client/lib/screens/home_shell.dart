@@ -4113,10 +4113,52 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'prev':
         _prev();
         break;
+      case 'shuffle':
+        setState(() => _shuffle = '${params['on'] ?? '1'}' != '0');
+        break;
+      case 'loop':
+        setState(() => _loopSingle = '${params['on'] ?? '1'}' != '0');
+        break;
+      case 'volume':
+        final lv = int.tryParse('${params['level'] ?? ''}');
+        if (lv != null) {
+          VolumeController.instance.setVolume((lv.clamp(0, 100)) / 100.0);
+        }
+        break;
+      case 'favorite':
+        if (_current != null) _toggleFav(_current!);
+        break;
+      case 'download':
+        if (_current != null) _download(_current!);
+        break;
+      case 'watchlater':
+        if (_current != null) _toggleWatchLater(_current!);
+        break;
+      case 'theme':
+        _aiTheme('${params['mode'] ?? 'system'}');
+        break;
+      case 'upload':
+        _uploadToPlatform();
+        break;
+      case 'clear_history':
+        _clearHistory();
+        break;
       case 'open':
         _aiOpen('${params['page'] ?? ''}');
         break;
     }
+  }
+
+  Future<void> _aiTheme(String mode) async {
+    final m = {
+          'dark': ThemeMode.dark,
+          'light': ThemeMode.light,
+          'system': ThemeMode.system,
+        }[mode] ??
+        ThemeMode.system;
+    themeModeNotifier.value = m;
+    final p = await SharedPreferences.getInstance();
+    await p.setInt('theme_mode', m.index);
   }
 
   Future<void> _aiPlay(String q) async {
@@ -4164,8 +4206,20 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'favorites':
         setState(() => _navIndex = 1);
         break;
+      case 'library':
+        setState(() => _navIndex = 0);
+        break;
+      case 'videos':
+        setState(() => _navIndex = 2);
+        break;
       case 'history':
         setState(() => _navIndex = 4);
+        break;
+      case 'watchlater':
+        _openWatchLater();
+        break;
+      case 'upload':
+        _uploadToPlatform();
         break;
     }
   }

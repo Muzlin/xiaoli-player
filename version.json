@@ -1,6 +1,6 @@
 {
-  "version": "2.56.0",
-  "notes": "AI助手支持发送图片/文件(图片自动OCR识别文字、文本读取内容)",
+  "version": "2.57.0",
+  "notes": "AI助手可完成App主要操作：播放/搜索/打开页面/暂停/切歌/随机/循环/音量/收藏/下载/稍后再看/主题/上传/清历史",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
