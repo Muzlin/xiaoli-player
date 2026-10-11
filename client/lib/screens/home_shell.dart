@@ -4236,6 +4236,72 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'set_autostart':
         _setLaunchAtLogin('${params['on'] ?? '1'}' != '0');
         break;
+      case 'backup':
+        _backup();
+        break;
+      case 'check_messages':
+        _checkMessages();
+        break;
+      case 'cloud_sync_history':
+        _cloudSyncHistory();
+        break;
+      case 'import_folder':
+        _importFolder();
+        break;
+      case 'pick_fav_folder':
+        _pickFavFolder();
+        break;
+      case 'pick_format':
+        _pickFormat();
+        break;
+      case 'sort_local':
+        _sortLocal();
+        break;
+      case 'toggle_view_mode':
+        _toggleViewMode();
+        break;
+      case 'show_smart_playlists':
+        _showSmartPlaylists();
+        break;
+      case 'show_theme_presets':
+        _showThemePresets();
+        break;
+      case 'refresh_bili':
+        _handleFreshBili();
+        break;
+      case 'remove_lock':
+        _removeLock();
+        break;
+      case 'cancel_sleep':
+        _cancelSleep();
+        break;
+      case 'set_sleep_timer':
+        _setSleepTimer();
+        break;
+      case 'check_gift':
+        _checkGift();
+        break;
+      case 'change_bili_name':
+        _changeBiliName();
+        break;
+      case 'change_bili_sign':
+        _changeBiliSign();
+        break;
+      case 'set_skip_intro':
+        _setSkipIntro();
+        break;
+      case 'pick_bg_image':
+        _pickBgImage();
+        break;
+      case 'reset_prefs':
+        _resetPrefs();
+        break;
+      case 'refresh_platform':
+        _refreshPlatformUrl();
+        break;
+      case 'save_bookmarks':
+        _saveBookmarks();
+        break;
       case 'open':
         _aiOpen('${params['page'] ?? ''}');
         break;
