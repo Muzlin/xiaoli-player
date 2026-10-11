@@ -1,6 +1,6 @@
 {
-  "version": "2.57.0",
-  "notes": "AI助手可完成App主要操作：播放/搜索/打开页面/暂停/切歌/随机/循环/音量/收藏/下载/稍后再看/主题/上传/清历史",
+  "version": "2.58.0",
+  "notes": "AI可完成全部操作：发私信/评论/发动态/充值/收付款/改密码/退出登录等",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
