@@ -1,6 +1,6 @@
 {
-  "version": "2.64.0",
-  "notes": "AI助手再加20功能：记账本、对话收藏、自定义模板、每日自动任务、历史搜索、长对话摘要、模型切换、创意度、AI体检、今日报告、随机决定/抛硬币/骰子/生成密码/番茄钟等",
+  "version": "2.65.0",
+  "notes": "AI助手页面适配深色模式(不再白底)；后台AI改界面改用 console-save，执行结果真实校验",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

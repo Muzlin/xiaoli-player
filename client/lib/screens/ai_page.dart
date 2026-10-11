@@ -20,8 +20,6 @@ class AiPage extends StatefulWidget {
 // 元宝风格配色
 const _brand1 = Color(0xFF2B7BFF);
 const _brand2 = Color(0xFF00C2C7);
-const _bg = Color(0xFFF7F8FC);
-const _userBubble = Color(0xFFDDE9FF);
 
 class _AiPageState extends State<AiPage> {
   final _input = TextEditingController();
@@ -45,6 +43,29 @@ class _AiPageState extends State<AiPage> {
     ['🔥', '这条视频怎么上热门？'],
     ['🖼️', '帮我写个封面文案'],
   ];
+
+  // ===== 跟随系统/应用深浅色 =====
+  bool get _dark => Theme.of(context).brightness == Brightness.dark;
+  Color get _cBg => _dark ? const Color(0xFF14141A) : const Color(0xFFF7F8FC);
+  Color get _cCard => _dark ? const Color(0xFF1E1E26) : Colors.white;
+  Color get _cBorder =>
+      _dark ? const Color(0xFF333A45) : const Color(0xFFEDEFF5);
+  Color get _cText =>
+      _dark ? const Color(0xFFE8EAF0) : const Color(0xFF1A1F2B);
+  Color get _cIcon =>
+      _dark ? const Color(0xFFB8C0CC) : const Color(0xFF4A5568);
+  Color get _cSub =>
+      _dark ? const Color(0xFF9AA3B2) : const Color(0xFF8A93A6);
+  Color get _cHint =>
+      _dark ? const Color(0xFF7A8494) : const Color(0xFFA6AEBD);
+  Color get _cUserBubble =>
+      _dark ? const Color(0xFF2B3F63) : const Color(0xFFDDE9FF);
+  Color get _cUserText =>
+      _dark ? const Color(0xFFE8EAF0) : const Color(0xFF17233D);
+  Color get _cInputBg =>
+      _dark ? const Color(0xFF26262E) : const Color(0xFFF2F3F7);
+  Color get _cDisable =>
+      _dark ? const Color(0xFF3A3A44) : const Color(0xFFDCE0E8);
 
   @override
   void initState() {
@@ -284,7 +305,7 @@ class _AiPageState extends State<AiPage> {
       padding: EdgeInsets.zero,
       constraints: const BoxConstraints(minWidth: 34, minHeight: 30),
       iconSize: 16,
-      icon: Icon(ic, color: const Color(0xFF9AA3B2)),
+      icon: Icon(ic, color: _cSub),
     );
   }
 
@@ -540,9 +561,9 @@ class _AiPageState extends State<AiPage> {
   Widget build(BuildContext context) {
     final remaining = (_limit - _used).clamp(0, _limit);
     return Scaffold(
-      backgroundColor: _bg,
+      backgroundColor: _cBg,
       appBar: AppBar(
-        backgroundColor: Colors.white,
+        backgroundColor: _cCard,
         elevation: 0,
         scrolledUnderElevation: 0,
         centerTitle: true,
@@ -551,9 +572,9 @@ class _AiPageState extends State<AiPage> {
           children: [
             _avatar(26),
             const SizedBox(width: 8),
-            const Text('创作AI助手',
+            Text('创作AI助手',
                 style: TextStyle(
-                    color: Color(0xFF1A1A1A),
+                    color: _cText,
                     fontWeight: FontWeight.w600,
                     fontSize: 17)),
           ],
@@ -561,7 +582,7 @@ class _AiPageState extends State<AiPage> {
         actions: [
           PopupMenuButton<String>(
             tooltip: '更多',
-            icon: const Icon(Icons.more_horiz, color: Color(0xFF4A5568)),
+            icon: Icon(Icons.more_horiz, color: _cIcon),
             onSelected: _onMenu,
             itemBuilder: (_) => const [
               PopupMenuItem(value: 'tpl', child: Text('快捷模板')),
@@ -576,8 +597,7 @@ class _AiPageState extends State<AiPage> {
           IconButton(
             tooltip: 'AI 生成视频并发布',
             onPressed: _busy ? null : _makeVideo,
-            icon: const Icon(Icons.movie_creation_outlined,
-                color: Color(0xFF4A5568)),
+            icon: Icon(Icons.movie_creation_outlined, color: _cIcon),
           ),
         ],
       ),
@@ -641,14 +661,14 @@ class _AiPageState extends State<AiPage> {
         Center(
           child: Text(
             '视频标题 · 简介 · 脚本 · 文案，样样都行',
-            style: const TextStyle(fontSize: 13, color: Color(0xFF8A93A6)),
+            style: TextStyle(fontSize: 13, color: _cSub),
           ),
         ),
         const SizedBox(height: 26),
         ..._suggestions.map((s) => Padding(
               padding: const EdgeInsets.only(bottom: 10),
               child: Material(
-                color: Colors.white,
+                color: _cCard,
                 borderRadius: BorderRadius.circular(14),
                 child: InkWell(
                   borderRadius: BorderRadius.circular(14),
@@ -658,7 +678,7 @@ class _AiPageState extends State<AiPage> {
                         horizontal: 16, vertical: 14),
                     decoration: BoxDecoration(
                       borderRadius: BorderRadius.circular(14),
-                      border: Border.all(color: const Color(0xFFEDEFF5)),
+                      border: Border.all(color: _cBorder),
                     ),
                     child: Row(
                       children: [
@@ -666,11 +686,10 @@ class _AiPageState extends State<AiPage> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: Text(s[1],
-                              style: const TextStyle(
-                                  fontSize: 14.5, color: Color(0xFF2A2F3A))),
+                              style: TextStyle(
+                                  fontSize: 14.5, color: _cText)),
                         ),
-                        const Icon(Icons.chevron_right,
-                            size: 18, color: Color(0xFFB8C0CC)),
+                        Icon(Icons.chevron_right, size: 18, color: _cIcon),
                       ],
                     ),
                   ),
@@ -699,20 +718,19 @@ class _AiPageState extends State<AiPage> {
                   padding: const EdgeInsets.symmetric(
                       horizontal: 14, vertical: 12),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: _cCard,
                     borderRadius: BorderRadius.circular(16),
-                    border: Border.all(color: const Color(0xFFEDEFF5)),
+                    border: Border.all(color: _cBorder),
                   ),
-                  child: const Row(mainAxisSize: MainAxisSize.min, children: [
-                    SizedBox(
+                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                    const SizedBox(
                         width: 15,
                         height: 15,
                         child: CircularProgressIndicator(
                             strokeWidth: 2, color: _brand1)),
-                    SizedBox(width: 8),
+                    const SizedBox(width: 8),
                     Text('正在思考…',
-                        style: TextStyle(
-                            fontSize: 13, color: Color(0xFF8A93A6))),
+                        style: TextStyle(fontSize: 13, color: _cSub)),
                   ]),
                 ),
               ],
@@ -730,9 +748,9 @@ class _AiPageState extends State<AiPage> {
                   const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
               constraints: BoxConstraints(
                   maxWidth: MediaQuery.of(context).size.width * 0.76),
-              decoration: const BoxDecoration(
-                color: _userBubble,
-                borderRadius: BorderRadius.only(
+              decoration: BoxDecoration(
+                color: _cUserBubble,
+                borderRadius: const BorderRadius.only(
                   topLeft: Radius.circular(16),
                   topRight: Radius.circular(16),
                   bottomLeft: Radius.circular(16),
@@ -740,8 +758,8 @@ class _AiPageState extends State<AiPage> {
                 ),
               ),
               child: SelectableText(m['content'] ?? '',
-                  style: const TextStyle(
-                      color: Color(0xFF17233D), fontSize: 14.5, height: 1.5)),
+                  style: TextStyle(
+                      color: _cUserText, fontSize: 14.5, height: 1.5)),
             ),
           );
         }
@@ -760,14 +778,14 @@ class _AiPageState extends State<AiPage> {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 14, vertical: 11),
                       decoration: BoxDecoration(
-                        color: Colors.white,
+                        color: _cCard,
                         borderRadius: const BorderRadius.only(
                           topLeft: Radius.circular(4),
                           topRight: Radius.circular(16),
                           bottomLeft: Radius.circular(16),
                           bottomRight: Radius.circular(16),
                         ),
-                        border: Border.all(color: const Color(0xFFEDEFF5)),
+                        border: Border.all(color: _cBorder),
                         boxShadow: const [
                           BoxShadow(
                               color: Color(0x0A000000),
@@ -776,8 +794,8 @@ class _AiPageState extends State<AiPage> {
                         ],
                       ),
                       child: SelectableText(m['content'] ?? '',
-                          style: const TextStyle(
-                              color: Color(0xFF1A1F2B),
+                          style: TextStyle(
+                              color: _cText,
                               fontSize: 14.5,
                               height: 1.55)),
                     ),
@@ -816,7 +834,7 @@ class _AiPageState extends State<AiPage> {
           Text('今日剩余 $remaining / $_limit token',
               style: TextStyle(
                   fontSize: 11.5,
-                  color: ok ? const Color(0xFF8A93A6) : Colors.red)),
+                  color: ok ? _cSub : Colors.red)),
         ],
       ),
     );
@@ -827,7 +845,7 @@ class _AiPageState extends State<AiPage> {
     return SafeArea(
       top: false,
       child: Container(
-        color: Colors.white,
+        color: _cCard,
         padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -838,7 +856,8 @@ class _AiPageState extends State<AiPage> {
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFEEF3FF),
+                  color:
+                      _dark ? const Color(0xFF232A3A) : const Color(0xFFEEF3FF),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Row(
@@ -848,16 +867,14 @@ class _AiPageState extends State<AiPage> {
                     Expanded(
                       child: Text(_attachName!,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
-                              fontSize: 12.5, color: Color(0xFF2A2F3A))),
+                          style: TextStyle(fontSize: 12.5, color: _cText)),
                     ),
                     GestureDetector(
                       onTap: () => setState(() {
                         _attachName = null;
                         _attachText = null;
                       }),
-                      child: const Icon(Icons.close,
-                          size: 16, color: Color(0xFF8A93A6)),
+                      child: Icon(Icons.close, size: 16, color: _cSub),
                     ),
                   ],
                 ),
@@ -873,13 +890,13 @@ class _AiPageState extends State<AiPage> {
                           width: 18,
                           height: 18,
                           child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.add_photo_alternate_outlined,
-                          color: Color(0xFF8A93A6)),
+                      : Icon(Icons.add_photo_alternate_outlined,
+                          color: _cSub),
                 ),
                 Expanded(
               child: Container(
                 decoration: BoxDecoration(
-                  color: const Color(0xFFF2F3F7),
+                  color: _cInputBg,
                   borderRadius: BorderRadius.circular(22),
                 ),
                 padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -889,13 +906,12 @@ class _AiPageState extends State<AiPage> {
                   maxLines: 4,
                   enabled: _enabled && remaining > 0,
                   onSubmitted: (_) => _send(),
-                  style: const TextStyle(fontSize: 15, color: Color(0xFF1A1F2B)),
+                  style: TextStyle(fontSize: 15, color: _cText),
                   decoration: InputDecoration(
                     hintText: remaining > 0
                         ? '发消息，例如：帮我想 5 个视频标题'
                         : '今日额度已用完',
-                    hintStyle: const TextStyle(
-                        color: Color(0xFFA6AEBD), fontSize: 14),
+                    hintStyle: TextStyle(color: _cHint, fontSize: 14),
                     border: InputBorder.none,
                     isDense: true,
                     contentPadding: const EdgeInsets.symmetric(vertical: 12),
@@ -917,7 +933,7 @@ class _AiPageState extends State<AiPage> {
                           begin: Alignment.topLeft,
                           end: Alignment.bottomRight)
                       : null,
-                  color: canSend ? null : const Color(0xFFDCE0E8),
+                  color: canSend ? null : _cDisable,
                 ),
                 child: _busy
                     ? const Padding(
