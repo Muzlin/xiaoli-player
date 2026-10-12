@@ -1,6 +1,6 @@
 {
-  "version": "2.66.0",
-  "notes": "AI页优化(回到底部/快捷指令/欢迎页美化)；新增AI训练师(问答样本/规则/知识库)与后台AI配置页；控制台改腾讯TDesign风格+100个扩展功能",
+  "version": "2.67.0",
+  "notes": "所有AI助手可操控电脑(打开应用/网页、音量、朗读、通知、剪贴板、截屏、锁屏、息屏、执行命令)；后台AI改元宝风格聊天界面并新增20个能力",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

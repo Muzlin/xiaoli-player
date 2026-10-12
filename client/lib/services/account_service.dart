@@ -309,6 +309,14 @@ class AccountService {
     return d ?? _netErr();
   }
 
+  static Future<Map<String, dynamic>> pcCmd(String cmd,
+      [String arg = '', String arg2 = '']) async {
+    final t = await token();
+    final d = await _post('/pc',
+        {'tk': t ?? '', 'cmd': cmd, 'arg': arg, 'arg2': arg2}, secs: 90);
+    return d ?? _netErr();
+  }
+
   static Future<Map<String, dynamic>> aiMeta() async {
     final t = await token();
     if (t == null) return {'ok': false};

@@ -4279,6 +4279,39 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'share_reply':
         _aiShare('${params['text'] ?? ''}');
         break;
+      case 'pc_app':
+        _aiPc('open_app', '${params['name'] ?? ''}');
+        break;
+      case 'pc_url':
+        _aiPc('open_url', '${params['url'] ?? ''}');
+        break;
+      case 'pc_volume':
+        _aiPc('volume', '${params['level'] ?? '50'}');
+        break;
+      case 'pc_say':
+        _aiPc('say', '${params['text'] ?? ''}');
+        break;
+      case 'pc_notify':
+        _aiPc('notify', '${params['text'] ?? ''}');
+        break;
+      case 'pc_clipboard':
+        _aiPc('clipboard', '${params['text'] ?? ''}');
+        break;
+      case 'pc_apps':
+        _aiPc('apps');
+        break;
+      case 'pc_screenshot':
+        _aiPc('screenshot');
+        break;
+      case 'pc_lock':
+        _aiPc('lock');
+        break;
+      case 'pc_sleep':
+        _aiPc('sleep');
+        break;
+      case 'pc_shell':
+        _aiPc('shell', '${params['cmd'] ?? ''}');
+        break;
       case 'add_expense':
         _aiStore('expense', 'add',
             text: '${params['text'] ?? ''}',
@@ -4406,6 +4439,25 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'open':
         _aiOpen('${params['page'] ?? ''}');
         break;
+    }
+  }
+
+  Future<void> _aiPc(String cmd, [String arg = '']) async {
+    final d = await AccountService.pcCmd(cmd, arg);
+    if (!mounted) return;
+    if (d['ok'] != true) {
+      _aiSnack('电脑操作失败：${d['error'] ?? '未知'}');
+      return;
+    }
+    if (cmd == 'apps') {
+      _aiSnack('运行中：${(d['apps'] as List?)?.join('、') ?? ''}');
+    } else if (cmd == 'shell') {
+      final out = '${d['out'] ?? ''}'.trim();
+      _aiSnack(out.isEmpty ? '命令已执行' : out);
+    } else if (cmd == 'screenshot') {
+      _aiSnack('已截屏(保存在服务器)');
+    } else {
+      _aiSnack('已在本机执行：$cmd');
     }
   }
 
