@@ -4285,6 +4285,9 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'pc_url':
         _aiPc('open_url', '${params['url'] ?? ''}');
         break;
+      case 'pc_settings':
+        _aiPc('open_settings', '${params['name'] ?? ''}');
+        break;
       case 'pc_volume':
         _aiPc('volume', '${params['level'] ?? '50'}');
         break;

@@ -1,6 +1,6 @@
 {
-  "version": "2.68.0",
-  "notes": "命令/终端输出直接显示在AI对话里(后台+App)；修复pc-shell unknown action；后台AI不再拒绝打开程序",
+  "version": "2.69.0",
+  "notes": "执行结果独立输出区；支持打开系统设置(电池/蓝牙/显示/网络…)；AI JSON解析容错；路径别名(桌面/下载/项目)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
