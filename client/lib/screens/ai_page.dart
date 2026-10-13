@@ -112,18 +112,44 @@ class _AiPageState extends State<AiPage> {
         SnackBar(content: Text(v == 'up' ? '感谢反馈 👍' : '已记录，我们会改进')));
   }
 
-  void _runActions(Map<String, dynamic> d) {
+  Future<void> _runActions(Map<String, dynamic> d) async {
     final acts = d['actions'];
-    if (acts is List && widget.onAction != null) {
-      for (final a in acts) {
-        if (a is Map && a['action'] != null) {
-          final params = (a['params'] is Map)
-              ? Map<String, dynamic>.from(a['params'] as Map)
-              : <String, dynamic>{};
-          widget.onAction!('${a['action']}', params);
+    if (acts is! List) return;
+    for (final a in acts) {
+      if (a is! Map || a['action'] == null) continue;
+      final action = '${a['action']}';
+      final params = (a['params'] is Map)
+          ? Map<String, dynamic>.from(a['params'] as Map)
+          : <String, dynamic>{};
+      // 电脑终端类操作：把输出直接显示在对话里
+      if (action == 'pc_shell' ||
+          action == 'pc_apps' ||
+          action == 'pc_screenshot') {
+        final cmd = action == 'pc_shell'
+            ? 'shell'
+            : (action == 'pc_apps' ? 'apps' : 'screenshot');
+        final r = await AccountService.pcCmd(cmd, '${params['cmd'] ?? ''}');
+        if (!mounted) return;
+        String out;
+        if (r['out'] != null || r['err'] != null) {
+          out = '${r['out'] ?? ''}' +
+              ((r['err'] ?? '').toString().trim().isEmpty
+                  ? ''
+                  : '\n[err] ${r['err']}');
+        } else if (r['apps'] is List) {
+          out = (r['apps'] as List).join('、');
+        } else if (r['ok'] == true) {
+          out = '已执行';
+        } else {
+          out = '失败：${r['error'] ?? '未知'}';
         }
+        if (out.trim().isEmpty) out = '(无输出)';
+        setState(() => _msgs.add({'role': 'assistant', 'content': '🖥️ $out'}));
+        continue;
       }
+      widget.onAction?.call(action, params);
     }
+    _jump();
   }
 
   Future<void> _regenerate() async {

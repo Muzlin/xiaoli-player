@@ -1,6 +1,6 @@
 {
-  "version": "2.67.0",
-  "notes": "所有AI助手可操控电脑(打开应用/网页、音量、朗读、通知、剪贴板、截屏、锁屏、息屏、执行命令)；后台AI改元宝风格聊天界面并新增20个能力",
+  "version": "2.68.0",
+  "notes": "命令/终端输出直接显示在AI对话里(后台+App)；修复pc-shell unknown action；后台AI不再拒绝打开程序",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
