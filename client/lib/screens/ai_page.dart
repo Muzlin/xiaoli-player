@@ -427,6 +427,89 @@ class _AiPageState extends State<AiPage> {
           sb.writeln(t.substring(i, (i + n).clamp(0, t.length)));
         }
         return sb.toString().trimRight();
+      case 'markdown_table':
+        final rows = t.split('\n').where((l) => l.trim().isNotEmpty).toList();
+        if (rows.isEmpty) return '无内容';
+        final cells = rows.map((r) => r.split(RegExp(r'[,\t]'))).toList();
+        final cols = cells.map((c) => c.length).reduce((a, b) => a > b ? a : b);
+        final sb = StringBuffer();
+        for (var i = 0; i < cells.length; i++) {
+          final c = List<String>.from(cells[i]);
+          while (c.length < cols) {
+            c.add('');
+          }
+          sb.writeln('| ${c.join(' | ')} |');
+          if (i == 0) {
+            sb.writeln('|${List.filled(cols, '---').join('|')}|');
+          }
+        }
+        return sb.toString().trimRight();
+      case 'bullet_list':
+        return t.split('\n').where((l) => l.trim().isNotEmpty).map((l) => '- $l').join('\n');
+      case 'numbered_list':
+        var i = 0;
+        return t.split('\n').where((l) => l.trim().isNotEmpty).map((l) => '${++i}. $l').join('\n');
+      case 'sort_by_length':
+        final ls = t.split('\n')..sort((a, b) => a.length.compareTo(b.length));
+        return ls.join('\n');
+      case 'longest_line':
+        final ls = t.split('\n');
+        return ls.isEmpty ? '' : (ls..sort((a, b) => b.length.compareTo(a.length))).first;
+      case 'shortest_line':
+        final ls = t.split('\n');
+        return ls.isEmpty ? '' : (ls..sort((a, b) => a.length.compareTo(b.length))).first;
+      case 'avg_line_length':
+        final ls = t.split('\n');
+        return ls.isEmpty ? '0' : '平均行长：${(ls.fold<int>(0, (s, l) => s + l.length) / ls.length).toStringAsFixed(1)}';
+      case 'word_freq':
+        final ws = t.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+        final m = <String, int>{};
+        for (final w in ws) {
+          m[w] = (m[w] ?? 0) + 1;
+        }
+        final es = m.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+        return es.take(20).map((e) => '${e.key} ×${e.value}').join('　');
+      case 'remove_dup_words':
+        final seen = <String>{};
+        return t.split(RegExp(r'\s+')).where((w) => w.isNotEmpty && seen.add(w)).join(' ');
+      case 'swap_case':
+        return t.split('').map((c) => c == c.toUpperCase() ? c.toLowerCase() : c.toUpperCase()).join();
+      case 'capitalize_sentences':
+        return t.replaceAllMapped(RegExp(r'(^|[.!?。！？]\s*)([a-z])'),
+            (m) => '${m.group(1)}${m.group(2)!.toUpperCase()}');
+      case 'split_comma':
+        return t.split(RegExp(r'[,，]')).map((s) => s.trim()).where((s) => s.isNotEmpty).join('\n');
+      case 'join_lines':
+        return t.split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).join(' ');
+      case 'remove_empty_lines':
+        return t.split('\n').where((l) => l.trim().isNotEmpty).join('\n');
+      case 'add_line_numbers':
+        var i = 0;
+        return t.split('\n').map((l) => '${(++i).toString().padLeft(2, '0')} | $l').join('\n');
+      case 'reverse_lines':
+        return t.split('\n').reversed.join('\n');
+      case 'lines_to_csv':
+        return t.split('\n').where((l) => l.trim().isNotEmpty).map((l) => '"${l.replaceAll('"', '""')}"').join(',');
+      case 'quote_each':
+        return t.split('\n').map((l) => '「$l」').join('\n');
+      case 'escape_json':
+        return jsonEncode(t);
+      case 'unescape_json':
+        try {
+          final v = jsonDecode(t);
+          return '$v';
+        } catch (_) {
+          return t.replaceAll('\\n', '\n').replaceAll('\\"', '"');
+        }
+      case 'count_paragraphs':
+        return '段落数：${t.split(RegExp(r'\n\s*\n')).where((s) => s.trim().isNotEmpty).length}';
+      case 'first_letters':
+        return t.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).map((w) => w[0]).join();
+      case 'acronym':
+        return t.split(RegExp(r'[\s\-_]+')).where((w) => w.isNotEmpty).map((w) => w[0].toUpperCase()).join();
+      case 'lorem_ipsum':
+        return '这里是占位文本，用于排版预览。你可以把这段文字替换成自己的内容，'
+            '保持段落长度大致相当，整体看起来会更整齐。';
       default:
         return null;
     }
