@@ -1,6 +1,6 @@
 {
-  "version": "2.75.0",
-  "notes": "AI再加50功能：后台25个(RFM/同期群/漏斗/帕累托/留存曲线/流失预测/风险评分/热力图等分析)；客户端25个(文本统计/可读性/口播时长/关键词/分句分段/手机号身份证邮箱打码/校验/生成测试数据等)",
+  "version": "2.76.0",
+  "notes": "新增系统工具页 /sysmon(CPU/内存/温度/磁盘/电池/网络，2秒自动刷新)；AI知道用sysmon而不是乱跑命令；后台AI单实例修复+超时重试",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

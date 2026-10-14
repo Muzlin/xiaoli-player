@@ -35,6 +35,7 @@ import 'recharge_page.dart';
 import 'account_page.dart';
 import 'ai_page.dart';
 import 'ai_trainer_page.dart';
+import 'admin_console_page.dart';
 import 'license_pages_zh.dart';
 import 'live_page.dart';
 import '../player/player_holder.dart';
@@ -4311,6 +4312,11 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         break;
       case 'pc_sleep':
         _aiPc('sleep');
+        break;
+      case 'sysmon':
+        Navigator.of(context).push(MaterialPageRoute<void>(
+            builder: (_) => AdminConsolePage(
+                url: '${PlatformService.current}/sysmon')));
         break;
       case 'pc_shell':
         _aiPc('shell', '${params['cmd'] ?? ''}');
