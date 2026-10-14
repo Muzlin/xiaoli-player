@@ -595,6 +595,148 @@ class _AiPageState extends State<AiPage> {
         return t.isEmpty ? t : t[0].toUpperCase() + t.substring(1);
       case 'remove_blank_lines':
         return t.split(RegExp(r'\n\s*\n')).map((s) => s.trim()).where((s) => s.isNotEmpty).join('\n');
+      case 'date_add':
+        try {
+          final d = DateTime.parse(t.trim()).add(Duration(days: int.tryParse('${p['n'] ?? '1'}') ?? 1));
+          return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+        } catch (_) {
+          return '日期格式如 2026-01-01';
+        }
+      case 'date_format':
+        try {
+          final d = DateTime.parse(t.trim());
+          const wk = ['一', '二', '三', '四', '五', '六', '日'];
+          return '${d.year}年${d.month}月${d.day}日 星期${wk[d.weekday - 1]}';
+        } catch (_) {
+          return '日期格式如 2026-01-01';
+        }
+      case 'time_diff':
+        try {
+          final a = DateTime.parse('${p['a']}');
+          final b = DateTime.parse('${p['b']}');
+          final m = b.difference(a).inMinutes;
+          return '相差 ${m ~/ 1440} 天 ${(m % 1440) ~/ 60} 小时 ${m % 60} 分';
+        } catch (_) {
+          return '需要 a、b 两个日期(YYYY-MM-DD)';
+        }
+      case 'age_calc':
+        try {
+          final b = DateTime.parse(t.trim());
+          final d = DateTime.now();
+          var age = d.year - b.year;
+          if (d.month < b.month || (d.month == b.month && d.day < b.day)) age--;
+          return '年龄：$age 岁';
+        } catch (_) {
+          return '生日格式如 2008-06-01';
+        }
+      case 'weekday_name':
+        try {
+          const wk = ['一', '二', '三', '四', '五', '六', '日'];
+          return '星期${wk[DateTime.parse(t.trim()).weekday - 1]}';
+        } catch (_) {
+          return '日期格式如 2026-01-01';
+        }
+      case 'is_weekend':
+        try {
+          final w = DateTime.parse(t.trim()).weekday;
+          return w >= 6 ? '是周末' : '是工作日';
+        } catch (_) {
+          return '日期格式如 2026-01-01';
+        }
+      case 'week_ago':
+        final d = DateTime.now().subtract(const Duration(days: 7));
+        return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
+      case 'month_days':
+        final d = DateTime.now();
+        final n = DateTime(d.year, d.month + 1, 0).day;
+        return '本月共 $n 天';
+      case 'leap_year':
+        final y = int.tryParse(t.trim()) ?? DateTime.now().year;
+        return '${(y % 4 == 0 && y % 100 != 0) || y % 400 == 0 ? '是' : '不是'}闰年';
+      case 'num_to_chinese':
+        const dg = '零一二三四五六七八九';
+        final v = t.trim();
+        final sb = StringBuffer();
+        for (final c in v.split('')) {
+          final d = int.tryParse(c);
+          sb.write(d == null ? c : dg[d]);
+        }
+        return sb.toString();
+      case 'thousands':
+        final v = double.tryParse(t.trim());
+        if (v == null) return '请输入数字';
+        final s = v.toStringAsFixed(2).split('.');
+        final buf = StringBuffer();
+        final int3 = s[0];
+        for (var i = 0; i < int3.length; i++) {
+          if (i > 0 && (int3.length - i) % 3 == 0) buf.write(',');
+          buf.write(int3[i]);
+        }
+        return '${buf.toString()}.${s[1]}';
+      case 'round_num':
+        final v = double.tryParse(t.trim());
+        final n = int.tryParse('${p['n'] ?? '2'}') ?? 2;
+        return v == null ? '请输入数字' : v.toStringAsFixed(n);
+      case 'gcd_lcm':
+        final a = int.tryParse('${p['a'] ?? 0}') ?? 0;
+        final b = int.tryParse('${p['b'] ?? 0}') ?? 0;
+        if (a <= 0 || b <= 0) return '需要两个正整数(a,b)';
+        var x = a, y = b;
+        while (y != 0) {
+          final t = x % y;
+          x = y;
+          y = t;
+        }
+        return '最大公约数：$x　最小公倍数：${a * b ~/ x}';
+      case 'factorial':
+        final n0 = int.tryParse(t.trim());
+        if (n0 == null || n0 < 0 || n0 > 20) return '请输入 0-20 的整数';
+        var f = 1;
+        for (var i = 2; i <= n0; i++) {
+          f *= i;
+        }
+        return '$n0! = $f';
+      case 'prime_check':
+        final n0 = int.tryParse(t.trim());
+        if (n0 == null || n0 < 2) return '不是质数';
+        var prime = true;
+        for (var i = 2; i * i <= n0; i++) {
+          if (n0 % i == 0) {
+            prime = false;
+            break;
+          }
+        }
+        return '$n0 ${prime ? '是' : '不是'}质数';
+      case 'fibonacci':
+        final n0 = (int.tryParse(t.trim()) ?? 10).clamp(1, 90);
+        var a = 0, b = 1;
+        final out = <int>[];
+        for (var i = 0; i < n0; i++) {
+          out.add(a);
+          final t2 = a + b;
+          a = b;
+          b = t2;
+        }
+        return out.join(' ');
+      case 'power':
+        final a = double.tryParse('${p['a'] ?? 0}') ?? 0;
+        final b = double.tryParse('${p['b'] ?? 2}') ?? 2;
+        return '${p['a']} ^ ${p['b']} = ${pow(a, b).toStringAsFixed(6).replaceAll(RegExp(r'0+$'), '').replaceAll(RegExp(r'\.$'), '')}';
+      case 'sqrt':
+        final v = double.tryParse(t.trim());
+        return v == null || v < 0 ? '请输入非负数' : '√$v = ${sqrt(v)}';
+      case 'average':
+        final ns = RegExp(r'-?\d+\.?\d*').allMatches(t).map((m) => double.parse(m.group(0)!)).toList();
+        if (ns.isEmpty) return '没找到数字';
+        return '平均值：${(ns.reduce((x, y) => x + y) / ns.length).toStringAsFixed(2)}';
+      case 'sum_numbers':
+        final ns = RegExp(r'-?\d+\.?\d*').allMatches(t).map((m) => double.parse(m.group(0)!)).toList();
+        if (ns.isEmpty) return '没找到数字';
+        return '合计：${ns.fold<double>(0, (x, y) => x + y).toStringAsFixed(2)}';
+      case 'min_max':
+        final ns = RegExp(r'-?\d+\.?\d*').allMatches(t).map((m) => double.parse(m.group(0)!)).toList();
+        if (ns.isEmpty) return '没找到数字';
+        return '最小：${ns.reduce((x, y) => x < y ? x : y)}　最大：${ns.reduce((x, y) => x > y ? x : y)}';
       default:
         return null;
     }
