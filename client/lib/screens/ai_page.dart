@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -147,9 +148,169 @@ class _AiPageState extends State<AiPage> {
         setState(() => _msgs.add({'role': 'assistant', 'content': '🖥️ $out'}));
         continue;
       }
+      // 本地工具(不调模型，直接算)
+      if (action == 'new_chat') {
+        setState(() => _msgs.clear());
+        continue;
+      }
+      if (action == 'copy_last' || action == 'speak_last') {
+        final m = _msgs.lastWhere((x) => x['role'] == 'assistant',
+            orElse: () => <String, String>{});
+        final txt = m['content'] ?? '';
+        if (txt.isNotEmpty) {
+          if (action == 'copy_last') {
+            _copy(txt);
+          } else {
+            _speak(txt);
+          }
+        }
+        continue;
+      }
+      final local = _localUtil(action, params);
+      if (local != null) {
+        setState(() => _msgs.add({'role': 'assistant', 'content': local}));
+        continue;
+      }
       widget.onAction?.call(action, params);
     }
     _jump();
+  }
+
+  double? _evalExpr(String e) {
+    final tokens = <String>[];
+    for (final m
+        in RegExp(r'\d+\.?\d*|[+\-*/()]').allMatches(e.replaceAll(' ', ''))) {
+      tokens.add(m.group(0)!);
+    }
+    if (tokens.isEmpty) return null;
+    var i = 0;
+    late double Function() expr;
+    double factor() {
+      if (i >= tokens.length) return 0;
+      final t = tokens[i];
+      if (t == '(') {
+        i++;
+        final v = expr();
+        if (i < tokens.length && tokens[i] == ')') i++;
+        return v;
+      }
+      if (t == '-') {
+        i++;
+        return -factor();
+      }
+      i++;
+      return double.tryParse(t) ?? 0;
+    }
+
+    double term() {
+      var v = factor();
+      while (i < tokens.length && (tokens[i] == '*' || tokens[i] == '/')) {
+        final op = tokens[i++];
+        final r = factor();
+        v = op == '*' ? v * r : v / r;
+      }
+      return v;
+    }
+
+    double exprFn() {
+      var v = term();
+      while (i < tokens.length && (tokens[i] == '+' || tokens[i] == '-')) {
+        final op = tokens[i++];
+        final r = term();
+        v = op == '+' ? v + r : v - r;
+      }
+      return v;
+    }
+
+    expr = exprFn;
+    final v = exprFn();
+    return v.isFinite ? v : null;
+  }
+
+  String? _localUtil(String action, Map<String, dynamic> p) {
+    final t = '${p['text'] ?? p['value'] ?? ''}';
+    switch (action) {
+      case 'count_words':
+        final chars = t.replaceAll(RegExp(r'\s'), '').length;
+        final words = t.trim().isEmpty
+            ? 0
+            : t.trim().split(RegExp(r'\s+')).length;
+        return '字符数(不含空格)：$chars　词数：$words　总长度：${t.length}';
+      case 'line_count':
+        return '行数：${t.isEmpty ? 0 : t.split('\n').length}';
+      case 'upper_text':
+        return t.toUpperCase();
+      case 'lower_text':
+        return t.toLowerCase();
+      case 'reverse_text':
+        return String.fromCharCodes(t.runes.toList().reversed);
+      case 'remove_spaces':
+        return t.replaceAll(RegExp(r'\s+'), '');
+      case 'trim_text':
+        return t.trim();
+      case 'repeat_text':
+        final n = (int.tryParse('${p['n'] ?? '2'}') ?? 2).clamp(1, 100);
+        return List.filled(n, t).join('\n');
+      case 'dedup_lines':
+        final seen = <String>{};
+        final out = <String>[];
+        for (final l in t.split('\n')) {
+          if (seen.add(l.trim())) out.add(l);
+        }
+        return out.join('\n');
+      case 'sort_lines':
+        final ls = t.split('\n')..sort();
+        return ls.join('\n');
+      case 'shuffle_text':
+        final ls = t.split('')..shuffle();
+        return ls.join();
+      case 'base64_encode':
+        return base64Encode(utf8.encode(t));
+      case 'base64_decode':
+        try {
+          return utf8.decode(base64Decode(t.trim()));
+        } catch (_) {
+          return '解码失败(不是合法 Base64)';
+        }
+      case 'url_encode':
+        return Uri.encodeComponent(t);
+      case 'url_decode':
+        try {
+          return Uri.decodeComponent(t);
+        } catch (_) {
+          return '解码失败';
+        }
+      case 'calc':
+        final v = _evalExpr('${p['expr'] ?? t}');
+        return v == null ? '算不了(${p['expr'] ?? t})' : '= $v';
+      case 'percent':
+        final a = double.tryParse('${p['a'] ?? 0}') ?? 0;
+        final b = double.tryParse('${p['b'] ?? 1}') ?? 1;
+        return '$a / $b = ${(a / b * 100).toStringAsFixed(2)}%';
+      case 'bmi':
+        final h = (double.tryParse('${p['h'] ?? 0}') ?? 0) / 100;
+        final w = double.tryParse('${p['w'] ?? 0}') ?? 0;
+        if (h <= 0) return '请提供身高(cm)和体重(kg)';
+        return 'BMI = ${(w / (h * h)).toStringAsFixed(1)}';
+      case 'tip_calc':
+        final a = double.tryParse('${p['amount'] ?? 0}') ?? 0;
+        final pc = double.tryParse('${p['pct'] ?? 10}') ?? 10;
+        return '金额 $a × $pc% = ${(a * pc / 100).toStringAsFixed(2)}';
+      case 'random_number':
+        final a = int.tryParse('${p['min'] ?? 1}') ?? 1;
+        final b = int.tryParse('${p['max'] ?? 100}') ?? 100;
+        final lo = a < b ? a : b;
+        final hi = a < b ? b : a;
+        return '随机数：${lo + Random().nextInt(hi - lo + 1)}';
+      case 'timestamp':
+        return '当前时间戳：${DateTime.now().millisecondsSinceEpoch ~/ 1000}';
+      case 'date_today':
+        final d = DateTime.now();
+        const wk = ['一', '二', '三', '四', '五', '六', '日'];
+        return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} 星期${wk[d.weekday - 1]}';
+      default:
+        return null;
+    }
   }
 
   Future<void> _regenerate() async {

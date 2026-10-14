@@ -1,6 +1,6 @@
 {
-  "version": "2.69.0",
-  "notes": "执行结果独立输出区；支持打开系统设置(电池/蓝牙/显示/网络…)；AI JSON解析容错；路径别名(桌面/下载/项目)",
+  "version": "2.70.0",
+  "notes": "AI共加50个功能：后台25个(日报/周报/增长/流失/ARPU/LTV/转化/风险/安全扫描/备份等经营分析)；客户端25个(新对话/复制/朗读/字数/计算/大小写/反转/去重/排序/Base64/URL编码/时间戳/BMI等本地工具)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
