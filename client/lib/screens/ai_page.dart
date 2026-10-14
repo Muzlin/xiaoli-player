@@ -737,6 +737,111 @@ class _AiPageState extends State<AiPage> {
         final ns = RegExp(r'-?\d+\.?\d*').allMatches(t).map((m) => double.parse(m.group(0)!)).toList();
         if (ns.isEmpty) return '没找到数字';
         return '最小：${ns.reduce((x, y) => x < y ? x : y)}　最大：${ns.reduce((x, y) => x > y ? x : y)}';
+      case 'text_stats':
+        final cn = RegExp(r'[\u4e00-\u9fff]').allMatches(t).length;
+        final en = RegExp(r'[A-Za-z]').allMatches(t).length;
+        final dg = RegExp(r'\d').allMatches(t).length;
+        return '中文 $cn　字母 $en　数字 $dg　总长 ${t.length}';
+      case 'reading_time':
+        return '阅读约 ${(t.length / 300).ceil().clamp(1, 999)} 分钟';
+      case 'speaking_time':
+        return '口播约 ${(t.length / 4 / 60).ceil().clamp(1, 999)} 分钟（按每分钟240字）';
+      case 'keyword_extract':
+        final ws = t.split(RegExp(r'[\s,，。.、]+')).where((w) => w.length >= 2).toList();
+        final m = <String, int>{};
+        for (final w in ws) {
+          m[w] = (m[w] ?? 0) + 1;
+        }
+        final es = m.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+        return es.take(15).map((e) => e.key).join('、');
+      case 'sentence_split':
+        return t.split(RegExp(r'(?<=[。！？!?.])')).map((s) => s.trim()).where((s) => s.isNotEmpty).join('\n');
+      case 'paragraph_split':
+        return t.split(RegExp(r'\n\s*\n')).map((s) => s.trim()).where((s) => s.isNotEmpty).join('\n---\n');
+      case 'mask_phone':
+        return t.replaceAllMapped(RegExp(r'1[3-9]\d{9}'), (m) => '${m.group(0)!.substring(0, 3)}****${m.group(0)!.substring(7)}');
+      case 'mask_idcard':
+        return t.replaceAllMapped(RegExp(r'\d{17}[\dXx]'), (m) => '${m.group(0)!.substring(0, 6)}********${m.group(0)!.substring(14)}');
+      case 'mask_email':
+        return t.replaceAllMapped(RegExp(r'([\w.+-]{1,2})[\w.+-]*@'), (m) => '${m.group(1)}***@');
+      case 'mask_name':
+        return t.replaceAllMapped(RegExp(r'([\u4e00-\u9fff])[\u4e00-\u9fff]{1,2}(?=[\s，。,.!！?？]|$)'), (m) => '${m.group(1)}**');
+      case 'mask_all':
+        var o = t;
+        o = o.replaceAllMapped(RegExp(r'1[3-9]\d{9}'), (m) => '${m.group(0)!.substring(0, 3)}****${m.group(0)!.substring(7)}');
+        o = o.replaceAllMapped(RegExp(r'\d{17}[\dXx]'), (m) => '${m.group(0)!.substring(0, 6)}********${m.group(0)!.substring(14)}');
+        o = o.replaceAllMapped(RegExp(r'([\w.+-]{1,2})[\w.+-]*@'), (m) => '${m.group(1)}***@');
+        return o;
+      case 'is_phone':
+        return RegExp(r'^1[3-9]\d{9}$').hasMatch(t.trim()) ? '是合法手机号' : '不是手机号';
+      case 'is_email':
+        return RegExp(r'^[\w.+-]+@[\w-]+\.[\w.]+$').hasMatch(t.trim()) ? '是合法邮箱' : '不是邮箱';
+      case 'is_idcard':
+        final s = t.trim().toUpperCase();
+        if (!RegExp(r'^\d{17}[\dX]$').hasMatch(s)) return '不是身份证号';
+        const w = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+        const ck = '10X98765432';
+        var sum = 0;
+        for (var i = 0; i < 17; i++) {
+          sum += int.parse(s[i]) * w[i];
+        }
+        return ck[sum % 11] == s[17] ? '是合法身份证号' : '校验位不对';
+      case 'is_url':
+        return RegExp(r'^https?://[^\s]+$').hasMatch(t.trim()) ? '是合法网址' : '不是网址';
+      case 'is_ip':
+        final p2 = t.trim().split('.');
+        if (p2.length == 4 &&
+            p2.every((x) => int.tryParse(x) != null && int.parse(x) >= 0 && int.parse(x) <= 255)) {
+          return '是合法IP';
+        }
+        return '不是IP';
+      case 'normalize_phone':
+        final d = t.replaceAll(RegExp(r'\D'), '');
+        final s = d.length > 11 ? d.substring(d.length - 11) : d;
+        return s.length == 11 ? '${s.substring(0, 3)} ${s.substring(3, 7)} ${s.substring(7)}' : '不是手机号';
+      case 'extract_phone':
+        final ms = RegExp(r'1[3-9]\d{9}').allMatches(t).map((m) => m.group(0)).toList();
+        return ms.isEmpty ? '没找到手机号' : ms.join('\n');
+      case 'extract_ip':
+        final ms = RegExp(r'\b\d{1,3}(\.\d{1,3}){3}\b').allMatches(t).map((m) => m.group(0)).toList();
+        return ms.isEmpty ? '没找到IP' : ms.join('\n');
+      case 'gen_phone':
+        final r = Random();
+        const pre = ['138', '139', '150', '152', '158', '186', '188', '199'];
+        final sb = StringBuffer(pre[r.nextInt(pre.length)]);
+        for (var i = 0; i < 8; i++) {
+          sb.write(r.nextInt(10));
+        }
+        return '测试手机号：$sb';
+      case 'gen_idcard':
+        final r = Random();
+        final sb = StringBuffer('110105');
+        sb.write(1970 + r.nextInt(40));
+        sb.write((1 + r.nextInt(12)).toString().padLeft(2, '0'));
+        sb.write((1 + r.nextInt(28)).toString().padLeft(2, '0'));
+        for (var i = 0; i < 3; i++) {
+          sb.write(r.nextInt(10));
+        }
+        const w = [7, 9, 10, 5, 8, 4, 2, 1, 6, 3, 7, 9, 10, 5, 8, 4, 2];
+        const ck = '10X98765432';
+        var sum = 0;
+        for (var i = 0; i < 17; i++) {
+          sum += int.parse(sb.toString()[i]) * w[i];
+        }
+        return '测试身份证：$sb${ck[sum % 11]}';
+      case 'highlight_keywords':
+        final kw = '${p['kw'] ?? ''}';
+        if (kw.isEmpty) return '请提供关键词(kw)';
+        return t.replaceAll(kw, '【$kw】');
+      case 'barcode_text':
+        return '条形码文本：${t.replaceAll(RegExp(r'\D'), '')}';
+      case 'qr_payload':
+        return '二维码内容：$t';
+      case 'readability':
+        final sentences = t.split(RegExp(r'[。！？.!?]')).where((s) => s.trim().isNotEmpty).length;
+        if (sentences == 0) return '无内容';
+        final avg = t.length / sentences;
+        return '平均句长 ${avg.toStringAsFixed(1)} 字 —— ${avg < 20 ? '很易懂' : avg < 35 ? '适中' : '偏长，建议拆句'}';
       default:
         return null;
     }
