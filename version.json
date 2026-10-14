@@ -1,6 +1,6 @@
 {
-  "version": "2.70.0",
-  "notes": "AI共加50个功能：后台25个(日报/周报/增长/流失/ARPU/LTV/转化/风险/安全扫描/备份等经营分析)；客户端25个(新对话/复制/朗读/字数/计算/大小写/反转/去重/排序/Base64/URL编码/时间戳/BMI等本地工具)",
+  "version": "2.71.0",
+  "notes": "AI再加50功能：后台25个(导出CSV/经营报告/孤儿文件/缺失文件/清理/全员发分/公告等)；客户端25个(UUID/随机颜色/命名转换/去HTML/提取链接数字邮箱/JSON格式化/进制转换/罗马数字/密码强度等)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

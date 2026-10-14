@@ -308,6 +308,125 @@ class _AiPageState extends State<AiPage> {
         final d = DateTime.now();
         const wk = ['一', '二', '三', '四', '五', '六', '日'];
         return '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')} 星期${wk[d.weekday - 1]}';
+      case 'gen_uuid':
+        final r = Random.secure();
+        final h = List.generate(32, (_) => r.nextInt(16).toRadixString(16)).join();
+        return '${h.substring(0, 8)}-${h.substring(8, 12)}-${h.substring(12, 16)}-${h.substring(16, 20)}-${h.substring(20)}';
+      case 'random_color':
+        final r = Random();
+        final c = '#${(r.nextInt(0xffffff)).toRadixString(16).padLeft(6, '0').toUpperCase()}';
+        return '随机颜色：$c';
+      case 'pick_emoji':
+        const es = ['😀', '😂', '🥰', '😎', '🤔', '👍', '🎬', '🔥', '🎵', '🍜', '🌈', '⭐', '💡', '🚀', '🍺', '🐱'];
+        return '随机表情：${es[Random().nextInt(es.length)]}';
+      case 'snake_case':
+        return t.replaceAllMapped(RegExp(r'[A-Z\s]+'), (m) => '_${m.group(0)!.toLowerCase().trim()}')
+            .replaceAll(RegExp(r'_+'), '_').replaceAll(RegExp(r'^_|_$'), '');
+      case 'camel_case':
+        final parts = t.split(RegExp(r'[\s_\-]+')).where((s) => s.isNotEmpty).toList();
+        if (parts.isEmpty) return '';
+        return parts.first.toLowerCase() +
+            parts.skip(1).map((s) => s[0].toUpperCase() + s.substring(1).toLowerCase()).join();
+      case 'title_case':
+        return t.replaceAllMapped(RegExp(r'\b\w'), (m) => m.group(0)!.toUpperCase());
+      case 'strip_html':
+        return t.replaceAll(RegExp(r'<[^>]*>'), '');
+      case 'markdown_strip':
+        return t.replaceAll(RegExp(r'[*_`#>\[\]()]'), '');
+      case 'extract_urls':
+        final ms = RegExp(r'https?://[^\s]+').allMatches(t).map((m) => m.group(0)).toList();
+        return ms.isEmpty ? '没找到链接' : ms.join('\n');
+      case 'extract_numbers':
+        final ms = RegExp(r'-?\d+\.?\d*').allMatches(t).map((m) => m.group(0)).toList();
+        return ms.isEmpty ? '没找到数字' : ms.join(' ');
+      case 'extract_emails':
+        final ms = RegExp(r'[\w.+-]+@[\w-]+\.[\w.]+').allMatches(t).map((m) => m.group(0)).toList();
+        return ms.isEmpty ? '没找到邮箱' : ms.join('\n');
+      case 'count_occurrences':
+        final w = '${p['word'] ?? ''}';
+        if (w.isEmpty) return '请提供要统计的词';
+        return '「$w」出现了 ${w.allMatches(t).length} 次';
+      case 'char_freq':
+        final m = <String, int>{};
+        for (final ch in t.split('')) {
+          if (ch.trim().isEmpty) continue;
+          m[ch] = (m[ch] ?? 0) + 1;
+        }
+        final es = m.entries.toList()..sort((a, b) => b.value.compareTo(a.value));
+        return es.take(20).map((e) => '${e.key} ${e.value}').join('　');
+      case 'json_format':
+        try {
+          return const JsonEncoder.withIndent('  ').convert(jsonDecode(t));
+        } catch (_) {
+          return '不是合法 JSON';
+        }
+      case 'json_minify':
+        try {
+          return jsonEncode(jsonDecode(t));
+        } catch (_) {
+          return '不是合法 JSON';
+        }
+      case 'truncate':
+        final n = (int.tryParse('${p['n'] ?? '20'}') ?? 20).clamp(1, 5000);
+        return t.length <= n ? t : '${t.substring(0, n)}…';
+      case 'pad_number':
+        final n = int.tryParse('${p['n'] ?? '4'}') ?? 4;
+        return t.padLeft(n, '0');
+      case 'binary_convert':
+        final v = int.tryParse(t.trim());
+        return v == null ? '请输入整数' : '二进制：${v.toRadixString(2)}';
+      case 'hex_convert':
+        final v = int.tryParse(t.trim());
+        return v == null ? '请输入整数' : '十六进制：0x${v.toRadixString(16).toUpperCase()}';
+      case 'ascii_convert':
+        return t.runes.map((c) => c <= 127 ? '$c' : '?').join(' ');
+      case 'roman_number':
+        final v = int.tryParse(t.trim());
+        if (v == null || v <= 0 || v > 3999) return '请输入 1-3999 的整数';
+        const map = [
+          [1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'], [100, 'C'],
+          [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'],
+          [5, 'V'], [4, 'IV'], [1, 'I']
+        ];
+        var x = v;
+        final sb = StringBuffer();
+        for (final e in map) {
+          final n = e[0] as int;
+          while (x >= n) {
+            sb.write(e[1]);
+            x -= n;
+          }
+        }
+        return '罗马数字：$sb';
+      case 'days_until':
+        try {
+          final d = DateTime.parse(t.trim());
+          final diff = d.difference(DateTime.now()).inDays;
+          return diff >= 0 ? '还有 $diff 天' : '已过 ${-diff} 天';
+        } catch (_) {
+          return '日期格式如 2026-12-31';
+        }
+      case 'week_number':
+        final d = DateTime.now();
+        final wk = ((d.difference(DateTime(d.year, 1, 1)).inDays) / 7).floor() + 1;
+        return '今年第 $wk 周';
+      case 'password_strength':
+        var sc = 0;
+        if (t.length >= 8) sc++;
+        if (t.length >= 12) sc++;
+        if (RegExp(r'[a-z]').hasMatch(t)) sc++;
+        if (RegExp(r'[A-Z]').hasMatch(t)) sc++;
+        if (RegExp(r'\d').hasMatch(t)) sc++;
+        if (RegExp(r'[^A-Za-z0-9]').hasMatch(t)) sc++;
+        const lv = ['很弱', '弱', '一般', '较强', '强', '很强'];
+        return '密码强度：${lv[sc.clamp(0, 5)]}（$sc/6）';
+      case 'word_wrap':
+        final n = (int.tryParse('${p['n'] ?? '20'}') ?? 20).clamp(1, 200);
+        final sb = StringBuffer();
+        for (var i = 0; i < t.length; i += n) {
+          sb.writeln(t.substring(i, (i + n).clamp(0, t.length)));
+        }
+        return sb.toString().trimRight();
       default:
         return null;
     }
