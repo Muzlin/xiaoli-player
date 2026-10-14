@@ -510,6 +510,91 @@ class _AiPageState extends State<AiPage> {
       case 'lorem_ipsum':
         return '这里是占位文本，用于排版预览。你可以把这段文字替换成自己的内容，'
             '保持段落长度大致相当，整体看起来会更整齐。';
+      case 'md_heading':
+        return '# $t';
+      case 'md_quote':
+        return t.split('\n').map((l) => '> $l').join('\n');
+      case 'md_code':
+        return '```\n$t\n```';
+      case 'md_link':
+        final parts = t.split(RegExp(r'\s+'));
+        return parts.length >= 2 ? '[${parts.sublist(1).join(' ')}](${parts[0]})' : '[]($t)';
+      case 'md_image':
+        final parts = t.split(RegExp(r'\s+'));
+        return parts.length >= 2 ? '![${parts.sublist(1).join(' ')}](${parts[0]})' : '![]($t)';
+      case 'md_checkbox':
+        return t.split('\n').where((l) => l.trim().isNotEmpty).map((l) => '- [ ] $l').join('\n');
+      case 'md_toc':
+        var i = 0;
+        return t.split('\n').where((l) => l.trim().isNotEmpty).map((l) => '- [${++i}](#${l.trim()})').join('\n');
+      case 'json_to_csv':
+        try {
+          final v = jsonDecode(t);
+          final list = v is List ? v : [v];
+          if (list.isEmpty) return '空';
+          final keys = (list.first as Map).keys.toList();
+          final sb = StringBuffer('${keys.join(',')}\n');
+          for (final row in list) {
+            sb.writeln(keys.map((k) => '"${(row as Map)[k] ?? ''}"').join(','));
+          }
+          return sb.toString().trimRight();
+        } catch (_) {
+          return '不是合法 JSON 数组';
+        }
+      case 'csv_to_json':
+        final ls = t.split('\n').where((l) => l.trim().isNotEmpty).toList();
+        if (ls.isEmpty) return '无内容';
+        final keys = ls.first.split(',');
+        final out = <Map<String, String>>[];
+        for (final l in ls.skip(1)) {
+          final vs = l.split(',');
+          final m = <String, String>{};
+          for (var i = 0; i < keys.length; i++) {
+            m[keys[i].trim()] = i < vs.length ? vs[i].trim() : '';
+          }
+          out.add(m);
+        }
+        return const JsonEncoder.withIndent('  ').convert(out);
+      case 'merge_unique':
+        final seen = <String>{};
+        return t.split('\n').where((l) => seen.add(l.trim())).join('\n');
+      case 'common_lines':
+        final a = (p['a'] ?? '').toString().split('\n').map((s) => s.trim()).toSet();
+        final b = (p['b'] ?? '').toString().split('\n').map((s) => s.trim()).toSet();
+        return a.intersection(b).where((s) => s.isNotEmpty).join('\n');
+      case 'only_first':
+        final a = (p['a'] ?? '').toString().split('\n').map((s) => s.trim()).toSet();
+        final b = (p['b'] ?? '').toString().split('\n').map((s) => s.trim()).toSet();
+        return a.difference(b).where((s) => s.isNotEmpty).join('\n');
+      case 'split_columns':
+        final sep = '${p['sep'] ?? ','}';
+        final cs = t.split('\n').where((l) => l.isNotEmpty).map((l) => l.split(sep)).toList();
+        final cols = cs.isEmpty ? 0 : cs.map((c) => c.length).reduce((a, b) => a > b ? a : b);
+        if (cols < 2) return '没找到分隔符';
+        return List.generate(cols, (i) => cs.map((c) => i < c.length ? c[i].trim() : '').join('\n')).join('\n---\n');
+      case 'wrap_quotes':
+        return '"${t.replaceAll('"', '\\"')}"';
+      case 'strip_punct':
+        return t.replaceAll(RegExp(r'[\p{P}\p{S}]', unicode: true), ' ');
+      case 'strip_digits':
+        return t.replaceAll(RegExp(r'\d'), '');
+      case 'keep_digits':
+        return t.replaceAll(RegExp(r'[^\d]'), '');
+      case 'keep_chinese':
+        return t.replaceAll(RegExp(r'[^\u4e00-\u9fff]'), '');
+      case 'keep_english':
+        return t.replaceAll(RegExp(r'[^A-Za-z\s]'), '');
+      case 'sort_numeric':
+        final ls = t.split('\n').where((l) => l.trim().isNotEmpty).toList();
+        ls.sort((a, b) => (double.tryParse(a) ?? 0).compareTo(double.tryParse(b) ?? 0));
+        return ls.join('\n');
+      case 'shuffle_lines':
+        final ls = t.split('\n')..shuffle();
+        return ls.join('\n');
+      case 'upper_first':
+        return t.isEmpty ? t : t[0].toUpperCase() + t.substring(1);
+      case 'remove_blank_lines':
+        return t.split(RegExp(r'\n\s*\n')).map((s) => s.trim()).where((s) => s.isNotEmpty).join('\n');
       default:
         return null;
     }

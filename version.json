@@ -1,6 +1,6 @@
 {
-  "version": "2.72.0",
-  "notes": "AI再加50功能：后台25个(分布/明细/榜单/存储分析)；客户端25个(生成表格/列表/词频/大小写/JSON转义/行处理等)",
+  "version": "2.73.0",
+  "notes": "AI再加50功能：后台25个(批量封号/发分/发通知/批量改视频/开关配置)；客户端25个(Markdown格式/JSON↔CSV/集合运算/字符保留/排序打乱等)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
