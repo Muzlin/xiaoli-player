@@ -4289,6 +4289,12 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
       case 'pc_settings':
         _aiPc('open_settings', '${params['name'] ?? ''}');
         break;
+      case 'pc_camera':
+        _aiPc('camera');
+        break;
+      case 'pc_record':
+        _aiPc('record');
+        break;
       case 'pc_volume':
         _aiPc('volume', '${params['level'] ?? '50'}');
         break;

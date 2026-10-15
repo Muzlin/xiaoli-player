@@ -1,6 +1,6 @@
 {
-  "version": "2.77.0",
-  "notes": "AI生成视频可选：是否有字幕、是否有配音、是否有画面(纯黑当音频)；用drawtext逐句字幕更稳；系统工具页/sysmon；后台AI强制纠正+超时重试",
+  "version": "2.78.0",
+  "notes": "AI可打开相机(Photo Booth)和录像(QuickTime)；命中相机/录像时强制纠错，不再回“不支持”",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
