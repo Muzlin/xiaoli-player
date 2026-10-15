@@ -411,11 +411,20 @@ class AccountService {
   }
 
   static Future<Map<String, dynamic>> aiVideo(String topic,
-      {String title = ''}) async {
+      {String title = '',
+      bool subtitle = true,
+      bool voice = true,
+      bool visual = true}) async {
     final t = await token();
     if (t == null) return {'ok': false, 'error': '请先登录账号'};
-    final d = await _post('/ai/video', {'tk': t, 'topic': topic, 'title': title},
-        secs: 900);
+    final d = await _post('/ai/video', {
+      'tk': t,
+      'topic': topic,
+      'title': title,
+      'subtitle': subtitle ? 1 : 0,
+      'voice': voice ? 1 : 0,
+      'visual': visual ? 1 : 0,
+    }, secs: 900);
     return d ?? _netErr();
   }
 

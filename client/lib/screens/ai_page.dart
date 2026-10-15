@@ -971,25 +971,64 @@ class _AiPageState extends State<AiPage> {
 
   Future<void> _makeVideo() async {
     final c = TextEditingController();
-    final topic = await showDialog<String>(
+    final t = TextEditingController();
+    bool sub = true, voice = true, vis = true;
+    final go = await showDialog<bool>(
       context: context,
-      builder: (x) => AlertDialog(
-        title: const Text('AI 生成视频'),
-        content: TextField(
-          controller: c,
-          autofocus: true,
-          decoration: const InputDecoration(hintText: '视频主题，如：健康饮食小知识'),
+      builder: (x) => StatefulBuilder(
+        builder: (x, setS) => AlertDialog(
+          title: const Text('AI 生成视频'),
+          content: SingleChildScrollView(
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              TextField(
+                  controller: c,
+                  autofocus: true,
+                  decoration: const InputDecoration(
+                      labelText: '主题', hintText: '如：健康饮食小知识')),
+              TextField(
+                  controller: t,
+                  decoration: const InputDecoration(labelText: '标题（可空）')),
+              const SizedBox(height: 6),
+              CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: sub,
+                  onChanged: (v) => setS(() => sub = v ?? true),
+                  title: const Text('有字幕'),
+                  subtitle: const Text('脚本逐句显示在画面下方')),
+              CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: voice,
+                  onChanged: (v) => setS(() => voice = v ?? true),
+                  title: const Text('有配音'),
+                  subtitle: const Text('TTS 语音讲解')),
+              CheckboxListTile(
+                  dense: true,
+                  contentPadding: EdgeInsets.zero,
+                  value: vis,
+                  onChanged: (v) => setS(() => vis = v ?? true),
+                  title: const Text('有画面'),
+                  subtitle: const Text('彩色背景+标题（关=纯黑，当音频）')),
+            ]),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(x, false),
+                child: const Text('取消')),
+            FilledButton(
+                onPressed: () => Navigator.pop(x, true),
+                child: const Text('生成')),
+          ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(x), child: const Text('取消')),
-          FilledButton(
-              onPressed: () => Navigator.pop(x, c.text.trim()),
-              child: const Text('生成')),
-        ],
       ),
     );
-    if (topic == null || topic.isEmpty || !mounted) return;
+    if (go != true || c.text.trim().isEmpty || !mounted) return;
+    if (!voice && !vis) {
+      ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('配音和画面至少选一个')));
+      return;
+    }
     setState(() => _busy = true);
     showDialog<void>(
       context: context,
@@ -999,11 +1038,12 @@ class _AiPageState extends State<AiPage> {
         content: Column(mainAxisSize: MainAxisSize.min, children: [
           LinearProgressIndicator(),
           SizedBox(height: 12),
-          Text('AI 写脚本 + 配音 + 合成，约 1~2 分钟'),
+          Text('AI 写脚本 + 配音 + 字幕 + 合成，约 15~60 秒'),
         ]),
       ),
     );
-    final d = await AccountService.aiVideo(topic);
+    final d = await AccountService.aiVideo(c.text.trim(),
+        title: t.text.trim(), subtitle: sub, voice: voice, visual: vis);
     if (mounted) Navigator.of(context).pop();
     if (!mounted) return;
     setState(() => _busy = false);

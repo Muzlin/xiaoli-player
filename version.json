@@ -1,6 +1,6 @@
 {
-  "version": "2.76.0",
-  "notes": "新增系统工具页 /sysmon(CPU/内存/温度/磁盘/电池/网络，2秒自动刷新)；AI知道用sysmon而不是乱跑命令；后台AI单实例修复+超时重试",
+  "version": "2.77.0",
+  "notes": "AI生成视频可选：是否有字幕、是否有配音、是否有画面(纯黑当音频)；用drawtext逐句字幕更稳；系统工具页/sysmon；后台AI强制纠正+超时重试",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
