@@ -842,6 +842,102 @@ class _AiPageState extends State<AiPage> {
         if (sentences == 0) return '无内容';
         final avg = t.length / sentences;
         return '平均句长 ${avg.toStringAsFixed(1)} 字 —— ${avg < 20 ? '很易懂' : avg < 35 ? '适中' : '偏长，建议拆句'}';
+      case 'uuid_short':
+        final r = Random.secure();
+        return List.generate(12, (_) => r.nextInt(16).toRadixString(16)).join();
+      case 'rand_string':
+        const cs = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+        final n = (int.tryParse('${p['n'] ?? '8'}') ?? 8).clamp(1, 64);
+        final r = Random.secure();
+        return List.generate(n, (_) => cs[r.nextInt(cs.length)]).join();
+      case 'rand_hex':
+        final n = (int.tryParse('${p['n'] ?? '8'}') ?? 8).clamp(1, 64);
+        final r = Random.secure();
+        return List.generate(n, (_) => r.nextInt(16).toRadixString(16)).join();
+      case 'rand_pick_multi':
+        final opts = t.split(RegExp(r'[,，、\s]+')).where((s) => s.isNotEmpty).toList();
+        final n = (int.tryParse('${p['n'] ?? '1'}') ?? 1).clamp(1, opts.length == 0 ? 1 : opts.length);
+        opts.shuffle();
+        return opts.take(n).join('、');
+      case 'coin_flip_multi':
+        final n = (int.tryParse('${p['n'] ?? '5'}') ?? 5).clamp(1, 100);
+        final r = Random();
+        final out = List.generate(n, (_) => r.nextBool() ? '正' : '反').join(' ');
+        final z = out.split(' ').where((x) => x == '正').length;
+        return '$out\n正 $z 次，反 ${n - z} 次';
+      case 'char_code':
+        return t.runes.map((c) => '$c').join(' ');
+      case 'code_to_char':
+        final ns = RegExp(r'\d+').allMatches(t).map((m) => int.parse(m.group(0)!)).toList();
+        return ns.map((c) => String.fromCharCode(c)).join();
+      case 'count_punctuation':
+        final m = RegExp(r'[\p{P}\p{S}]', unicode: true).allMatches(t).length;
+        return '标点/符号：$m 个';
+      case 'replace_text':
+        final a = '${p['a'] ?? ''}';
+        final b = '${p['b'] ?? ''}';
+        return a.isEmpty ? '需要 a(被替换) 和 b(替换为)' : t.replaceAll(a, b);
+      case 'insert_at':
+        final n = (int.tryParse('${p['n'] ?? '0'}') ?? 0).clamp(0, t.length);
+        final s = '${p['s'] ?? ''}';
+        return t.substring(0, n) + s + t.substring(n);
+      case 'substring':
+        final a = (int.tryParse('${p['a'] ?? '0'}') ?? 0).clamp(0, t.length);
+        final b = (int.tryParse('${p['b'] ?? '${t.length}'}') ?? t.length).clamp(0, t.length);
+        return a <= b ? t.substring(a, b) : t.substring(b, a);
+      case 'split_by':
+        final sep = '${p['sep'] ?? ','}';
+        return t.split(sep).map((s) => s.trim()).where((s) => s.isNotEmpty).join('\n');
+      case 'repeat_char':
+        final n = (int.tryParse('${p['n'] ?? '10'}') ?? 10).clamp(1, 5000);
+        final c = t.isEmpty ? '*' : t[0];
+        return List.filled(n, c).join();
+      case 'center_text':
+        final n = (int.tryParse('${p['n'] ?? '30'}') ?? 30).clamp(1, 500);
+        if (t.length >= n) return t;
+        final pad = (n - t.length) ~/ 2;
+        return ' ' * pad + t;
+      case 'left_pad':
+        final n = (int.tryParse('${p['n'] ?? '10'}') ?? 10).clamp(1, 500);
+        return t.padLeft(n, '${p['c'] ?? ' '}');
+      case 'right_pad':
+        final n = (int.tryParse('${p['n'] ?? '10'}') ?? 10).clamp(1, 500);
+        return t.padRight(n, '${p['c'] ?? ' '}');
+      case 'snake_to_title':
+        return t.split(RegExp(r'[\s_\-]+')).where((s) => s.isNotEmpty)
+            .map((s) => s[0].toUpperCase() + s.substring(1)).join(' ');
+      case 'strip_ansi':
+        return t.replaceAll(RegExp(r'\x1B\[[0-9;]*[A-Za-z]'), '');
+      case 'collapse_spaces':
+        return t.replaceAll(RegExp(r'[ \t]+'), ' ');
+      case 'tabs_to_spaces':
+        final n = (int.tryParse('${p['n'] ?? '4'}') ?? 4).clamp(1, 16);
+        return t.replaceAll('\t', ' ' * n);
+      case 'number_range':
+        final a = int.tryParse('${p['a'] ?? '1'}') ?? 1;
+        final b = int.tryParse('${p['b'] ?? '10'}') ?? 10;
+        final s = (int.tryParse('${p['s'] ?? '1'}') ?? 1).clamp(1, 1000);
+        final out = <int>[];
+        if (a <= b) {
+          for (var i = a; i <= b && out.length < 1000; i += s) {
+            out.add(i);
+          }
+        } else {
+          for (var i = a; i >= b && out.length < 1000; i -= s) {
+            out.add(i);
+          }
+        }
+        return out.join(' ');
+      case 'char_range':
+        final a = t.isEmpty ? 65 : t.codeUnitAt(0);
+        final n = (int.tryParse('${p['n'] ?? '10'}') ?? 10).clamp(1, 200);
+        return String.fromCharCodes(List.generate(n, (i) => a + i));
+      case 'count_chars':
+        return '字符种类：${t.split('').toSet().length}　总字符：${t.length}';
+      case 'reverse_words':
+        return t.split(' ').reversed.join(' ');
+      case 'title_each_word':
+        return t.split(' ').map((w) => w.isEmpty ? w : w[0].toUpperCase() + w.substring(1)).join(' ');
       default:
         return null;
     }

@@ -1,6 +1,6 @@
 {
-  "version": "2.78.0",
-  "notes": "AI可打开相机(Photo Booth)和录像(QuickTime)；命中相机/录像时强制纠错，不再回“不支持”",
+  "version": "2.79.0",
+  "notes": "AI再加50功能：后台25个(在线/最近登录订单视频用户/封禁禁言VIP列表/余额与大小分布/标签统计等)；客户端25个(随机串/编码/替换截取/填充/去ANSI/数列生成等)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
