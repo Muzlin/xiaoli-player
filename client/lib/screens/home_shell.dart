@@ -5022,7 +5022,11 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
         children: [
           const SizedBox(height: 20),
           Icon(Icons.music_video, color: cs.primary, size: 30),
-          const SizedBox(height: 24),
+          const SizedBox(height: 12),
+          Expanded(
+            child: SingleChildScrollView(
+              child: Column(
+                children: [
           _navIcon(Icons.library_music, 0, cs),
           _navIcon(Icons.favorite, 1, cs),
           _navIcon(Icons.video_library, 2, cs),
@@ -5180,7 +5184,10 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
             ),
           ),
           _navIcon(Icons.settings, 3, cs),
-          const Spacer(),
+                ],
+              ),
+            ),
+          ),
         ],
       ),
     );
