@@ -1,6 +1,6 @@
 {
-  "version": "2.79.0",
-  "notes": "AI再加50功能：后台25个(在线/最近登录订单视频用户/封禁禁言VIP列表/余额与大小分布/标签统计等)；客户端25个(随机串/编码/替换截取/填充/去ANSI/数列生成等)",
+  "version": "2.80.0",
+  "notes": "新增按钮：后台「快捷按钮(25)」(导出配置/数据/审计、测试AI、模型管理、GPU/温度/进程)；客户端「AI工具箱」页(25个按钮：字数/计算/密码/UUID/JSON/Base64/URL/大小写/去重排序/千分位/罗马数字/质数/阶乘/打码/提取链接)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"

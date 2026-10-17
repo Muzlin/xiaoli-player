@@ -35,6 +35,7 @@ import 'recharge_page.dart';
 import 'account_page.dart';
 import 'ai_page.dart';
 import 'ai_trainer_page.dart';
+import 'ai_tools_page.dart';
 import 'admin_console_page.dart';
 import 'license_pages_zh.dart';
 import 'live_page.dart';
@@ -5107,6 +5108,33 @@ final Map<String, int> _resume = {}; // 断点续播：track key→秒
                   ),
                   const SizedBox(height: 3),
                   const Text('训练师',
+                      style: TextStyle(fontSize: 10, color: Colors.white70)),
+                ],
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 6),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute<void>(
+                      builder: (_) => const AiToolsPage())),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 40,
+                    height: 40,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: Colors.white12,
+                    ),
+                    child: const Icon(Icons.widgets_outlined,
+                        color: Colors.white, size: 22),
+                  ),
+                  const SizedBox(height: 3),
+                  const Text('AI工具',
                       style: TextStyle(fontSize: 10, color: Colors.white70)),
                 ],
               ),
