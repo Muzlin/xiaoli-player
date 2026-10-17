@@ -1,6 +1,6 @@
 {
-  "version": "2.81.0",
-  "notes": "侧边栏改为可滚动（窗口较矮时也能看到训练师/AI工具）",
+  "version": "2.82.0",
+  "notes": "新增「工具大全」分类：后台100个统计按钮(钱包/账号/视频/订单)；客户端「工具大全」页100个按钮(统计/变换/编码/提取/生成/数字/日期/文本)",
   "macos": "xiaoli-player-macos.zip",
   "android": "xiaoli-player-android.apk",
   "windows": "xiaoli-player-windows.zip"
